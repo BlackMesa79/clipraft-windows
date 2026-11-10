@@ -55,7 +55,10 @@ pub fn decode_dib(b: &[u8]) -> Option<DynamicImage> {
     }
     let h = height.unsigned_abs();
     let w = w as u32;
-    if w > 16384 || h > 16384 || w as u64 * h as u64 > 32_000_000 {
+    if w > 16384
+        || h > 16384
+        || w as u64 * h as u64 > crate::storage::crypto::MAX_PLAIN_BYTES as u64 / 4
+    {
         return None;
     }
     let bits = u16::from_le_bytes(b.get(14..16)?.try_into().ok()?);
@@ -146,7 +149,7 @@ fn decode_image(bytes: &[u8]) -> Option<DynamicImage> {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(16384);
     limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(128 * 1024 * 1024);
+    limits.max_alloc = Some(crate::storage::crypto::MAX_PLAIN_BYTES as u64);
     reader.limits(limits);
     reader.decode().ok()
 }

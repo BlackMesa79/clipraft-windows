@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInPlace, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use hkdf::Hkdf;
@@ -26,7 +26,7 @@ pub fn derive(master: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// 只有至少节省 5% 才采用 CM02，整数比较避免浮点误差和乘法溢出。
 pub fn compress_payload(plain: &[u8]) -> Result<Option<Vec<u8>>> {
     if plain.len() > MAX_PLAIN_BYTES {
-        bail!("对象明文超过 128 MiB 上限");
+        bail!("对象明文超过 512 MiB 上限");
     }
     if crate::thumbnail::preview_mime(plain).is_some() || plain.is_empty() {
         return Ok(None);
@@ -41,7 +41,7 @@ fn compression_worthwhile(plain_len: usize, compressed_len: usize) -> bool {
 }
 
 /// 与剪贴板采集共享上限；CM01 读取保持旧格式兼容。
-pub const MAX_PLAIN_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_PLAIN_BYTES: usize = 512 * 1024 * 1024;
 
 /// 保留 CM01 编码入口，供旧库兼容及已压缩的 PNG/JPEG 对象使用。
 pub fn encrypt(key: &[u8; 32], id: &str, plain: &[u8]) -> Result<Vec<u8>> {
@@ -54,9 +54,28 @@ pub(super) enum CompressedPayload {
     Predicted(Vec<u8>),
 }
 
-/// 纯函数：保留 CM02/CM01 基线；CM03 只有更小且至少节省 5% 才替换。
+/// 纯函数：64 MiB 以内比较 CM02；更大载荷优先 CM03，收益不足才回退。
 pub(super) fn select_payload(plain: &[u8]) -> Result<CompressedPayload> {
-    let baseline = compress_payload(plain)?;
+    select_payload_with_threshold(plain, 64 * 1024 * 1024)
+}
+fn select_payload_with_threshold(plain: &[u8], threshold: usize) -> Result<CompressedPayload> {
+    select_payload_impl(plain, threshold, compress_payload)
+}
+fn select_payload_impl(
+    plain: &[u8],
+    threshold: usize,
+    mut compress_baseline: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>>,
+) -> Result<CompressedPayload> {
+    if plain.len() > MAX_PLAIN_BYTES {
+        bail!("对象明文超过 512 MiB 上限");
+    }
+    let large = plain.len() > threshold;
+    // 大位图不同时构造 CM02 候选；CM03 不适用或收益不足才回退。
+    let baseline = if large {
+        None
+    } else {
+        compress_baseline(plain)?
+    };
     if crate::thumbnail::preview_mime(plain).is_none() && plain.len() < MAX_PLAIN_BYTES {
         if let Some(predicted) = super::predict::encode(plain) {
             let compressed = zstd::bulk::compress(&predicted, 3)?;
@@ -69,6 +88,11 @@ pub(super) fn select_payload(plain: &[u8]) -> Result<CompressedPayload> {
             }
         }
     }
+    let baseline = if large {
+        compress_baseline(plain)?
+    } else {
+        baseline
+    };
     Ok(match baseline {
         Some(bytes) => CompressedPayload::Zstd(bytes),
         None => CompressedPayload::Raw,
@@ -110,14 +134,17 @@ fn seal(
 ) -> Result<Vec<u8>> {
     let mut nonce = [0u8; 24];
     getrandom::fill(&mut nonce).map_err(|_| anyhow!("系统随机数不可用"))?;
-    let body = XChaCha20Poly1305::new(key.into())
-        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
-        .map_err(|_| anyhow!("对象加密失败"))?;
-    let mut out = Vec::with_capacity(4 + header.len() + nonce.len() + body.len());
+    // 直接在最终对象缓冲中加密，避免 body 与 out 同时持有整份密文。
+    let prefix = 4 + header.len() + nonce.len();
+    let mut out = Vec::with_capacity(prefix + plain.len() + 16);
     out.extend_from_slice(magic);
     out.extend_from_slice(header);
     out.extend_from_slice(&nonce);
-    out.extend_from_slice(&body);
+    out.extend_from_slice(plain);
+    let tag = XChaCha20Poly1305::new(key.into())
+        .encrypt_in_place_detached(XNonce::from_slice(&nonce), aad, &mut out[prefix..])
+        .map_err(|_| anyhow!("对象加密失败"))?;
+    out.extend_from_slice(&tag);
     Ok(out)
 }
 pub fn decrypt(key: &[u8; 32], id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
@@ -251,7 +278,7 @@ mod tests {
     }
     #[test]
     fn cm02_output_limit_inclusive_and_excess_returns_error() {
-        // 同一生产入口缩小预算，覆盖输出上限而无需分配 128 MiB。
+        // 同一生产入口缩小预算，覆盖输出上限而无需分配 512 MiB。
         let plain = vec![7; 4096];
         let bytes = encrypt_blob(&[1; 32], "id", &plain).unwrap();
         assert_eq!(
@@ -439,5 +466,42 @@ mod cm03_tests {
         )
         .unwrap();
         assert_eq!(decrypt(&[1; 32], "id", &bytes).unwrap(), plain);
+    }
+}
+
+#[cfg(test)]
+mod large_object_tests {
+    use super::*;
+    #[test]
+    fn oversized_cm02_and_cm03_headers_reject_before_authentication_or_allocation() {
+        for magic in [b"CM02", b"CM03"] {
+            // 输入仅 52 字节且未认证，必须在 AEAD 和解压分配之前拒绝。
+            let mut blob = vec![0u8; 52];
+            blob[..4].copy_from_slice(magic);
+            blob[4..12].copy_from_slice(&(MAX_PLAIN_BYTES as u64 + 1).to_le_bytes());
+            assert_eq!(
+                decrypt(&[0; 32], "id", &blob).unwrap_err().to_string(),
+                "对象解压长度超过上限"
+            );
+        }
+    }
+    #[test]
+    fn large_policy_uses_cm03_without_cm02_comparison() {
+        let plain = crate::storage::prediction_tests::sample("solid", 640, 480);
+        let expected =
+            zstd::bulk::compress(&super::super::predict::encode(&plain).unwrap(), 3).unwrap();
+        // 若误做 CM02 对比，回调会立刻失败，避免依赖某种样本的压缩比。
+        assert_eq!(
+            select_payload_impl(&plain, 1, |_| panic!("大位图不应压缩 CM02 对比候选")).unwrap(),
+            CompressedPayload::Predicted(expected)
+        );
+    }
+    #[test]
+    fn large_policy_falls_back_when_prediction_unavailable() {
+        let plain = vec![42; 8192];
+        assert_eq!(
+            select_payload_with_threshold(&plain, 1).unwrap(),
+            CompressedPayload::Zstd(compress_payload(&plain).unwrap().unwrap())
+        );
     }
 }

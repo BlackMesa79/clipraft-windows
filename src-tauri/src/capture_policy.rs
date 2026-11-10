@@ -7,14 +7,33 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureError {
     Busy,
-    Limit,
+    Limit {
+        actual: usize,
+        limit: usize,
+        image: bool,
+    },
     Invalid,
 }
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::Limit {
+            actual,
+            limit,
+            image,
+        } = self
+        {
+            let mib = 1024 * 1024;
+            return write!(
+                f,
+                "{}过大（约 {}MB），超过 {}MB 上限，未记录",
+                if *image { "图片" } else { "剪贴板数据" },
+                actual.div_ceil(mib),
+                limit / mib
+            );
+        }
         f.write_str(match self {
             Self::Busy => "剪贴板被其他程序长时间占用，本次复制未记录",
-            Self::Limit => "剪贴板数据超过 128 MiB 限制，本次复制未记录",
+            Self::Limit { .. } => unreachable!(),
             Self::Invalid => "剪贴板格式无效或数据不可读，本次复制未记录",
         })
     }
@@ -77,7 +96,7 @@ pub fn run<T>(
         Ok(Some(_)) => "ok",
         Ok(None) => "skipped",
         Err(CaptureError::Busy) => "busy",
-        Err(CaptureError::Limit) => "limit",
+        Err(CaptureError::Limit { .. }) => "limit",
         Err(CaptureError::Invalid) => "invalid",
     };
     log(format!("capture sequence={sequence} current={} self_write={} busy={busy} retries={retries} result={status} reason={reason}", current.sequence, current.self_write));
@@ -292,7 +311,14 @@ mod tests {
     fn invalid_and_limit_do_not_retry_and_each_reports_once() {
         for (error, status) in [
             (CaptureError::Invalid, "invalid"),
-            (CaptureError::Limit, "limit"),
+            (
+                CaptureError::Limit {
+                    actual: 600 * 1024 * 1024,
+                    limit: crate::storage::crypto::MAX_PLAIN_BYTES,
+                    image: true,
+                },
+                "limit",
+            ),
         ] {
             let last = AtomicU32::new(0);
             let mut logs = Vec::new();
@@ -323,7 +349,12 @@ mod tests {
             CaptureError::Invalid.to_string()
         );
         assert_ne!(
-            CaptureError::Limit.to_string(),
+            CaptureError::Limit {
+                actual: 600 * 1024 * 1024,
+                limit: crate::storage::crypto::MAX_PLAIN_BYTES,
+                image: true
+            }
+            .to_string(),
             CaptureError::Invalid.to_string()
         );
     }

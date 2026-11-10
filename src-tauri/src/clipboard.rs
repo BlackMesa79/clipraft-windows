@@ -33,10 +33,21 @@ pub const SUPPORTED: [(&str, u32); 8] = [
 ];
 const MAX_BYTES: usize = crate::storage::crypto::MAX_PLAIN_BYTES;
 #[derive(Debug)]
-struct CaptureLimit;
+struct CaptureLimit {
+    actual: usize,
+    limit: usize,
+    image: bool,
+}
 impl std::fmt::Display for CaptureLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("剪贴板总大小超出限制")
+        std::fmt::Display::fmt(
+            &CaptureError::Limit {
+                actual: self.actual,
+                limit: self.limit,
+                image: self.image,
+            },
+            f,
+        )
     }
 }
 impl std::error::Error for CaptureLimit {}
@@ -57,8 +68,12 @@ pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Clip>, CaptureE
         snapshot,
         |sequence| {
             capture_at(hwnd, sequence).map_err(|error| {
-                if error.is::<CaptureLimit>() {
-                    CaptureError::Limit
+                if let Some(limit) = error.downcast_ref::<CaptureLimit>() {
+                    CaptureError::Limit {
+                        actual: limit.actual,
+                        limit: limit.limit,
+                        image: limit.image,
+                    }
                 } else {
                     error
                         .downcast_ref::<CaptureError>()
@@ -102,14 +117,22 @@ fn open(hwnd: HWND) -> Result<OpenGuard> {
     bail!("剪贴板被其他程序占用")
 }
 unsafe fn read_raw(id: u32) -> Result<Option<Vec<u8>>> {
+    read_raw_limited(id, MAX_BYTES)
+}
+unsafe fn read_raw_limited(id: u32, limit: usize) -> Result<Option<Vec<u8>>> {
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
     }
     let h = GetClipboardData(id)?;
     let global = HGLOBAL(h.0);
     let size = GlobalSize(global);
-    if size > MAX_BYTES {
-        return Err(CaptureLimit.into());
+    if size > limit {
+        return Err(CaptureLimit {
+            actual: size,
+            limit,
+            image: matches!(id, 8 | 17),
+        }
+        .into());
     }
     if size == 0 {
         bail!("格式大小无效");
@@ -195,13 +218,28 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
                 return Ok(None);
             }
         }
-        collect_formats(|name| read_format(name), MAX_BYTES)
+        collect_formats_with_budget(|name, budget| read_format_limited(name, budget), MAX_BYTES)
     }
 }
+#[cfg(test)]
 unsafe fn read_format(name: &str) -> Result<Option<Vec<u8>>> {
+    read_format_limited(name, MAX_BYTES)
+}
+unsafe fn read_format_limited(name: &str, budget: usize) -> Result<Option<Vec<u8>>> {
     let id = format_id(name);
     if name != "CF_HDROP" {
-        return read_raw(id);
+        return read_raw_limited(id, budget).map_err(|error| {
+            if let Some(limit) = error.downcast_ref::<CaptureLimit>() {
+                CaptureLimit {
+                    actual: limit.actual,
+                    limit: limit.limit,
+                    image: matches!(name, "CF_DIBV5" | "CF_DIB" | "PNG"),
+                }
+                .into()
+            } else {
+                error
+            }
+        });
     }
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
@@ -226,18 +264,74 @@ unsafe fn read_format(name: &str) -> Result<Option<Vec<u8>>> {
     }
     Ok(Some(encode_hdrop(&paths)))
 }
+/// 无 IO 的格式选择；读取前用 size=0 排除冗余 DIB。
+#[derive(Debug, PartialEq, Eq)]
+enum FormatChoice {
+    Keep,
+    Redundant,
+}
+fn select_format(
+    name: &str,
+    size: usize,
+    total: usize,
+    has_v5: bool,
+    limit: usize,
+) -> std::result::Result<FormatChoice, CaptureLimit> {
+    if name == "CF_DIB" && has_v5 {
+        return Ok(FormatChoice::Redundant);
+    }
+    if size > limit || total.saturating_add(size) > limit {
+        return Err(CaptureLimit {
+            actual: total.saturating_add(size),
+            limit,
+            image: matches!(name, "CF_DIBV5" | "CF_DIB" | "PNG"),
+        });
+    }
+    Ok(FormatChoice::Keep)
+}
+#[cfg(test)]
 fn collect_formats(
     mut read: impl FnMut(&str) -> Result<Option<Vec<u8>>>,
+    limit: usize,
+) -> Result<Option<Clip>> {
+    collect_formats_with_budget(|name, _| read(name), limit)
+}
+fn collect_formats_with_budget(
+    mut read: impl FnMut(&str, usize) -> Result<Option<Vec<u8>>>,
     limit: usize,
 ) -> Result<Option<Clip>> {
     let mut clip = Clip::default();
     let mut total = 0usize;
     let mut invalid = false;
+    let mut exceeded: Option<CaptureLimit> = None;
     for (name, _) in SUPPORTED {
-        let bytes = match read(name) {
+        let has_v5 = clip.get("CF_DIBV5").is_some();
+        if matches!(
+            select_format(name, 0, total, has_v5, limit),
+            Ok(FormatChoice::Redundant)
+        ) {
+            crate::diag::write(format!("capture skip format={name} reason=redundant_dib"));
+            continue;
+        }
+        let bytes = match read(name, limit.saturating_sub(total)) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => continue,
-            Err(e) if e.is::<CaptureLimit>() => return Err(e),
+            Err(e) if e.is::<CaptureLimit>() => {
+                let mut skipped = e.downcast::<CaptureLimit>().unwrap();
+                crate::diag::write(format!(
+                    "capture skip format={name} bytes={} total={total} limit={limit} reason=read_limit",
+                    skipped.actual
+                ));
+                skipped.actual = total.saturating_add(skipped.actual);
+                skipped.limit = limit;
+                if exceeded
+                    .as_ref()
+                    .is_none_or(|old| old.actual < skipped.actual)
+                {
+                    exceeded = Some(skipped);
+                }
+                continue;
+            }
             Err(_) => {
                 invalid |= name != "Preferred DropEffect";
                 // 只记录固定格式名，不输出内容、路径或底层错误文本。
@@ -245,21 +339,31 @@ fn collect_formats(
                 continue;
             }
         };
-        total = total.saturating_add(bytes.len());
-        if total > limit {
-            return Err(CaptureLimit.into());
+        if let Err(skipped) = select_format(name, bytes.len(), total, has_v5, limit) {
+            crate::diag::write(format!("capture skip format={name} bytes={} total={total} limit={limit} reason=capture_limit", bytes.len()));
+            if exceeded
+                .as_ref()
+                .is_none_or(|old| old.actual < skipped.actual)
+            {
+                exceeded = Some(skipped);
+            }
+            continue;
         }
         if bytes.is_empty() || (name == "Preferred DropEffect" && bytes.len() < 4) {
             invalid |= name != "Preferred DropEffect";
             eprintln!("剪贴板格式长度无效，已跳过：{name}");
             continue;
         }
+        total += bytes.len();
         clip.formats.push(FormatData {
             name: name.into(),
             bytes: normalize(name, bytes),
         });
     }
-    if clip.get("CF_HDROP").is_some() && clip.get("Preferred DropEffect").is_none() {
+    if clip.get("CF_HDROP").is_some()
+        && clip.get("Preferred DropEffect").is_none()
+        && total.saturating_add(4) <= limit
+    {
         clip.formats.push(FormatData {
             name: "Preferred DropEffect".into(),
             bytes: 1u32.to_le_bytes().to_vec(),
@@ -270,6 +374,9 @@ fn collect_formats(
         .iter()
         .all(|f| f.name == "Preferred DropEffect")
     {
+        if let Some(exceeded) = exceeded {
+            return Err(exceeded.into());
+        }
         if invalid {
             return Err(CaptureError::Invalid.into());
         }
@@ -667,6 +774,40 @@ mod system_tests {
     }
 
     #[test]
+    fn v5_and_dib_never_read_redundant_dib_from_private_clipboard() {
+        let _lock = lock();
+        init();
+        let _cleanup = Cleanup;
+        let mut v5 = vec![0u8; 128];
+        for (offset, value) in [(0, 124u32), (4, 1), (8, 1), (20, 4)] {
+            v5[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        v5[12] = 1;
+        v5[14] = 32;
+        let mut dib = vec![0u8; 44];
+        dib[..40].copy_from_slice(&v5[..40]);
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        set_formats(&[("CF_DIBV5", &v5), ("CF_DIB", &dib)]);
+        let _guard = open(HWND::default()).unwrap();
+        let mut dib_reads = 0;
+        let mut v5_reads = 0;
+        let clip = collect_formats(
+            |name| {
+                dib_reads += usize::from(name == "CF_DIB");
+                v5_reads += usize::from(name == "CF_DIBV5");
+                unsafe { super::read_format(name) }
+            },
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v5_reads, 1);
+        assert_eq!(dib_reads, 0);
+        assert!(clip.get("CF_DIBV5").is_some());
+        assert!(clip.get("CF_DIB").is_none());
+    }
+
+    #[test]
     fn plain_write_requires_text_and_write_is_owned() {
         let _lock = lock();
         init();
@@ -896,28 +1037,42 @@ mod tests {
         assert_eq!(clip.kind(), "image");
     }
     #[test]
-    fn capture_limit_after_success_still_rejects_whole_record() {
-        // 已成功读到部分格式后遇到总量上限，必须整条拒绝，不能只保存前半部分。
+    fn capture_limit_after_success_keeps_other_formats() {
+        // 超限格式不应阻止已有的有效内容。
         let error = collect_formats(
             |name| match name {
                 "CF_UNICODETEXT" => Ok(Some(vec![65, 0, 0, 0])),
-                "HTML Format" => Err(CaptureLimit.into()),
+                "HTML Format" => Err(CaptureLimit {
+                    actual: MAX_BYTES + 1,
+                    limit: MAX_BYTES,
+                    image: false,
+                }
+                .into()),
                 _ => Ok(None),
             },
             MAX_BYTES,
         )
-        .unwrap_err();
-        assert!(error.is::<CaptureLimit>());
+        .unwrap()
+        .unwrap();
+        assert_eq!(error.text().as_deref(), Some("A"));
     }
     #[test]
-    fn total_limit_rejects_entire_record() {
-        // 小预算验证边界，避免为测试分配 128 MiB。
+    fn total_limit_keeps_formats_within_budget() {
+        // 小预算验证边界，避免为测试分配 512 MiB。
         let read = |name: &str| Ok(matches!(name, "HTML Format" | "PNG").then(|| vec![1; 4]));
         assert!(collect_formats(read, 8).unwrap().is_some());
-        assert!(collect_formats(read, 7).unwrap_err().is::<CaptureLimit>());
-        assert!(collect_formats(|_| Err(CaptureLimit.into()), MAX_BYTES)
-            .unwrap_err()
-            .is::<CaptureLimit>());
+        assert_eq!(collect_formats(read, 7).unwrap().unwrap().formats.len(), 1);
+        assert!(collect_formats(
+            |_| Err(CaptureLimit {
+                actual: MAX_BYTES + 1,
+                limit: MAX_BYTES,
+                image: false
+            }
+            .into()),
+            MAX_BYTES
+        )
+        .unwrap_err()
+        .is::<CaptureLimit>());
     }
     #[test]
     fn short_drop_effect_is_discarded_and_files_default_to_copy() {
@@ -1088,5 +1243,157 @@ mod write_selection_tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod large_capture_tests {
+    use super::*;
+    fn choose(entries: &[(&str, usize)], limit: usize) -> Vec<String> {
+        let mut total = 0;
+        let mut v5 = false;
+        entries
+            .iter()
+            .filter_map(|&(name, size)| {
+                if !matches!(
+                    select_format(name, size, total, v5, limit),
+                    Ok(FormatChoice::Keep)
+                ) {
+                    return None;
+                }
+                total += size;
+                v5 |= name == "CF_DIBV5";
+                Some(name.to_owned())
+            })
+            .collect()
+    }
+    #[test]
+    fn pure_selection_prefers_v5() {
+        assert_eq!(
+            choose(&[("CF_DIBV5", 14), ("CF_DIB", 10)], 20),
+            ["CF_DIBV5"]
+        );
+    }
+    #[test]
+    fn pure_selection_falls_back_to_dib() {
+        assert_eq!(choose(&[("CF_DIBV5", 21), ("CF_DIB", 10)], 20), ["CF_DIB"]);
+    }
+    #[test]
+    fn pure_selection_keeps_text_when_images_exceed_limit() {
+        assert_eq!(
+            choose(
+                &[("CF_UNICODETEXT", 4), ("CF_DIBV5", 21), ("CF_DIB", 22)],
+                20
+            ),
+            ["CF_UNICODETEXT"]
+        );
+    }
+    #[test]
+    fn all_oversize_reports_actual_size() {
+        let mib = 1024 * 1024;
+        assert!(choose(&[("CF_DIBV5", 600 * mib), ("CF_DIB", 550 * mib)], MAX_BYTES).is_empty());
+        let pure_error = select_format("CF_DIBV5", 600 * mib, 0, false, MAX_BYTES).unwrap_err();
+        assert_eq!(
+            pure_error.to_string(),
+            "图片过大（约 600MB），超过 512MB 上限，未记录"
+        );
+        let error = collect_formats(
+            |name| match name {
+                "CF_DIBV5" | "CF_DIB" => Err(CaptureLimit {
+                    actual: if name == "CF_DIBV5" {
+                        600 * mib
+                    } else {
+                        550 * mib
+                    },
+                    limit: MAX_BYTES,
+                    image: true,
+                }
+                .into()),
+                _ => Ok(None),
+            },
+            MAX_BYTES,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CaptureLimit>().unwrap().actual,
+            600 * mib
+        );
+        assert_eq!(
+            error.to_string(),
+            "图片过大（约 600MB），超过 512MB 上限，未记录"
+        );
+    }
+    #[test]
+    fn oversize_v5_read_error_falls_back_before_normalizing() {
+        let clip = collect_formats(
+            |name| match name {
+                "CF_DIBV5" => Err(CaptureLimit {
+                    actual: 21,
+                    limit: 20,
+                    image: true,
+                }
+                .into()),
+                "CF_DIB" => Ok(Some(vec![0; 10])),
+                _ => Ok(None),
+            },
+            20,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(clip.get("CF_DIBV5").is_none());
+        assert_eq!(clip.get("CF_DIB").unwrap().len(), 10);
+    }
+    #[test]
+    fn remaining_budget_is_passed_without_reading_redundant_dib() {
+        let mut calls = Vec::new();
+        let clip = collect_formats_with_budget(
+            |name, budget| {
+                calls.push((name.to_owned(), budget));
+                Ok(match name {
+                    "CF_UNICODETEXT" => Some(vec![65, 0, 0, 0]),
+                    "CF_DIBV5" => Some(vec![0; 10]),
+                    _ => None,
+                })
+            },
+            20,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(clip.formats.len(), 2);
+        assert!(calls.contains(&("CF_DIBV5".into(), 16)));
+        assert!(!calls.iter().any(|(name, _)| name == "CF_DIB"));
+    }
+    #[test]
+    fn default_drop_effect_respects_total_budget() {
+        let paths = encode_hdrop(&[r"C:\synthetic.txt".into()]);
+        let clip = collect_formats(
+            |name| Ok((name == "CF_HDROP").then(|| paths.clone())),
+            paths.len(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(clip.formats.len(), 1);
+        assert_eq!(clip.get("CF_HDROP"), Some(paths.as_slice()));
+        // 写回层已有默认复制语义，采集层不为合成的四字节越过预算。
+        assert!(clip.get("Preferred DropEffect").is_none());
+    }
+    #[test]
+    fn all_image_errors_keep_text() {
+        let clip = collect_formats(
+            |name| match name {
+                "CF_DIBV5" | "CF_DIB" | "PNG" => Err(CaptureLimit {
+                    actual: 21,
+                    limit: 20,
+                    image: true,
+                }
+                .into()),
+                "CF_UNICODETEXT" => Ok(Some(vec![65, 0, 0, 0])),
+                _ => Ok(None),
+            },
+            20,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(clip.text().as_deref(), Some("A"));
     }
 }

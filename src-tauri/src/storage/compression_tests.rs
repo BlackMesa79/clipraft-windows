@@ -386,3 +386,80 @@ fn jpeg_previews_are_registered_and_raw_image_is_not_protocol_accessible() {
         );
     }
 }
+
+fn large_roundtrip(width: u32, height: u32, paste: bool) {
+    let root = TestRoot::new("large-image");
+    let mut store = Storage::open(&root.0, &[63; 32]).unwrap();
+    let clip = Clip {
+        formats: vec![FormatData {
+            name: "CF_DIBV5".into(),
+            bytes: if paste && std::env::var_os("CLIPBOARD_LARGE_PHOTO").is_some() {
+                super::prediction_tests::sample("photo", width as usize, height as usize)
+            } else {
+                dibv5(width, height)
+            },
+        }],
+    };
+    let id = clip.hash();
+    let start = Instant::now();
+    store.save(&clip).unwrap();
+    let save_ms = start.elapsed().as_secs_f64() * 1000.;
+    let view = store.list().unwrap().remove(0);
+    assert!(view.placeholder.is_none());
+    for id in [view.thumbnail.unwrap(), view.preview.unwrap()] {
+        let preview = store.read_thumbnail(&id).unwrap();
+        let decoded = image::load_from_memory(&preview).unwrap();
+        assert!(decoded.width() <= 800 && decoded.height() <= 800);
+    }
+    let bytes = clip.formats[0].bytes.len();
+    let digest = model::digest(&clip.formats[0].bytes);
+    let blob = fs::read(store.blobs.join(&digest)).unwrap();
+    if bytes > 64 * 1024 * 1024 {
+        assert_eq!(&blob[..4], b"CM03");
+    }
+    let blob_bytes = blob.len();
+    drop(blob);
+    let start = Instant::now();
+    let loaded = store.load(&id).unwrap();
+    let load_ms = start.elapsed().as_secs_f64() * 1000.;
+    assert_eq!(loaded.formats, clip.formats);
+    drop(loaded);
+    // 粘贴计时前释放原图，使持有关系与生产 load -> write 一致。
+    drop(clip);
+    let mut paste_ms = 0.;
+    if paste {
+        let _private = crate::test_support::PrivateClipboard::new();
+        let _ = crate::clipboard::initialize();
+        let start = Instant::now();
+        let loaded = store.load(&id).unwrap();
+        crate::clipboard::write(windows::Win32::Foundation::HWND::default(), &loaded, false)
+            .unwrap();
+        paste_ms = start.elapsed().as_secs_f64() * 1000.;
+        unsafe {
+            use windows::Win32::System::DataExchange::*;
+            OpenClipboard(None).unwrap();
+            let handle = GetClipboardData(17).unwrap();
+            use windows::Win32::System::Memory::*;
+            let global = windows::Win32::Foundation::HGLOBAL(handle.0);
+            let ptr = GlobalLock(global);
+            assert!(!ptr.is_null());
+            assert_eq!(
+                std::slice::from_raw_parts(ptr as *const u8, bytes),
+                loaded.formats[0].bytes
+            );
+            let _ = GlobalUnlock(global);
+            EmptyClipboard().unwrap();
+            CloseClipboard().unwrap();
+        }
+    }
+    println!("large_image bytes={bytes} blob_bytes={blob_bytes} save_ms={save_ms:.3} load_ms={load_ms:.3} private_paste_ms={paste_ms:.3}");
+}
+#[test]
+fn scaled_large_dib_roundtrip_and_both_previews() {
+    large_roundtrip(483, 725, false);
+}
+#[test]
+#[ignore = "约 140MB 大图性能验收；仅单独串行执行，使用私有剪贴板"]
+fn large_140mb_dib_roundtrip_previews_and_private_paste() {
+    large_roundtrip(4835, 7253, true);
+}
