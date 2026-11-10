@@ -62,7 +62,12 @@ fn snapshot() -> Snapshot {
         self_write: sequence != 0 && sequence == SELF_SEQUENCE.load(Ordering::Acquire),
     }
 }
-pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Clip>, CaptureError> {
+pub(crate) struct Captured {
+    pub clip: Clip,
+    pub context: crate::owner_flush::CaptureContext,
+    pub sequence: u32,
+}
+pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Captured>, CaptureError> {
     capture_policy::run(
         &LAST_SEQUENCE,
         snapshot,
@@ -116,14 +121,21 @@ fn open(hwnd: HWND) -> Result<OpenGuard> {
     }
     bail!("剪贴板被其他程序占用")
 }
-unsafe fn read_raw(id: u32) -> Result<Option<Vec<u8>>> {
-    read_raw_limited(id, MAX_BYTES)
+unsafe fn read_raw(
+    id: u32,
+    diagnostics: &mut crate::clipboard_diag::CaptureLog,
+) -> Result<Option<Vec<u8>>> {
+    read_raw_limited(id, MAX_BYTES, diagnostics)
 }
-unsafe fn read_raw_limited(id: u32, limit: usize) -> Result<Option<Vec<u8>>> {
+unsafe fn read_raw_limited(
+    id: u32,
+    limit: usize,
+    diagnostics: &mut crate::clipboard_diag::CaptureLog,
+) -> Result<Option<Vec<u8>>> {
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
     }
-    let h = GetClipboardData(id)?;
+    let h = GetClipboardData(id).inspect_err(|_| diagnostics.empty(id))?;
     let global = HGLOBAL(h.0);
     let size = GlobalSize(global);
     if size > limit {
@@ -135,6 +147,7 @@ unsafe fn read_raw_limited(id: u32, limit: usize) -> Result<Option<Vec<u8>>> {
         .into());
     }
     if size == 0 {
+        diagnostics.empty(id);
         bail!("格式大小无效");
     }
     let p = GlobalLock(global);
@@ -143,6 +156,7 @@ unsafe fn read_raw_limited(id: u32, limit: usize) -> Result<Option<Vec<u8>>> {
     }
     let out = std::slice::from_raw_parts(p as *const u8, size).to_vec();
     let _ = GlobalUnlock(global);
+    diagnostics.read(id, out.len());
     Ok(Some(out))
 }
 fn normalize(name: &str, mut bytes: Vec<u8>) -> Vec<u8> {
@@ -173,8 +187,9 @@ pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
 #[cfg(test)]
 pub fn capture(hwnd: HWND) -> Result<Option<Clip>> {
     capture_at(hwnd, unsafe { GetClipboardSequenceNumber() })
+        .map(|capture| capture.map(|capture| capture.clip))
 }
-fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
+fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Captured>> {
     let current = snapshot();
     if current.self_write {
         LAST_SEQUENCE.store(current.sequence, Ordering::Release);
@@ -186,19 +201,27 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
     // 采集只尝试打开一次；退避在 worker 进行，写回保留原有短重试。
     unsafe { OpenClipboard(Some(hwnd)) }.map_err(|_| CaptureError::Busy)?;
     let _guard = OpenGuard;
+    let mut diagnostics = crate::clipboard_diag::CaptureLog::begin();
     unsafe {
         // 打开前仍可能换序列，不能把新内容算作旧轮次采集。
         let current = snapshot();
         if current.self_write || current.sequence != expected {
             return Ok(None);
         }
+        let formats = offered_formats();
+        let owner = crate::clipboard_owner::clipboard_owner();
+        let bitmap_offered = formats.as_ref().is_none_or(|ids| {
+            [2, 8, 17, format_id("PNG"), format_id("image/png")]
+                .iter()
+                .any(|id| ids.contains(id))
+        });
         let excluded =
             IsClipboardFormatAvailable(format_id("ExcludeClipboardContentFromMonitorProcessing"))
                 .is_ok();
         if excluded {
             return Ok(None);
         }
-        let history = match read_raw(format_id("CanIncludeInClipboardHistory")) {
+        let history = match read_raw(format_id("CanIncludeInClipboardHistory"), &mut diagnostics) {
             Ok(history) => history,
             Err(_) => {
                 eprintln!("剪贴板隐私标记不可读，已跳过记录");
@@ -208,7 +231,7 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
         if !may_record(excluded, history.as_deref()) {
             return Ok(None);
         }
-        if let Some(b) = read_raw(format_id(OWNER_MARKER)).unwrap_or_else(|_| {
+        if let Some(b) = read_raw(format_id(OWNER_MARKER), &mut diagnostics).unwrap_or_else(|_| {
             eprintln!("剪贴板所有权标记不可读，已跳过该标记");
             None
         }) {
@@ -218,17 +241,55 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
                 return Ok(None);
             }
         }
-        collect_formats_with_budget(|name, budget| read_format_limited(name, budget), MAX_BYTES)
+        collect_formats_with_budget(
+            |name, budget| read_format_limited(name, budget, &mut diagnostics),
+            MAX_BYTES,
+        )
+        .map(|clip| {
+            clip.map(|clip| Captured {
+                clip,
+                sequence: expected,
+                context: crate::owner_flush::CaptureContext {
+                    record_id: None,
+                    formats,
+                    owner,
+                    fingerprint: None,
+                    bitmap_offered,
+                },
+            })
+        })
+    }
+}
+/// 调用方持有剪贴板；读取载荷之前保留完整的已提供格式集合。
+fn offered_formats() -> Option<std::collections::BTreeSet<u32>> {
+    use windows::Win32::Foundation::{GetLastError, SetLastError, ERROR_SUCCESS};
+    let mut formats = std::collections::BTreeSet::new();
+    let mut id = 0;
+    loop {
+        unsafe {
+            SetLastError(ERROR_SUCCESS);
+        }
+        id = unsafe { EnumClipboardFormats(id) };
+        if id == 0 {
+            return (unsafe { GetLastError() } == ERROR_SUCCESS).then_some(formats);
+        }
+        if !formats.insert(id) {
+            return None;
+        }
     }
 }
 #[cfg(test)]
 unsafe fn read_format(name: &str) -> Result<Option<Vec<u8>>> {
-    read_format_limited(name, MAX_BYTES)
+    read_format_limited(name, MAX_BYTES, &mut Default::default())
 }
-unsafe fn read_format_limited(name: &str, budget: usize) -> Result<Option<Vec<u8>>> {
+unsafe fn read_format_limited(
+    name: &str,
+    budget: usize,
+    diagnostics: &mut crate::clipboard_diag::CaptureLog,
+) -> Result<Option<Vec<u8>>> {
     let id = format_id(name);
     if name != "CF_HDROP" {
-        return read_raw_limited(id, budget).map_err(|error| {
+        return read_raw_limited(id, budget, diagnostics).map_err(|error| {
             if let Some(limit) = error.downcast_ref::<CaptureLimit>() {
                 CaptureLimit {
                     actual: limit.actual,
@@ -244,9 +305,12 @@ unsafe fn read_format_limited(name: &str, budget: usize) -> Result<Option<Vec<u8
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
     }
-    let handle = GetClipboardData(id)?;
+    let handle = GetClipboardData(id).inspect_err(|_| diagnostics.empty(id))?;
     let h = HDROP(handle.0);
     let count = DragQueryFileW(h, u32::MAX, None);
+    if count == 0 {
+        diagnostics.empty(id);
+    }
     if count == 0 || count > 4096 {
         bail!("文件数量无效或超出限制");
     }
@@ -262,7 +326,9 @@ unsafe fn read_format_limited(name: &str, budget: usize) -> Result<Option<Vec<u8
         }
         paths.push(String::from_utf16_lossy(&buf[..len]));
     }
-    Ok(Some(encode_hdrop(&paths)))
+    let bytes = encode_hdrop(&paths);
+    diagnostics.read(id, bytes.len());
+    Ok(Some(bytes))
 }
 /// 无 IO 的格式选择；读取前用 size=0 排除冗余 DIB。
 #[derive(Debug, PartialEq, Eq)]
@@ -532,8 +598,12 @@ mod system_tests {
 
     /// 模拟其它程序写剪贴板：直接调用 Win32，不经过产品代码。
     fn set_formats(items: &[(&str, &[u8])]) {
+        set_formats_with_owner(HWND::default(), items);
+    }
+
+    fn set_formats_with_owner(owner: HWND, items: &[(&str, &[u8])]) {
         unsafe {
-            let guard = open(HWND::default()).expect("打开剪贴板失败");
+            let guard = open(owner).expect("打开剪贴板失败");
             EmptyClipboard().expect("清空剪贴板失败");
             for (name, bytes) in items {
                 let mut data = allocate(bytes).expect("分配剪贴板内存失败");
@@ -549,7 +619,9 @@ mod system_tests {
     fn read_format(name: &str) -> Option<Vec<u8>> {
         unsafe {
             let _guard = open(HWND::default()).ok()?;
-            read_raw(format_id(name)).ok().flatten()
+            read_raw(format_id(name), &mut Default::default())
+                .ok()
+                .flatten()
         }
     }
 
@@ -569,6 +641,126 @@ mod system_tests {
             }
             out
         }
+    }
+
+    #[test]
+    fn owner_flush_private_clipboard_skips_without_touch_and_acknowledges_sequence() {
+        use crate::{owner_flush::tests::dib, storage::Storage};
+        use windows::{
+            core::w,
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+            },
+        };
+        let _lock = lock();
+        let _cleanup = Cleanup;
+        LAST_SEQUENCE.store(0, Ordering::Release);
+        // 只有消息窗口，不显示 UI、不激活窗口、不接管键鼠。
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let window = Window(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("owner-flush-test"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.test-data")
+            .join(format!(
+                "owner-flush-private-{}-{}",
+                std::process::id(),
+                crate::storage::unix_millis()
+            ));
+        let storage = Mutex::new(Storage::open(&path, &[89; 32]).unwrap());
+        let context = Mutex::new(None);
+        let first_dib = dib(19, 17, 24, false, None);
+        let second_dib = dib(19, 17, 32, true, None);
+        let text = text_bytes("合成文件附带文本");
+        set_formats_with_owner(
+            window.0,
+            &[("CF_DIB", &first_dib), ("CF_UNICODETEXT", &text)],
+        );
+        let first = capture_pending(HWND::default()).unwrap().unwrap();
+        assert!(first.context.owner.is_real());
+        assert_eq!(first.context.owner.window, Some(window.0 .0 as isize));
+        assert_eq!(
+            crate::runtime::save_capture(&storage, &context, first).unwrap(),
+            Some(true)
+        );
+        let before = storage.lock().unwrap().list().unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Win32 的实际行为在私有窗口站验证，不假定 NULL 写入必然可用。
+        set_formats(&[("CF_DIB", &second_dib)]);
+        let second = capture_pending(HWND::default()).unwrap().unwrap();
+        assert!(second.context.owner.is_ownerless());
+        let sequence = second.sequence;
+        assert_eq!(
+            crate::runtime::save_capture(&storage, &context, second).unwrap(),
+            None
+        );
+        assert_eq!(LAST_SEQUENCE.load(Ordering::Acquire), sequence);
+        assert!(capture_pending(HWND::default()).unwrap().is_none());
+        let after = storage.lock().unwrap().list().unwrap();
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap()
+        );
+
+        // 清空上下文后，同样的无 owner 固化内容重新进入正常保存路径。
+        *context.lock().unwrap() = None;
+        storage
+            .lock()
+            .unwrap()
+            .delete(&[before[0].id.clone()])
+            .unwrap();
+        set_formats(&[("CF_DIB", &second_dib)]);
+        let after_delete = capture_pending(HWND::default()).unwrap().unwrap();
+        assert_eq!(
+            crate::runtime::save_capture(&storage, &context, after_delete).unwrap(),
+            Some(true)
+        );
+        // 无 owner 连续提供不同图像时都应保存。
+        let mut different = second_dib;
+        different[40] ^= 1;
+        set_formats(&[("CF_DIB", &different)]);
+        let different = capture_pending(HWND::default()).unwrap().unwrap();
+        assert_eq!(
+            crate::runtime::save_capture(&storage, &context, different).unwrap(),
+            Some(true)
+        );
+        assert_eq!(storage.lock().unwrap().list().unwrap().len(), 2);
+        drop(storage);
+        // 仅删除本测试创建且位于项目 .test-data 下的目录。
+        let target = path.canonicalize().unwrap();
+        let test_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.test-data")
+            .canonicalize()
+            .unwrap();
+        assert!(target.starts_with(&test_root));
+        assert!(target
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("owner-flush-private-"));
+        std::fs::remove_dir_all(target).unwrap();
     }
 
     #[test]

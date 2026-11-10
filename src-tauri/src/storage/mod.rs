@@ -16,7 +16,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 pub use maintenance::{validate_retention_policy, DeleteReport, RetentionPolicy, ScanReport};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -36,6 +36,12 @@ pub struct ListFilter {
 
 pub const PAGE_LIMIT: usize = 500;
 pub const QUICK_PAGE_SIZE: usize = 200;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SaveOutcome {
+    pub id: String,
+    pub inserted: bool,
+}
 
 struct SaveIdentity {
     id: String,
@@ -314,21 +320,25 @@ impl Storage {
     /// 无共享锁的调用者保留原接口；runtime 必须使用 save_shared。
     pub fn save_with_outcome(&mut self, clip: &Clip) -> Result<bool> {
         let identity = SaveIdentity::new(clip);
-        if self.update_duplicate(&identity)? {
+        if self.update_duplicate(&identity)?.is_some() {
             return Ok(false);
         }
         let prepared = PreparedSave::new(clip, identity, &self.key)?;
         self.commit_prepared(prepared)
+            .map(|outcome| outcome.inserted)
     }
     /// 采集路径：锁内查重 → 锁外生成预览/压缩/加密 → 锁内复查并提交。
-    pub fn save_shared(storage: &Mutex<Self>, clip: &Clip) -> Result<bool> {
+    pub fn save_shared(storage: &Mutex<Self>, clip: &Clip) -> Result<SaveOutcome> {
         let identity = SaveIdentity::new(clip);
         let key = {
             let store = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("存储锁不可用"))?;
-            if store.update_duplicate(&identity)? {
-                return Ok(false);
+            if let Some(id) = store.update_duplicate(&identity)? {
+                return Ok(SaveOutcome {
+                    id,
+                    inserted: false,
+                });
             }
             store.key.clone()
         };
@@ -339,13 +349,15 @@ impl Storage {
             .map_err(|_| anyhow::anyhow!("存储锁不可用"))?
             .commit_prepared(prepared)
     }
-    fn update_duplicate(&self, identity: &SaveIdentity) -> Result<bool> {
+    fn update_duplicate(&self, identity: &SaveIdentity) -> Result<Option<String>> {
         let now = unix_millis();
         let order = self.next_order()?;
-        Ok(self.conn.execute(
-            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1)",
+        // RETURNING 返回实际命中的旧 id；文件去重命中时它可能不同于本次 clip.hash()。
+        Ok(self.conn.query_row(
+            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1) RETURNING id",
             params![order, identity.dedup_key, now, identity.id],
-        )? > 0)
+            |row| row.get(0),
+        ).optional()?)
     }
     fn next_order(&self) -> Result<i64> {
         Ok(self
@@ -354,10 +366,13 @@ impl Storage {
                 r.get(0)
             })?)
     }
-    fn commit_prepared(&mut self, mut prepared: PreparedSave) -> Result<bool> {
+    fn commit_prepared(&mut self, mut prepared: PreparedSave) -> Result<SaveOutcome> {
         // 锁外准备期间可能有另一条相同记录完成保存；仍保留首次保存内容。
-        if self.update_duplicate(&prepared.identity)? {
-            return Ok(false);
+        if let Some(id) = self.update_duplicate(&prepared.identity)? {
+            return Ok(SaveOutcome {
+                id,
+                inserted: false,
+            });
         }
         for (id, bytes) in &prepared.blobs {
             self.install_blob(id, bytes)?;
@@ -380,7 +395,10 @@ impl Storage {
             )?;
         }
         tx.commit()?;
-        Ok(true)
+        Ok(SaveOutcome {
+            id: prepared.identity.id,
+            inserted: true,
+        })
     }
     /// 只更新已有记录的顺序；不加载格式、不哈希内容、不重写加密对象。
     pub fn touch(&self, id: &str) -> Result<()> {

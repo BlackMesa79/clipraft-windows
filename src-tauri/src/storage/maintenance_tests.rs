@@ -853,3 +853,216 @@ fn startup_vacuum_runs_only_strictly_above_twenty_five_percent() {
     let s = f.open();
     assert_eq!(s.load("item-0").unwrap().formats[0].bytes, vec![1]);
 }
+
+// 合成小位图与独立加密数据库覆盖采集→维护→固化，不访问系统剪贴板。
+fn flush_capture(owned: bool) -> crate::clipboard::Captured {
+    let depth = if owned { 24 } else { 32 };
+    crate::clipboard::Captured {
+        clip: Clip {
+            formats: vec![model::FormatData {
+                name: "CF_DIB".into(),
+                bytes: crate::owner_flush::tests::dib(19, 17, depth, false, None),
+            }],
+        },
+        sequence: if owned { 1 } else { 2 },
+        context: crate::owner_flush::CaptureContext {
+            formats: Some(if owned {
+                [8, 13].into_iter().collect()
+            } else {
+                [8, 2, 17].into_iter().collect()
+            }),
+            owner: if owned {
+                crate::owner_flush::tests::owned()
+            } else {
+                crate::clipboard_owner::ClipboardOwner::absent()
+            },
+            fingerprint: None,
+            bitmap_offered: true,
+            record_id: None,
+        },
+    }
+}
+
+fn cleanup_capture(
+    storage: &Mutex<Storage>,
+    context: &Mutex<Option<crate::owner_flush::CaptureContext>>,
+    policy: &RetentionPolicy,
+) -> DeleteReport {
+    // 与 worker 一致，先上下文后存储；复用同一个纯失效判定函数。
+    let mut previous = context.lock().unwrap();
+    let report = storage
+        .lock()
+        .unwrap()
+        .cleanup(policy, unix_millis())
+        .unwrap();
+    crate::owner_flush::invalidate_deleted(&mut previous, &report.deleted_ids);
+    report
+}
+
+#[test]
+fn owner_flush_survives_cleanup_without_deletions() {
+    let f = Fixture::new();
+    let storage = Mutex::new(f.open());
+    let context = Mutex::new(None);
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, flush_capture(true)).unwrap(),
+        Some(true)
+    );
+    let before = storage.lock().unwrap().list().unwrap();
+    assert_eq!(
+        context.lock().unwrap().as_ref().unwrap().record_id.as_ref(),
+        Some(&before[0].id)
+    );
+    let report = cleanup_capture(&storage, &context, &RetentionPolicy::default());
+    assert_eq!(report.deleted_items, 0);
+    assert!(report.deleted_ids.is_empty());
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, flush_capture(false)).unwrap(),
+        None
+    );
+    assert_eq!(
+        serde_json::to_value(storage.lock().unwrap().list().unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[test]
+fn owner_flush_context_cleared_when_cleanup_deletes_its_record() {
+    let f = Fixture::new();
+    let storage = Mutex::new(f.open());
+    let context = Mutex::new(None);
+    let first = flush_capture(true);
+    let first_id = first.clip.hash();
+    crate::runtime::save_capture(&storage, &context, first).unwrap();
+    storage
+        .lock()
+        .unwrap()
+        .save(&Clip {
+            formats: vec![model::FormatData {
+                name: "Rich Text Format".into(),
+                bytes: b"newer record".to_vec(),
+            }],
+        })
+        .unwrap();
+    let report = cleanup_capture(&storage, &context, &policy(1, 1_000_000, 0));
+    assert_eq!(report.deleted_ids, vec![first_id]);
+    assert!(context.lock().unwrap().is_none());
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, flush_capture(false)).unwrap(),
+        Some(true)
+    );
+}
+
+#[test]
+fn owner_flush_survives_cleanup_deleting_other_records() {
+    let f = Fixture::new();
+    let storage = Mutex::new(f.open());
+    let context = Mutex::new(None);
+    add(&storage.lock().unwrap(), "older", 0, 1, unix_millis());
+    crate::runtime::save_capture(&storage, &context, flush_capture(true)).unwrap();
+    let report = cleanup_capture(&storage, &context, &policy(1, 1_000_000, 0));
+    assert_eq!(report.deleted_ids, vec!["older"]);
+    assert!(context.lock().unwrap().is_some());
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, flush_capture(false)).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn manual_delete_invalidates_only_actual_context_record_and_reports_unique_ids() {
+    let f = Fixture::new();
+    let storage = Mutex::new(f.open());
+    let context = Mutex::new(None);
+    crate::runtime::save_capture(&storage, &context, flush_capture(true)).unwrap();
+    add(&storage.lock().unwrap(), "other", 0, 1, unix_millis());
+    let mut previous = context.lock().unwrap();
+    let id = previous.as_ref().unwrap().record_id.clone().unwrap();
+    let report = storage
+        .lock()
+        .unwrap()
+        .delete(&["other".into(), "other".into(), "missing".into()])
+        .unwrap();
+    assert_eq!(report.deleted_items, 1);
+    assert_eq!(report.deleted_ids, vec!["other"]);
+    assert!(serde_json::to_value(&report)
+        .unwrap()
+        .get("deleted_ids")
+        .is_none());
+    crate::owner_flush::invalidate_deleted(&mut previous, &report.deleted_ids);
+    assert!(previous.is_some());
+    let report = storage
+        .lock()
+        .unwrap()
+        .delete(&[id.clone(), id.clone()])
+        .unwrap();
+    assert_eq!(report.deleted_items, 1);
+    assert_eq!(report.deleted_ids, vec![id]);
+    crate::owner_flush::invalidate_deleted(&mut previous, &report.deleted_ids);
+    assert!(previous.is_none());
+    assert!(!crate::owner_flush::should_skip(
+        previous.as_ref(),
+        &flush_capture(false).context
+    ));
+}
+
+#[test]
+fn capture_dedup_context_tracks_existing_id_instead_of_new_hash() {
+    let f = Fixture::new();
+    let storage = Mutex::new(f.open());
+    let context = Mutex::new(None);
+    let mut first = flush_capture(true);
+    first.clip = Clip {
+        formats: vec![model::FormatData {
+            name: "CF_HDROP".into(),
+            bytes: model::encode_hdrop(&[r"C:\synthetic\item.txt".into()]),
+        }],
+    };
+    let id = first.clip.hash();
+    let mut second = flush_capture(true);
+    second.clip = first.clip.clone();
+    second.clip.formats.push(model::FormatData {
+        name: "HTML Format".into(),
+        bytes: b"extra format".to_vec(),
+    });
+    assert_ne!(id, second.clip.hash());
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, first).unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        crate::runtime::save_capture(&storage, &context, second).unwrap(),
+        Some(false)
+    );
+    let mut previous = context.lock().unwrap();
+    assert_eq!(previous.as_ref().unwrap().record_id.as_ref(), Some(&id));
+    let report = storage.lock().unwrap().delete(&[id]).unwrap();
+    crate::owner_flush::invalidate_deleted(&mut previous, &report.deleted_ids);
+    assert!(previous.is_none());
+}
+
+#[test]
+fn prepared_save_recheck_returns_actual_duplicate_id() {
+    let f = Fixture::new();
+    let mut storage = f.open();
+    let first = Clip {
+        formats: vec![model::FormatData {
+            name: "CF_HDROP".into(),
+            bytes: model::encode_hdrop(&[r"C:\synthetic\item.txt".into()]),
+        }],
+    };
+    let mut second = first.clone();
+    second.formats.push(model::FormatData {
+        name: "HTML Format".into(),
+        bytes: b"extra format".to_vec(),
+    });
+    let prepared = PreparedSave::new(&second, SaveIdentity::new(&second), &storage.key).unwrap();
+    storage.save(&first).unwrap();
+    assert_eq!(
+        storage.commit_prepared(prepared).unwrap(),
+        SaveOutcome {
+            id: first.hash(),
+            inserted: false
+        }
+    );
+}

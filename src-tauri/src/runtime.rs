@@ -74,6 +74,8 @@ pub struct Panel {
 pub struct State {
     pub items: Mutex<Vec<ItemView>>,
     pub storage: Mutex<Storage>,
+    // 删除、保存与清理统一先锁此上下文，再锁 storage。
+    pub capture_context: Mutex<Option<crate::owner_flush::CaptureContext>>,
     pub retention_policy: Mutex<RetentionPolicy>,
     pub jobs: SyncSender<Job>,
     pub control: Sender<Control>,
@@ -123,6 +125,7 @@ fn queue_capture() {
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_CLIPBOARDUPDATE => {
+            crate::clipboard_diag::clipboard_update();
             queue_capture();
             LRESULT(0)
         }
@@ -293,6 +296,39 @@ fn cleanup_due(elapsed: Duration, inserted: u32) -> bool {
     inserted > 0 && (elapsed >= Duration::from_secs(30) || inserted >= 20)
 }
 
+/// 指纹在所有共享锁之外计算。成功保存（包括既有记录）之后才更新上下文。
+pub(crate) fn save_capture(
+    storage: &Mutex<Storage>,
+    context: &Mutex<Option<crate::owner_flush::CaptureContext>>,
+    mut captured: clipboard::Captured,
+) -> Result<Option<bool>> {
+    captured.context.fingerprint =
+        crate::owner_flush::fingerprint(&captured.clip, captured.context.bitmap_offered);
+    // 同时需要两把锁时一律先 capture_context 后 storage，与删除/自动清理一致。
+    let mut previous = context.lock().unwrap();
+    if crate::owner_flush::should_skip(previous.as_ref(), &captured.context) {
+        diag::write(format!(
+            "capture sequence={} result=skipped reason=owner_flush",
+            captured.sequence
+        ));
+        return Ok(None);
+    }
+    if captured.context.owner.is_ownerless() {
+        if let Some(reason) = crate::owner_flush::miss_reason(previous.as_ref(), &captured.context)
+        {
+            diag::write(format!(
+                "capture owner_flush_miss sequence={} reason={}",
+                captured.sequence,
+                reason.as_str()
+            ));
+        }
+    }
+    let outcome = Storage::save_shared(storage, &captured.clip)?;
+    captured.context.record_id = Some(outcome.id);
+    *previous = Some(captured.context);
+    Ok(Some(outcome.inserted))
+}
+
 pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<State>> {
     let policy = RetentionPolicy::default();
     let vacuumed = match storage.cleanup(&policy, crate::storage::unix_millis()) {
@@ -317,6 +353,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
     let state = Arc::new(State {
         items: Mutex::new(items),
         storage: Mutex::new(storage),
+        capture_context: Mutex::new(None),
         retention_policy: Mutex::new(policy),
         jobs: jobs.clone(),
         control: control.clone(),
@@ -347,10 +384,15 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                         )) {
                             Ok(clip) => {
                                 if let Some(clip) = clip {
-                                    let result = Storage::save_shared(&worker.storage, &clip);
+                                    let result = save_capture(
+                                        &worker.storage,
+                                        &worker.capture_context,
+                                        clip,
+                                    );
                                     match result {
                                         Err(_) => report(&a, &worker, "记录保存失败"),
-                                        Ok(inserted) => {
+                                        Ok(None) => {}
+                                        Ok(Some(inserted)) => {
                                             if inserted {
                                                 inserted_since_cleanup =
                                                     inserted_since_cleanup.saturating_add(1);
@@ -363,11 +405,21 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                                         .lock()
                                                         .unwrap()
                                                         .clone();
+                                                    // 与保存/手动删除一致：先上下文锁，后存储锁；禁止反向嵌套。
+                                                    let mut context =
+                                                        worker.capture_context.lock().unwrap();
                                                     let result =
                                                         worker.storage.lock().unwrap().cleanup(
                                                             &policy,
                                                             crate::storage::unix_millis(),
                                                         );
+                                                    if let Ok(report) = &result {
+                                                        crate::owner_flush::invalidate_deleted(
+                                                            &mut context,
+                                                            &report.deleted_ids,
+                                                        );
+                                                    }
+                                                    drop(context);
                                                     if let Err(e) = result {
                                                         diag::write(format!(
                                                             "capture cleanup failed: {e}"

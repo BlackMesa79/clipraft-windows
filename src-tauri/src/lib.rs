@@ -1,9 +1,12 @@
 mod capture_policy;
 mod clipboard;
+mod clipboard_diag;
+mod clipboard_owner;
 mod diag;
 pub mod hook;
 mod image_normalize;
 pub mod model;
+mod owner_flush;
 pub mod paster;
 pub mod platform;
 mod runtime;
@@ -64,12 +67,19 @@ async fn delete_items(
     let shared = state.inner().clone();
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 与保存/自动清理一致：先 capture_context 后 storage，避免反向嵌套死锁。
+        let mut context = shared
+            .capture_context
+            .lock()
+            .map_err(|_| "采集上下文不可用")?;
         let mut report = shared
             .storage
             .lock()
             .map_err(|_| "存储不可用")?
             .delete(&ids)
             .map_err(|e| format!("删除失败：{e}"))?;
+        owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
+        drop(context);
         if let Err(e) = runtime::refresh(&app, &shared) {
             let message = format!("记录已删除，但刷新失败：{e}");
             diag::write(message.clone());

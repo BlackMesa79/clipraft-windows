@@ -101,7 +101,8 @@ Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名�
 - 剪贴板占用最多退避 50/100/200/400/800ms（累计等待 1.55 秒，不含系统调用耗时）；耗尽只提示一次“剪贴板被其他程序长时间占用，本次复制未记录”。同序列失败后不再补采，需要新的复制变化；中途换序列放弃旧轮次，自写回无需打开剪贴板。退避发生在共享 worker，可能短暂延后其后排队的粘贴任务，不阻塞 broker/UI 线程。
 - Alt+V 在 broker 立即发送 0xE8 掩码；主窗口显示不再调用 tao 的 set_focus，保留恢复、显示、提升及原生 SetForegroundWindow。显示流程开始至完成后 300ms 仅拦截键盘 Alt 的 SC_KEYMENU（lParam=0），Alt+空格和鼠标系统菜单仍可用；这段短时间内主动单按 Alt 也会被抑制。Windows 仍可能拒绝前台激活，结果会写日志；真实最小化恢复、遮挡恢复和高负载时序仍须人工验证。
 - 文件记录保存路径和复制/剪切语义，不保存文件快照。源文件失效时阻止粘贴并报错，详情在选中、窗口获取焦点或点击“刷新状态”时检查存在性；不进行持续文件监控。剪切记录使用后可能因源路径消失而失效。
-- D-6 已处理 PNG / DIB 可确定的尾部填充；文件记录新增路径集合与复制/剪切语义的去重键，忽略附加 DIB/HTML；非文件记录跨编码、格式集合差异不做像素级去重，异常头保留原字节，旧哈希不重写。同一图片以“文件”和“位图”两种形式复制时仍是两条记录；迁移保留已有重复项，可由用户手工删除。D-10 已通过启动扫描处理；仍未处理 D-7 及 R 系列风险点。
+- D-6 已处理 PNG / DIB 可确定的尾部填充；文件记录新增路径集合与复制/剪切语义的去重键，忽略附加 DIB/HTML；非文件记录跨编码、格式集合差异不做像素级去重，异常头保留原字节，旧哈希不重写。同一图片以“文件”和“位图”两种形式主动复制时仍是两条记录（满足下述退出固化条件的更新除外）；迁移保留已有重复项，可由用户手工删除。D-10 已通过启动扫描处理；仍未处理 D-7 及 R 系列风险点。
+- 退出固化识别（`owner_flush`）仅比较上一次成功保存的内存上下文：新内容无 owner（或确认进程已退出）、格式集合为子集、上次有真实 owner 且不是同一进程窗口、图像尺寸与 256 个 RGB 抽样全部相同（无图时比较完整 UTF-16 文本哈希），才跳过保存与 touch。CF_DIBV5/CF_BITMAP 按规则补入系统合成集合；未知 owner、格式枚举失败、图片无法解析都不跳过。上下文关联成功保存的实际记录 id（去重时为已有记录）；手动删除或自动清理只有实际删除该记录才清空上下文，未删除记录或只删除其他记录时保留，重启不恢复。抽样不是整图等价证明：只在未采样位置或 alpha 上变化的图像，满足其它条件时仍可能被误跳过；PNG 独有内容需要受内存上限约束的解码，DIB 仅抽样。它不修改原有 dedup_key，也不等于通用跨编码图片去重。
 - 不抓取 HTML 远程图片，不对 HEIC、SVG 生成预览，GIF/WebP 仅预览静态帧。支持的剪贴板图片解码失败仍保留原始数据并显示占位。
 - 目标应用是否接受富文本、透明图片和文件取决于其格式支持。Word 专有格式、CF_BITMAP、OLE 对象不在本阶段范围。
 - 普通权限进程遇到管理员目标会报错，不提升权限或绕过 UIPI。窗口关闭、前台变化或系统拒绝恢复焦点时取消粘贴。
@@ -146,12 +147,16 @@ npm run tauri dev
 
 - 会记录：会话 Unix 毫秒时间与相对毫秒时间；限定时段内按键的按下/抬起、是否注入、是否吞掉、Open/Next/Previous/Commit/Cancel 动作；粘贴前后 8 个修饰键的异步与物理状态；前台窗口类名和 HKL；每次 SendInput 的请求数量及实际返回数量；Toggle 的可见/最小化/前台状态与恢复、显示、提升、SetForegroundWindow 结果（不再调用 set_focus），以及 Toggle 显示流程前后的 8 个修饰键快照（`toggle stage=before_show/after_show`）。
 - 采集每轮记录 capture sequence/current/self_write/busy/retries/result/reason，result 为 ok/skipped/busy/limit/invalid，不记录内容；retries 为实际退避次数，busy 表示本轮是否遇到占用，superseded 表示新序列留给下一轮。Alt+V 记录 hotkey mask_ok 和底层 SendInput 数量，以及 toggle stage=hotkey_after_mask；短时拦截记录 toggle alt_menu_suppressed=true。
+- 每次采集成功打开剪贴板后、任何数据读取前，记录 `capture formats sequence=N owner_pid=P owner_exe=xxx.exe list=[id:name, ...]`。清单只调用 `EnumClipboardFormats` 与格式名称查询，不调用 `GetClipboardData`；标准格式显示 `CF_` 常量名，注册格式使用 `GetClipboardFormatNameW`，未知名称为 `-`。来源通过 `GetClipboardOwner`、窗口 PID 与 `QueryFullProcessImageNameW` 查询，只保留 exe 文件名；无法取得的 PID 或程序名分别写 `-`，不记录完整程序路径。
+- 采集结束（含提前返回）输出实际读取的 `capture read format=name bytes=N`，字节数是归一化前成功复制的数据长度；CF_HDROP 是现有路径读取及重编码后的字节数。可用格式的 `GetClipboardData` 返回 NULL、全局数据大小为零或文件列表为空时输出 `capture empty format=name`。隐私/自写回标记若实际读取，也只记录名称与字节数。不可用、因冗余/限额跳过、尚未尝试或其他读取错误的格式，不会被伪记为 empty；合成的默认 Preferred DropEffect 不算实际读取。
+- 监听窗口每次收到 `WM_CLIPBOARDUPDATE`，在采集合并判断前记录 `clipboard_update sequence=N owner_exe=xxx.exe`；此处不开剪贴板、不读取数据。程序名是处理通知当时的 owner 快照；快速连续更新可能已推进到同一最新序列，owner 也可能退出，因此不能把它当成每次写入者的历史记录。格式清单和 read/empty 可帮助排查延迟渲染，但本身不能证明发生了 `SetClipboardData(NULL)` 或 `WM_RENDERALLFORMATS`。日志专用的格式名查询与采集明细只在诊断开启时执行；退出固化判断需要的格式 id、owner 与指纹在诊断关闭时仍会采集；格式名中的控制字符及清单分隔符会转义。
 - 按键记录只在主窗口或快速面板打开期间及关闭后 2 秒内启用。只保留修饰键、V、方向键、Esc 的虚拟键码，其他键（包括掩码 0xE8）一律写 `other`；普通字符的键码不会进入日志消息队列。快速面板以钩子 Open/Commit/Cancel 时刻界定，确保掩码和提交后的输入能被观察。
 - 每个执行到的粘贴阶段各记录一次 `paste generation=… phase=load/write/wait/prepare/inject/touch elapsed_ms=… status=ok/error/superseded`，单位毫秒，保留三位小数。过期任务未执行的阶段不会伪造耗时；`paste_superseded` 表示静默退出。`before_wait` 现在位于 load/write 之后，不能再与旧日志同名快照直接对比关键路径。load 阶段列出受支持格式名与原始字节数，`clipboard_write` 列出实际写入格式名与字节数，可确认 DIB 被省略。inject 耗时包含准备期间重新按键时的最终可取消等待。
 - 不记录剪贴板文本、图片、文件路径、窗口标题、输入字符或密钥。日志为诊断元数据明文，不属于加密历史；HKL 只能反映键盘布局，不能单独证明输入法中英文模式没有变化。
 - 钩子不做 IO、堆分配或同步等待，仅向日志线程 PostThreadMessage 投递脱敏定长数据。日志拥堵时丢弃并累计 `dropped`，不阻塞键盘；非钩子日志也使用有界队列。
 - 验证输入法时分别选择微软拼音的中文/英文模式、不同键盘布局，交替先松 Ctrl/Shift、同时松键、Esc 取消，确认模式和布局均不切换。若出现异常，保留发生时间、按键顺序及相邻日志；不要仅凭推测认定 TSF 根因。
-
+- 新内容无 owner（`is_ownerless`）但未跳过时输出 `capture owner_flush_miss sequence=N reason=...`，按判定顺序记录首个未满足条件：`no_previous`（无上次成功上下文）、`previous_not_real`（上次不是真实 owner）、`same_owner`（同一进程窗口）、`formats_not_subset`（格式枚举失败或不满足子集/系统合成规则）、`fingerprint_missing`（任一指纹缺失）、`fingerprint_mismatch`（指纹不一致）。此行不包含内容、记录 id 或指纹；有 owner 或来源未知时不输出此类 miss。
+- 命中退出固化时输出 `capture sequence=N result=skipped reason=owner_flush`；该序列已经由原有采集策略标为已处理，不保存、不 touch，也不以无 owner 结果替换上次成功上下文。此前同序列的 `result=ok reason=read` 仅表示读取成功，是否保存以随后 worker 的 `owner_flush` 判断为准。日志不包含文本、像素或指纹；来源查询复用于识别，进程权限不足时按未知处理。
 
 ## 采集占用误报与 Alt+V 系统菜单修复（2026-11-10）
 

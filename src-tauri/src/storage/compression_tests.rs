@@ -102,7 +102,7 @@ fn shared_save_deduplicates_before_preparing_any_objects() {
     let root = TestRoot::new("shared");
     let storage = Mutex::new(Storage::open(&root.0, &[43; 32]).unwrap());
     let clip = text_blob(68);
-    assert!(Storage::save_shared(&storage, &clip).unwrap());
+    assert!(Storage::save_shared(&storage, &clip).unwrap().inserted);
     let before: Vec<_> = fs::read_dir(root.0.join("data/blobs"))
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -110,7 +110,7 @@ fn shared_save_deduplicates_before_preparing_any_objects() {
     let mut extra = clip.clone();
     // 文件去重规则已有完整回归；这里验证普通记录走同一提前命中入口。
     extra.formats.reverse();
-    assert!(!Storage::save_shared(&storage, &extra).unwrap());
+    assert!(!Storage::save_shared(&storage, &extra).unwrap().inserted);
     assert_eq!(storage.lock().unwrap().list().unwrap().len(), 1);
     assert_eq!(
         fs::read_dir(root.0.join("data/blobs")).unwrap().count(),
@@ -128,7 +128,7 @@ fn prepared_objects_are_memory_only_and_commit_rechecks_duplicates() {
     assert!(store.save_with_outcome(&clip).unwrap());
     let blob = model::digest(&clip.formats[0].bytes);
     let original = fs::read(store.blobs.join(&blob)).unwrap();
-    assert!(!store.commit_prepared(prepared).unwrap());
+    assert!(!store.commit_prepared(prepared).unwrap().inserted);
     assert_eq!(fs::read(store.blobs.join(&blob)).unwrap(), original);
     assert_eq!(store.list().unwrap().len(), 1);
 }
@@ -140,7 +140,7 @@ fn prepared_save_survives_reclamation_during_preparation() {
     store.save(&clip).unwrap();
     let prepared = PreparedSave::new(&clip, SaveIdentity::new(&clip), &store.key).unwrap();
     assert_eq!(store.delete(&[clip.hash()]).unwrap().reclaimed_blobs, 1);
-    assert!(store.commit_prepared(prepared).unwrap());
+    assert!(store.commit_prepared(prepared).unwrap().inserted);
     assert_eq!(store.load(&clip.hash()).unwrap().formats, clip.formats);
 }
 #[test]
@@ -187,7 +187,7 @@ fn large_dib_cm02_roundtrip_and_timings() {
     let id = clip.hash();
     let blob = model::digest(plain);
     let start = Instant::now();
-    assert!(Storage::save_shared(&storage, &clip).unwrap());
+    assert!(Storage::save_shared(&storage, &clip).unwrap().inserted);
     let save_ms = start.elapsed().as_secs_f64() * 1000.0;
     let store = storage.lock().unwrap();
     let bytes = fs::read(store.blobs.join(&blob)).unwrap();
@@ -282,7 +282,9 @@ fn shared_concurrent_saves_keep_one_row_and_one_blob() {
             let gate = gate.clone();
             std::thread::spawn(move || {
                 gate.wait();
-                Storage::save_shared(&storage, &text_blob(71)).unwrap()
+                Storage::save_shared(&storage, &text_blob(71))
+                    .unwrap()
+                    .inserted
             })
         })
         .collect();

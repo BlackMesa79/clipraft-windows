@@ -34,6 +34,9 @@ pub fn validate_retention_policy(policy: &RetentionPolicy) -> Result<()> {
 #[derive(Debug, Default, Serialize)]
 pub struct DeleteReport {
     pub deleted_items: usize,
+    // 仅供内存采集上下文失效判断，不扩展前端响应或诊断日志中的记录信息。
+    #[serde(skip)]
+    pub(crate) deleted_ids: Vec<String>,
     pub reclaimed_blobs: usize,
     pub failed_blobs: Vec<String>,
     pub vacuumed: bool,
@@ -75,7 +78,10 @@ impl Storage {
                     candidates.insert(blob?);
                 }
                 formats.execute([id])?;
-                report.deleted_items += items.execute([id])?;
+                if items.execute([id])? > 0 {
+                    report.deleted_items += 1;
+                    report.deleted_ids.push(id.clone());
+                }
             }
         }
         tx.commit()?;
