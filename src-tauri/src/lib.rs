@@ -2,6 +2,7 @@ mod capture_policy;
 mod clipboard;
 mod diag;
 pub mod hook;
+mod image_normalize;
 pub mod model;
 pub mod paster;
 pub mod platform;
@@ -17,8 +18,23 @@ use std::{
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[tauri::command]
-fn list_items(state: tauri::State<'_, Arc<State>>) -> Vec<model::ItemView> {
-    state.items.lock().unwrap().clone()
+async fn list_items(
+    filter: storage::ListFilter,
+    offset: usize,
+    limit: usize,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<Vec<model::ItemView>, String> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .list_page(&filter, offset, limit)
+            .map_err(|e| format!("历史列表读取失败：{e}"))
+    })
+    .await
+    .map_err(|_| "历史列表任务失败")?
 }
 #[derive(serde::Serialize)]
 struct FileDetail {

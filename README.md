@@ -1,6 +1,6 @@
 # Windows 剪贴板管理器 M0
 
-Tauri 2 + Rust + Vue 3 的 Windows 技术验证原型。界面启动时隐藏，通过托盘或 Alt+V 打开，不要求管理员权限。当前不提供安装包。
+Tauri 2 + Rust + Vue 3 的 Windows 技术验证原型。界面启动时隐藏，通过托盘或 Alt+V 打开，不要求管理员权限。当前已完成 M1 / T1 存储层演进，仍不提供安装包。
 
 ## 构建与运行
 
@@ -61,9 +61,11 @@ src-tauri/icons/            Windows 图标
 .tools/                    工具、构建日志和临时文件，不提交
 ~~~
 
-Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名称、长度和内容计算哈希。Storage::save/load/list/touch 是存储接口；成功粘贴只按已有 id 更新 touched。Machine::step_with_logical / corrected_modifiers 是不调用 Win32 的键盘状态机及修饰键校正逻辑，release_decision 是等待修饰键释放的纯逻辑，toggle_decision 是主窗口显隐决策的纯逻辑，thumbnail::generate 可独立测试。
+Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名称、长度和内容计算哈希。Storage::save/load/list_page/touch 是存储接口，list 保留为第一页兼容接口；成功粘贴只按已有 id 更新 touched 和 used_at，不读取 blob。Machine::step_with_logical / corrected_modifiers 是不调用 Win32 的键盘状态机及修饰键校正逻辑，release_decision 是等待修饰键释放的纯逻辑，toggle_decision 是主窗口显隐决策的纯逻辑，thumbnail::generate 可独立测试。
 
 ## 已实现范围
+
+- M1 / T1：SQLCipher schema 版本 2、逐版事务迁移、迁移前加密备份和失败回滚；新增真实时间、大小、收藏/置顶/分组/来源/敏感字段与搜索文本，创建 groups/settings 表。主窗口分页并保持选中项和详情，图片采集先规范化尾部再哈希。最终建表语句和迁移说明见 [M1 存储层说明](docs/M1存储层说明.md)，人工复测见 [M1 人工验收清单](docs/M1人工验收清单.md)。
 
 - Ctrl+Shift+V 打开快速面板，默认第二条，只有一条时选第一条。V 每次独立按下前进一格，按住 V 的自动重复不前进；↓/↑ 向后/向前且允许自动重复、循环选择，Esc 取消。必需修饰键组合首次不再满足时提交，例如先松开 Shift。提交后 worker 先加载记录、校验文件源路径并写回剪贴板，再每 5ms 检查 8 个修饰键的 GetAsyncKeyState 逻辑状态；全部释放后才准备目标并粘贴，从开始等待起最多 1 秒，只有当前代号确实超时才提示“请松开修饰键后重试”。正常粘贴仅发送 Ctrl↓、V↓、V↑、Ctrl↑，不重新按下修饰键。主窗口路径与 inject 前的最终检查使用同一逻辑；PHYSICAL 仅供诊断，不再阻塞粘贴。钩子逐事件采样并清除已逻辑释放的陈旧记录，再叠加当前真实事件；Open/Commit 使用校正后的状态。
 - 面板预创建并隐藏，设置 NOACTIVATE / TOPMOST / TOOLWINDOW，以不激活方式显示，忽略鼠标输入。没有使用 AttachThreadInput。优先定位系统插入光标，失败则使用鼠标位置，并限制在屏幕工作区。
@@ -78,7 +80,7 @@ Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名�
 - SQLCipher 整库加密，随机 32 字节主密钥由当前用户 DPAPI 保护。原图、缩略图、预览图及超过 64 KiB 的格式数据经 HKDF 派生密钥和 XChaCha20-Poly1305 加密。对象名为内容哈希，并绑定到认证数据。
 - 主窗口显示选中项预览：图片额外保存最长边不超过 800px 的 PNG（加密落盘），旧记录没有 preview 时回退到缩略图；文本显示前 20000 个 Unicode 字符；文件显示完整路径及当前存在状态，可用“刷新状态”重新检查。
 - 新文件记录的第一个文件若为 png/jpg/jpeg/gif/bmp/webp 且不超过 50 MiB，会生成缩略图和预览。读取或解码失败保留记录并显示具体占位。预览是保存时快照，不随源文件修改自动更新。
-- 缩略图通过自定义协议在内存中解密；协议只允许读取数据库 view 中 thumbnail 或 preview 字段登记的哈希，不开放任意文件或未登记对象，响应禁止缓存。
+- 缩略图通过自定义协议在内存中解密；协议只允许读取数据库 items.thumbnail 或 items.preview 独立列登记的哈希，不开放任意文件或未登记对象，响应禁止缓存。
 
 正常运行数据位于 %APPDATA%\ClipboardM0：key.bin、history.db、data/blobs/ 和 WebView 数据目录。不要单独删除 key.bin；存在数据库却缺少密钥时会拒绝生成替代密钥。启动时分别提示 DPAPI 解密失败（可能更换了 Windows 账户或电脑）、key.bin 长度异常和数据库密钥不匹配，并提醒不要删除数据。数据库损坏也可能产生与错密钥相同的 SQLCipher 错误，提示不会武断地排除损坏。
 
@@ -88,12 +90,12 @@ Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名�
 ## 未实现与已知限制
 
 - 不实现 M1 的搜索、分组、收藏、历史清理、开机自启、应用忽略名单、敏感内容识别和自动删除。
-- 历史暂无自动清理，主界面只取最近 200 条。快捷键是源码常量，无设置界面；快速组合支持配置 Ctrl/Shift 与触发键，尚未开放 Alt/Win 组合配置；掩码机制已独立实现。
+- 历史暂无自动清理；主窗口每页 100 条滚动加载，快速面板缓存第一页 200 条，维持原有最多九条显示快照。快捷键是源码常量，无设置界面；快速组合支持配置 Ctrl/Shift 与触发键，尚未开放 Alt/Win 组合配置；掩码机制已独立实现。
 - 单次采集总量上限 128 MiB，最多 4096 个文件；图片解码有尺寸和内存上限，超过限制会提示。采集超限和格式无效分别提示，不再与占用混用。
 - 剪贴板占用最多退避 50/100/200/400/800ms（累计等待 1.55 秒，不含系统调用耗时）；耗尽只提示一次“剪贴板被其他程序长时间占用，本次复制未记录”。同序列失败后不再补采，需要新的复制变化；中途换序列放弃旧轮次，自写回无需打开剪贴板。退避发生在共享 worker，可能短暂延后其后排队的粘贴任务，不阻塞 broker/UI 线程。
 - Alt+V 在 broker 立即发送 0xE8 掩码；主窗口显示不再调用 tao 的 set_focus，保留恢复、显示、提升及原生 SetForegroundWindow。显示流程开始至完成后 300ms 仅拦截键盘 Alt 的 SC_KEYMENU（lParam=0），Alt+空格和鼠标系统菜单仍可用；这段短时间内主动单按 Alt 也会被抑制。Windows 仍可能拒绝前台激活，结果会写日志；真实最小化恢复、遮挡恢复和高负载时序仍须人工验证。
 - 文件记录保存路径和复制/剪切语义，不保存文件快照。源文件失效时阻止粘贴并报错，详情在选中、窗口获取焦点或点击“刷新状态”时检查存在性；不进行持续文件监控。剪切记录使用后可能因源路径消失而失效。
-- 图片尾部填充仍可能影响去重（D-6）；本轮未处理 D-7、D-10 及 R 系列风险点。
+- D-6 已处理 PNG / DIB 可确定的尾部填充；文件记录新增路径集合与复制/剪切语义的去重键，忽略附加 DIB/HTML；非文件记录跨编码、格式集合差异不做像素级去重，异常头保留原字节，旧哈希不重写。同一图片以“文件”和“位图”两种形式复制时仍是两条记录；迁移保留已有重复项，待 T2 删除功能完成后由用户清理。仍未处理 D-7、D-10 及 R 系列风险点。
 - 不抓取 HTML 远程图片，不对 HEIC、SVG 生成预览，GIF/WebP 仅预览静态帧。支持的剪贴板图片解码失败仍保留原始数据并显示占位。
 - 目标应用是否接受富文本、透明图片和文件取决于其格式支持。Word 专有格式、CF_BITMAP、OLE 对象不在本阶段范围。
 - 普通权限进程遇到管理员目标会报错，不提升权限或绕过 UIPI。窗口关闭、前台变化或系统拒绝恢复焦点时取消粘贴。
@@ -262,3 +264,38 @@ cargo test --manifest-path src-tauri/Cargo.toml --release large_image_benchmark 
 已观察到的非阻断诊断：MSVC 链接器报告 vendored OpenSSL 缺失 ossl_static.pdb（LNK4099），构建成功但相关原生库缺少可用调试符号；隔离 WebView2 退出时出现一次窗口类注销错误 1412，应用退出码为 0。尚未确认后一诊断在正常交互退出时是否复现。
 
 SQLCipher 错密钥单元测试会产生预期的 HMAC 验证失败诊断；该测试本身通过，日志不包含剪贴板内容或密钥。
+
+
+## M1 / T1 验证记录（2026-11-10）
+
+| 检查 | 实际结果 |
+|---|---|
+| `cargo fmt --check` | exit 0，无差异 |
+| `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| `cargo test` | exit 0；**184 passed / 0 failed / 1 ignored**，较基线增加 12 项 |
+| `npm run build` | exit 0；vue-tsc + Vite，16 modules transformed |
+| `node scripts/check-m1-ui.mjs` | 8 项通过：首屏、滚动末页、深页选择保持、详情竞态、失败重试、过期分页、窄窗口布局、快速面板缓存 |
+
+四项必需检查均在 `scripts/env.ps1` 环境下执行；Rust 测试使用 `RUST_TEST_THREADS=2`。完整日志位于 `.tools/m1-{fmt,clippy,test,build}.log`，浏览器结果位于 `.test-data/m1-ui/result.json`。链接阶段仍有已有 OpenSSL 静态库缺少 PDB 的 LNK4099 信息，测试成功；错密钥测试的 SQLCipher HMAC 诊断属于预期。没有新增依赖、安装软件、提交代码或修改 `.test-data/manual`。
+
+新增测试覆盖真实加密 M0 schema、内联/外部文本、图片 blob 与可解码缩略图/预览、文件路径、回填字段、同密钥打开备份、重开不重复迁移、备份重名不覆盖、注入失败回滚、数据库占用、新旧 schema 一致、版本拒绝降级、分页/过滤/时间更新、serde 兼容和图片规范化。Win32 剪贴板测试继续使用私有窗口站；浏览器使用独立配置和合成 IPC 数据，未操作桌面键鼠。
+
+T1 的 groups/settings 仅建表，其他元数据仅提供存储基础；FTS5、清理、设置业务、来源和敏感规则留给后续任务。列表不传输内部 search_text，快速面板仍从缓存读取。主窗口尚无虚拟列表，加载大量历史后内存和 DOM 成本会增长，实时变化通过事件重建已加载范围。迁移不重新哈希旧记录，因此旧图片与首次规范化记录可能并存。真实跨程序图片复制、原生焦点/输入法和粘贴未在本轮人工验收。
+
+
+## M1 / T1 文件记录去重修复（2026-11-10）
+
+新增 `Clip::dedup_key()`：文件按规范化路径集合和复制/剪切语义计算 SHA-256，其他记录继续使用内容 hash。`items` 升级到 schema v2，增加 `dedup_key TEXT` 和非唯一索引 `items_dedup_key`；沿用加密备份和逐版事务，支持 v0/v1 升级。回填只读取所需内联格式，无法计算时使用旧 id，旧重复项全部保留。
+
+保存先按去重键选取 touched 最大的一条，只更新 touched / used_at，并在生成预览或写 blob 前返回；保留首次保存的格式。自写回检测使用剪贴板序列号和本进程所有权标记，不依赖 id 与 hash 相同，本次未改动该检测、粘贴代号、修饰键逻辑或不读取 blob 的 `Storage::touch`。
+
+| 检查 | 本次实际结果 |
+|---|---|
+| `cargo fmt --check` | exit 0，无差异 |
+| `cargo clippy --all-targets -- -D warnings` | exit 0，Finished dev profile，3.45s |
+| `cargo test` | exit 0；**208 passed / 0 failed / 1 ignored**，较 196 passed 基线新增 12 项 |
+| `npm run build` | exit 0；vue-tsc + Vite，16 modules transformed，510ms |
+
+四项均先加载 `scripts/env.ps1`；Rust 测试并发为 2，日志为 `.tools/dedup-{fmt,clippy,test,build}.log`。新增测试覆盖键规范化/格式无关性、复制与剪切、损坏 HDROP 回退、双向保存保留首次格式且不新增 blob、v0/v1 回填与旧重复保留、最新 touched 命中、重开幂等以及 v2 失败回滚。已有 OpenSSL LNK4099 和错密钥测试的 SQLCipher HMAC 诊断不影响通过。
+
+未读取、写入或删除 `.test-data/manual`，未安装软件、未提交代码。本次没有执行桌面/QQ 人工操作，复测步骤见 [M1 人工验收清单](docs/M1人工验收清单.md)。

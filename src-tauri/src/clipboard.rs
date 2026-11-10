@@ -135,6 +135,7 @@ fn normalize(name: &str, mut bytes: Vec<u8>) -> Vec<u8> {
     } else if name == "Preferred DropEffect" {
         bytes.truncate(4);
     }
+    crate::image_normalize::normalize(name, &mut bytes);
     bytes
 }
 pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
@@ -750,6 +751,41 @@ mod tests {
             normalize("Rich Text Format", b"fixture\0padding".to_vec()),
             b"fixture\0"
         );
+    }
+
+    #[test]
+    fn capture_normalizes_image_padding_before_hashing() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mut dib = vec![0u8; 44];
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&1i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&1i32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        for (name, bytes) in [("PNG", png.into_inner()), ("CF_DIB", dib)] {
+            let capture = |padding| {
+                collect_formats(
+                    |requested| {
+                        if requested != name {
+                            return Ok(None);
+                        }
+                        let mut value = bytes.clone();
+                        if padding {
+                            value.extend([19; 71]);
+                        }
+                        Ok(Some(value))
+                    },
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .unwrap()
+            };
+            assert_eq!(capture(false).hash(), capture(true).hash());
+            assert_eq!(capture(true).get(name), Some(bytes.as_slice()));
+        }
     }
 
     #[test]

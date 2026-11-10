@@ -1,15 +1,30 @@
 pub mod crypto;
+#[cfg(test)]
+mod migration_tests;
+mod migrations;
 use crate::{
     model::{self, Clip, ItemView},
     thumbnail,
 };
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
+use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ListFilter {
+    pub kind: Option<String>,
+    pub favorite_only: bool,
+    pub group_id: Option<i64>,
+}
+
+pub const PAGE_LIMIT: usize = 500;
+pub const QUICK_PAGE_SIZE: usize = 200;
 
 pub struct Storage {
     conn: Connection,
@@ -18,6 +33,13 @@ pub struct Storage {
 }
 impl Storage {
     pub fn open(root: &Path, master: &[u8; 32]) -> Result<Self> {
+        Self::open_with_hook(root, master, |_| Ok(()))
+    }
+    fn open_with_hook(
+        root: &Path,
+        master: &[u8; 32],
+        hook: impl FnMut(&rusqlite::Transaction<'_>) -> Result<()>,
+    ) -> Result<Self> {
         fs::create_dir_all(root.join("data/blobs"))?;
         let conn = Connection::open(root.join("history.db"))?;
         // SQLCipher 原始密钥避免口令编码歧义；该 SQL 从不写入日志。
@@ -41,14 +63,14 @@ impl Storage {
                 anyhow::Error::new(error)
             }
         })?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON;
-            CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, view TEXT NOT NULL, touched INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS formats(item TEXT NOT NULL REFERENCES items(id), name TEXT NOT NULL, inline BLOB, blob TEXT, PRIMARY KEY(item,name));")?;
-        Ok(Self {
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA temp_store=MEMORY; PRAGMA secure_delete=ON; PRAGMA foreign_keys=ON;")?;
+        let mut storage = Self {
             conn,
             blobs: root.join("data/blobs"),
             key: crypto::derive(master),
-        })
+        };
+        migrations::upgrade(&mut storage, root, hook)?;
+        Ok(storage)
     }
     fn write_blob(&self, plain: &[u8]) -> Result<String> {
         let id = model::digest(plain);
@@ -67,7 +89,7 @@ impl Storage {
         }
         // 协议只访问登记过的缩略图或预览，不能通过猜测哈希读取其他对象。
         let allowed: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE json_extract(view,'$.thumbnail')=?1 OR json_extract(view,'$.preview')=?1)",
+            "SELECT EXISTS(SELECT 1 FROM items WHERE thumbnail=?1 OR preview=?1)",
             [id],
             |r| r.get(0),
         )?;
@@ -90,23 +112,73 @@ impl Storage {
         }
         crypto::decrypt(&self.key, id, &fs::read(self.blobs.join(id))?)
     }
+    /// 兼容原有调用者；快速面板只缓存第一页。
     pub fn list(&self) -> Result<Vec<ItemView>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT view FROM items ORDER BY touched DESC LIMIT 200")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+        self.list_page(&ListFilter::default(), 0, QUICK_PAGE_SIZE)
+    }
+    pub fn list_page(
+        &self,
+        filter: &ListFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<ItemView>> {
+        let mut sql = String::from("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE 1=1");
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(kind) = &filter.kind {
+            sql.push_str(" AND kind=?");
+            values.push(kind.clone().into());
+        }
+        if filter.favorite_only {
+            sql.push_str(" AND favorite=1");
+        }
+        if let Some(group) = filter.group_id {
+            sql.push_str(" AND group_id=?");
+            values.push(group.into());
+        }
+        sql.push_str(" ORDER BY pinned DESC,touched DESC,id ASC LIMIT ? OFFSET ?");
+        values.push((limit.min(PAGE_LIMIT) as i64).into());
+        values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
+            let json: String = r.get(0)?;
+            let mut view: ItemView = serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            view.id = r.get(1)?;
+            view.kind = r.get(2)?;
+            view.created = r.get(3)?;
+            view.used_at = r.get(4)?;
+            view.size = r.get(5)?;
+            view.pinned = r.get(6)?;
+            view.favorite = r.get(7)?;
+            view.group_id = r.get(8)?;
+            view.source_exe = r.get(9)?;
+            view.source_title = r.get(10)?;
+            view.sensitive = r.get(11)?;
+            view.expires_at = r.get(12)?;
+            view.thumbnail = r.get(13)?;
+            view.preview = r.get(14)?;
+            Ok(view)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
     pub fn save(&mut self, clip: &Clip) -> Result<()> {
         let id = clip.hash();
+        let dedup_key = clip.file_dedup_key().unwrap_or_else(|| id.clone());
+        let now = unix_millis();
         let order: i64 =
             self.conn
                 .query_row("SELECT COALESCE(MAX(touched),0)+1 FROM items", [], |r| {
                     r.get(0)
                 })?;
         if self.conn.execute(
-            "UPDATE items SET touched=?1 WHERE id=?2",
-            params![order, id],
+            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1)",
+            params![order, dedup_key, now, id],
         )? > 0
         {
             return Ok(());
@@ -149,6 +221,10 @@ impl Storage {
                 .transpose()?,
             placeholder: preview.placeholder,
             files,
+            created: now,
+            used_at: now,
+            size: clip.formats.iter().map(|f| f.bytes.len() as i64).sum(),
+            ..ItemView::default()
         };
         let mut stored = Vec::new();
         for f in &clip.formats {
@@ -170,8 +246,8 @@ impl Storage {
         }
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO items(id,view,touched) VALUES(?1,?2,?3)",
-            params![id, serde_json::to_string(&view)?, order],
+            "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10)",
+            params![id, display_json(&view)?, order, view.kind, now, view.size, search_text(clip), view.thumbnail, view.preview, dedup_key],
         )?;
         for (name, inline, blob) in stored {
             tx.execute(
@@ -185,8 +261,8 @@ impl Storage {
     /// 只更新已有记录的顺序；不加载格式、不哈希内容、不重写加密对象。
     pub fn touch(&self, id: &str) -> Result<()> {
         let changed = self.conn.execute(
-            "UPDATE items SET touched=(SELECT COALESCE(MAX(touched),0)+1 FROM items) WHERE id=?1",
-            [id],
+            "UPDATE items SET touched=(SELECT COALESCE(MAX(touched),0)+1 FROM items),used_at=?2 WHERE id=?1",
+            params![id, unix_millis()],
         )?;
         if changed == 0 {
             bail!("记录不存在");
@@ -220,6 +296,52 @@ impl Storage {
         Ok(clip)
     }
 }
+pub(super) fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// JSON 只保存展示字段，独立列不在两处重复保存。
+fn display_json(view: &ItemView) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "id": view.id, "summary": view.summary, "formats": view.formats,
+        "placeholder": view.placeholder, "files": view.files
+    }))?)
+}
+
+fn truncate_search_text(mut text: String) -> String {
+    let mut end = text.len().min(16 * 1024);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
+fn search_text(clip: &Clip) -> String {
+    let text = match clip.kind() {
+        "image" => String::new(),
+        "files" => clip
+            .get("CF_HDROP")
+            .and_then(model::decode_hdrop)
+            .unwrap_or_default()
+            .iter()
+            .map(|path| {
+                format!(
+                    "{}\n{}",
+                    path.rsplit(['\\', '/']).next().unwrap_or(path),
+                    path
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => clip.text().unwrap_or_default(),
+    };
+    truncate_search_text(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,7 +471,7 @@ mod preview_tests {
         let preview = view.preview.unwrap();
         store
             .conn
-            .execute("UPDATE items SET view=json_remove(view,'$.preview')", [])
+            .execute("UPDATE items SET preview=NULL", [])
             .unwrap();
         let old = store.list().unwrap().remove(0);
         assert!(old.preview.is_none());

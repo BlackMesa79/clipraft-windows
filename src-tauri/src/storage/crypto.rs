@@ -7,6 +7,9 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
+/// CM01 标记（4）+ XChaCha20 nonce（24）+ Poly1305 tag（16）。
+pub const BLOB_OVERHEAD: u64 = 44;
+
 pub fn random_key() -> Result<Zeroizing<[u8; 32]>> {
     let mut key = Zeroizing::new([0; 32]);
     getrandom::fill(key.as_mut()).map_err(|_| anyhow!("系统随机数不可用"))?;
@@ -38,7 +41,7 @@ pub fn encrypt(key: &[u8; 32], id: &str, plain: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 pub fn decrypt(key: &[u8; 32], id: &str, bytes: &[u8]) -> Result<Vec<u8>> {
-    if bytes.len() < 44 || &bytes[..4] != b"CM01" {
+    if bytes.len() < BLOB_OVERHEAD as usize || &bytes[..4] != b"CM01" {
         bail!("对象格式无效");
     }
     XChaCha20Poly1305::new(key.into())

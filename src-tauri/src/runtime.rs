@@ -91,7 +91,11 @@ pub fn report(_app: &AppHandle, state: &State, message: &str) {
     let _ = state.control.send(Control::Report(message.into()));
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
-    let items = state.storage.lock().unwrap().list()?;
+    let items = state.storage.lock().unwrap().list_page(
+        &crate::storage::ListFilter::default(),
+        0,
+        crate::storage::QUICK_PAGE_SIZE,
+    )?;
     let enabled = !items.is_empty() && state.ready.load(Ordering::Acquire);
     *state.items.lock().unwrap() = items;
     hook::READY.store(enabled, Ordering::Release);
@@ -255,7 +259,11 @@ impl NoticeDeadline {
 pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>> {
     let (jobs, rx) = mpsc::sync_channel(32);
     let (control, controls) = mpsc::channel();
-    let items = storage.list()?;
+    let items = storage.list_page(
+        &crate::storage::ListFilter::default(),
+        0,
+        crate::storage::QUICK_PAGE_SIZE,
+    )?;
     let state = Arc::new(State {
         items: Mutex::new(items),
         storage: Mutex::new(storage),

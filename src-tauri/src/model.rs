@@ -10,9 +10,10 @@ pub struct FormatData {
 pub struct Clip {
     pub formats: Vec<FormatData>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ItemView {
     pub id: String,
+    #[serde(default)]
     pub kind: String,
     pub summary: String,
     pub formats: Vec<String>,
@@ -21,6 +22,26 @@ pub struct ItemView {
     pub preview: Option<String>,
     pub placeholder: Option<String>,
     pub files: Vec<String>,
+    #[serde(default)]
+    pub created: i64,
+    #[serde(default)]
+    pub used_at: i64,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub group_id: Option<i64>,
+    #[serde(default)]
+    pub source_exe: Option<String>,
+    #[serde(default)]
+    pub source_title: Option<String>,
+    #[serde(default)]
+    pub sensitive: bool,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 impl Clip {
     pub fn get(&self, name: &str) -> Option<&[u8]> {
@@ -55,11 +76,42 @@ impl Clip {
         }
         format!("{:x}", h.finalize())
     }
+    /// 文件按路径集合与剪切语义去重；其他内容保持原有哈希身份。
+    pub fn dedup_key(&self) -> String {
+        self.file_dedup_key().unwrap_or_else(|| self.hash())
+    }
+    /// 迁移仅持有所需内联格式，失败时由调用者退回旧 id。
+    pub(crate) fn file_dedup_key(&self) -> Option<String> {
+        let mut paths = decode_hdrop(self.get("CF_HDROP")?)?;
+        if paths.is_empty() {
+            return None;
+        }
+        for path in &mut paths {
+            *path = path
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_lowercase();
+        }
+        paths.sort();
+        paths.dedup();
+        let cut = self
+            .get("Preferred DropEffect")
+            .and_then(|bytes| bytes.get(..4))
+            .is_some_and(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) & 2 != 0);
+        // HDROP 路径不能包含 NUL，以它分隔集合成员，避免路径拼接歧义。
+        Some(digest(
+            format!("files:{}:{}", u8::from(cut), paths.join("\0")).as_bytes(),
+        ))
+    }
     pub fn kind(&self) -> &'static str {
         if self.get("CF_HDROP").is_some() {
             "files"
         } else if image_priority().iter().any(|n| self.get(n).is_some()) {
             "image"
+        } else if self.get("CF_UNICODETEXT").is_none()
+            && (self.get("HTML Format").is_some() || self.get("Rich Text Format").is_some())
+        {
+            "rich"
         } else {
             "text"
         }
@@ -152,5 +204,86 @@ mod tests {
     #[test]
     fn priority_is_explicit() {
         assert_eq!(image_priority(), ["PNG", "CF_DIBV5", "CF_DIB"]);
+    }
+    fn files(paths: &[&str], effect: Option<u32>) -> Clip {
+        let mut clip = Clip {
+            formats: vec![f(
+                "CF_HDROP",
+                &encode_hdrop(&paths.iter().map(|p| (*p).into()).collect::<Vec<_>>()),
+            )],
+        };
+        if let Some(effect) = effect {
+            clip.formats
+                .push(f("Preferred DropEffect", &effect.to_le_bytes()));
+        }
+        clip
+    }
+    #[test]
+    fn dedup_normalizes_path_case_separators_and_trailing_separators() {
+        let a = files(&[r"D:\MyFiles\Desktop\IMAGE.JPG"], Some(5));
+        let b = files(&["d:/myfiles/desktop/image.jpg/"], Some(1));
+        assert_eq!(a.dedup_key(), b.dedup_key());
+        assert_ne!(a.hash(), b.hash());
+        assert!(is_hash(&a.dedup_key()));
+    }
+    #[test]
+    fn dedup_sorts_and_deduplicates_file_sets_without_boundary_collisions() {
+        let a = files(&[r"C:\a", r"D:\b", "c:/A/"], None);
+        let b = files(&[r"d:\B", r"c:\A"], None);
+        assert_eq!(a.dedup_key(), b.dedup_key());
+        assert_ne!(a.dedup_key(), files(&[r"C:\aD:\b"], None).dedup_key());
+        assert_ne!(a.dedup_key(), files(&[r"C:\a"], None).dedup_key());
+    }
+    #[test]
+    fn dedup_ignores_extra_bitmap_and_html_formats_for_files() {
+        let a = files(&[r"D:\Desktop\image.jpg"], Some(5));
+        let mut b = files(&[r"D:\Desktop\image.jpg"], Some(1));
+        b.formats.extend([
+            f("CF_DIB", &[1; 100]),
+            f("CF_DIBV5", &[2; 100]),
+            f("HTML Format", b"<img>"),
+        ]);
+        assert_eq!(a.dedup_key(), b.dedup_key());
+        assert_ne!(a.hash(), b.hash());
+    }
+    #[test]
+    fn dedup_move_bit_distinguishes_cut_from_copy_and_link() {
+        let key = files(&[r"C:\a"], None).dedup_key();
+        for effect in [0, 1, 4, 5] {
+            assert_eq!(key, files(&[r"C:\a"], Some(effect)).dedup_key());
+        }
+        let cut = files(&[r"C:\a"], Some(2)).dedup_key();
+        assert_ne!(key, cut);
+        for effect in [3, 6, 7] {
+            assert_eq!(cut, files(&[r"C:\a"], Some(effect)).dedup_key());
+        }
+        let mut short = files(&[r"C:\a"], None);
+        short.formats.push(f("Preferred DropEffect", &[2]));
+        assert_eq!(key, short.dedup_key());
+    }
+    #[test]
+    fn dedup_non_files_keep_the_content_hash() {
+        for format in [
+            f("CF_UNICODETEXT", &[65, 0, 0, 0]),
+            f("PNG", b"png"),
+            f("CF_DIB", b"dib"),
+            f("CF_DIBV5", b"dibv5"),
+        ] {
+            let clip = Clip {
+                formats: vec![format],
+            };
+            assert_eq!(clip.dedup_key(), clip.hash());
+        }
+    }
+    #[test]
+    fn dedup_invalid_or_empty_hdrop_falls_back_to_hash() {
+        let mut truncated = encode_hdrop(&[r"C:\a".into()]);
+        truncated.truncate(truncated.len() - 2);
+        for bytes in [vec![], vec![0; 20], truncated, encode_hdrop(&[])] {
+            let clip = Clip {
+                formats: vec![f("CF_HDROP", &bytes), f("HTML Format", b"fallback")],
+            };
+            assert_eq!(clip.dedup_key(), clip.hash());
+        }
     }
 }
