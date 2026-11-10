@@ -1,0 +1,249 @@
+//! 可选诊断：钩子仅投递脱敏定长消息，文件写入由专用线程完成。
+use crate::{hook, paster, platform};
+use anyhow::Result;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        mpsc::{self, SyncSender},
+        OnceLock,
+    },
+    thread,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+use windows::Win32::{
+    Foundation::{LPARAM, WPARAM},
+    System::Threading::GetCurrentThreadId,
+    UI::{Input::KeyboardAndMouse::GetKeyboardLayout, WindowsAndMessaging::*},
+};
+const KEY_MESSAGE: u32 = WM_APP + 91;
+const TEXT_MESSAGE: u32 = WM_APP + 92;
+static THREAD: AtomicU32 = AtomicU32::new(0);
+static LOST: AtomicU32 = AtomicU32::new(0);
+static CLOCK: OnceLock<Instant> = OnceLock::new();
+static TEXT: OnceLock<SyncSender<(u64, String)>> = OnceLock::new();
+static MAIN_OPEN: AtomicBool = AtomicBool::new(false);
+static QUICK_OPEN: AtomicBool = AtomicBool::new(false);
+static UNTIL: AtomicU64 = AtomicU64::new(0);
+fn millis() -> u64 {
+    CLOCK
+        .get()
+        .map_or(0, |clock| clock.elapsed().as_millis() as u64 + 1)
+}
+pub fn enabled() -> bool {
+    THREAD.load(Ordering::Relaxed) != 0
+}
+fn open_log(root: &Path) -> std::io::Result<std::fs::File> {
+    // 诊断先于主密钥初始化，新数据目录可能尚不存在。
+    std::fs::create_dir_all(root)?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("diag.log"))
+}
+pub fn init(root: &Path) -> Result<()> {
+    if std::env::var("CLIPBOARD_M0_DIAG").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let mut file = open_log(root)?;
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis();
+    writeln!(
+        file,
+        "session unix_ms={epoch} modifier_order=A2,A3,A0,A1,A4,A5,5B,5C"
+    )?;
+    let _ = CLOCK.set(Instant::now());
+    let (tx, rx) = mpsc::sync_channel::<(u64, String)>(1024);
+    let _ = TEXT.set(tx);
+    let (ready, wait) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("diagnostic-log".into())
+        .spawn(move || unsafe {
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+            THREAD.store(GetCurrentThreadId(), Ordering::Release);
+            let _ = ready.send(());
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                if msg.message == KEY_MESSAGE {
+                    let packed = msg.wParam.0;
+                    let vk = packed & 0x1ff;
+                    let name = if vk == 0x100 {
+                        "other".into()
+                    } else {
+                        format!("0x{vk:02X}")
+                    };
+                    let action = hook::Action::from_raw((packed >> 12) & 7);
+                    let _ = writeln!(
+                        file,
+                        "t_ms={} key vk={name} down={} injected={} swallowed={} action={action:?}",
+                        msg.lParam.0,
+                        packed & 512 != 0,
+                        packed & 1024 != 0,
+                        packed & 2048 != 0
+                    );
+                }
+                while let Ok((time, text)) = rx.try_recv() {
+                    let _ = writeln!(file, "t_ms={time} {text}");
+                }
+                let lost = LOST.swap(0, Ordering::Relaxed);
+                if lost != 0 {
+                    let _ = writeln!(file, "t_ms={} dropped={lost}", millis());
+                }
+                let _ = file.flush();
+            }
+        })?;
+    wait.recv()?;
+    Ok(())
+}
+pub fn panel(quick: bool, open: bool) {
+    if !enabled() {
+        return;
+    }
+    let state = if quick { &QUICK_OPEN } else { &MAIN_OPEN };
+    if state.swap(open, Ordering::Relaxed) && !open {
+        UNTIL.store(millis() + 2000, Ordering::Relaxed);
+    }
+}
+fn in_window(main: bool, quick: bool, now: u64, until: u64) -> bool {
+    main || quick || (until != 0 && now <= until)
+}
+fn safe_vk(vk: u32) -> usize {
+    if matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C | 0x56 | 0x25..=0x28 | 0x1B) {
+        vk as usize
+    } else {
+        0x100
+    }
+}
+pub fn keyboard(
+    vk: u32,
+    down: bool,
+    injected: bool,
+    swallowed: bool,
+    action: Option<hook::Action>,
+) {
+    let id = THREAD.load(Ordering::Relaxed);
+    if id == 0 {
+        return;
+    }
+    let now = millis();
+    if !in_window(
+        MAIN_OPEN.load(Ordering::Relaxed),
+        QUICK_OPEN.load(Ordering::Relaxed),
+        now,
+        UNTIL.load(Ordering::Relaxed),
+    ) {
+        return;
+    }
+    // 脱敏在跨线程前完成；普通键码不会进入消息队列。
+    let packed = safe_vk(vk)
+        | ((down as usize) << 9)
+        | ((injected as usize) << 10)
+        | ((swallowed as usize) << 11)
+        | (action.map_or(0, |a| a as usize) << 12);
+    if unsafe { PostThreadMessageW(id, KEY_MESSAGE, WPARAM(packed), LPARAM(now as isize)) }.is_err()
+    {
+        LOST.fetch_add(1, Ordering::Relaxed);
+    }
+}
+pub fn write(text: String) {
+    if !enabled() {
+        return;
+    }
+    if TEXT
+        .get()
+        .is_some_and(|tx| tx.try_send((millis(), text)).is_err())
+    {
+        LOST.fetch_add(1, Ordering::Relaxed);
+    }
+    unsafe {
+        let _ = PostThreadMessageW(
+            THREAD.load(Ordering::Relaxed),
+            TEXT_MESSAGE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+pub fn foreground() -> String {
+    unsafe {
+        let hwnd = platform::hwnd(platform::foreground());
+        let mut class = [0u16; 256];
+        let count = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        let tid = GetWindowThreadProcessId(hwnd, None);
+        let layout = GetKeyboardLayout(tid);
+        format!(
+            "class={:?} hkl={:X}",
+            String::from_utf16_lossy(&class[..count]),
+            layout.0 as usize
+        )
+    }
+}
+pub fn snapshot(stage: &str) {
+    if !enabled() {
+        return;
+    }
+    let logical = paster::logical();
+    let physical = hook::PHYSICAL.load(Ordering::SeqCst);
+    let keys: Vec<_> = hook::MODIFIER_KEYS
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            format!(
+                "{k:02X}:async={},physical={}",
+                (logical >> i) & 1,
+                (physical >> i) & 1
+            )
+        })
+        .collect();
+    write(format!(
+        "paste stage={stage} {} modifiers=[{}]",
+        foreground(),
+        keys.join(" ")
+    ));
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn log_creates_new_data_directory_and_preserves_existing_log() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.test-data")
+            .join(format!(
+                "diag-init-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        assert!(!root.exists());
+        writeln!(open_log(&root).unwrap(), "first").unwrap();
+        writeln!(open_log(&root).unwrap(), "second").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("diag.log")).unwrap(),
+            "first\nsecond\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn ordinary_keys_are_redacted_before_posting() {
+        for vk in 0..=255 {
+            let allowed = [
+                0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C, 0x56, 0x25, 0x26,
+                0x27, 0x28, 0x1B,
+            ]
+            .contains(&vk);
+            assert_eq!(safe_vk(vk), if allowed { vk as usize } else { 0x100 });
+        }
+        assert_eq!(safe_vk(0xE8), 0x100);
+    }
+    #[test]
+    fn events_only_within_panel_or_two_second_tail() {
+        assert!(!in_window(false, false, 0, 0));
+        assert!(in_window(true, false, 5000, 0));
+        assert!(in_window(false, true, 5000, 0));
+        assert!(in_window(false, false, 3000, 3000));
+        assert!(!in_window(false, false, 3001, 3000));
+    }
+}
