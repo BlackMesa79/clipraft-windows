@@ -180,6 +180,9 @@ pub fn foreground() -> String {
     }
 }
 pub fn snapshot(stage: &str) {
+    modifier_snapshot("paste", stage);
+}
+pub fn modifier_snapshot(context: &str, stage: &str) {
     if !enabled() {
         return;
     }
@@ -197,7 +200,7 @@ pub fn snapshot(stage: &str) {
         })
         .collect();
     write(format!(
-        "paste stage={stage} {} modifiers=[{}]",
+        "{context} stage={stage} {} modifiers=[{}]",
         foreground(),
         keys.join(" ")
     ));

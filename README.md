@@ -32,6 +32,8 @@ npm 缓存位于 node_modules/.cache/npm，Cargo 缓存位于 D:\DevTools\cargo�
 
 SQLCipher 的指定特性需要 OpenSSL 源码构建，依赖完整 Perl。使用便携版 Strawberry Perl 5.42.3.1，位于 D:\DevTools\perl（整包 SHA256 已与官方发布页核对一致）。env.ps1 只把 perl\bin 加入当前进程 PATH，不加入 c\bin，以免 MinGW 干扰 MSVC。未修改注册表或全局 PATH。
 
+dev 配置为本 crate `opt-level = 1`、依赖 `[profile.dev.package."*"] opt-level = 3`，继续保留 `debug = 1`。首次切换会重编译依赖，耗时明显多于只重编本 crate；后续修改本 crate 复用依赖缓存，仍支持调试，但优化可能使逐行单步和局部变量观察不如 opt-level 0 直接。构建实测见下方“大图粘贴修复验证记录”。
+
 ## 目录与模块
 
 ~~~text
@@ -43,9 +45,10 @@ scripts/
 src-tauri/src/
   lib.rs                   Tauri 启动、命令、托盘、缩略图协议
   model.rs                 多格式模型、内容哈希、CF_HDROP 编解码
-  hook.rs                  纯状态机、低级键盘钩子、物理修饰键状态
+  hook.rs                  纯状态机、低级键盘钩子、修饰键状态校正
   clipboard.rs             Win32 采集、隐私过滤、多格式写回
-  paster.rs                目标校验、焦点恢复、等待修饰键释放、掩码键和 Ctrl+V
+  paster.rs                代号与阶段编排、目标校验、焦点恢复、可取消等待、Ctrl+V
+  paste_bench.rs           显式运行的合成大图基准，使用私有窗口站剪贴板
   diag.rs                  可选脱敏诊断、专用日志线程
   platform.rs              DPAPI、数据目录、光标定位、不激活窗口
   runtime.rs               消息窗口、工作线程、历史快照、UI 协调
@@ -58,18 +61,18 @@ src-tauri/icons/            Windows 图标
 .tools/                    工具、构建日志和临时文件，不提交
 ~~~
 
-Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名称、长度和内容计算哈希。Storage::save/load/list 是存储接口。Machine::step 是不调用 Win32 的键盘状态机，release_decision 是等待修饰键释放的纯逻辑，toggle_decision 是主窗口显隐决策的纯逻辑，thumbnail::generate 可独立测试。
+Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名称、长度和内容计算哈希。Storage::save/load/list/touch 是存储接口；成功粘贴只按已有 id 更新 touched。Machine::step_with_logical / corrected_modifiers 是不调用 Win32 的键盘状态机及修饰键校正逻辑，release_decision 是等待修饰键释放的纯逻辑，toggle_decision 是主窗口显隐决策的纯逻辑，thumbnail::generate 可独立测试。
 
 ## 已实现范围
 
-- Ctrl+Shift+V 打开快速面板，默认第二条，只有一条时选第一条。V 每次独立按下前进一格，按住 V 的自动重复不前进；↓/↑ 向后/向前且允许自动重复、循环选择，Esc 取消。必需修饰键组合首次不再满足时提交，例如先松开 Shift。提交后每 5ms 检查 8 个修饰键的 PHYSICAL 与 GetAsyncKeyState；全部释放后才粘贴，最多等待 1 秒，超时提示“请松开修饰键后重试”。正常粘贴仅发送 Ctrl↓、V↓、V↑、Ctrl↑，不重新按下修饰键。主窗口路径使用同一等待逻辑。
+- Ctrl+Shift+V 打开快速面板，默认第二条，只有一条时选第一条。V 每次独立按下前进一格，按住 V 的自动重复不前进；↓/↑ 向后/向前且允许自动重复、循环选择，Esc 取消。必需修饰键组合首次不再满足时提交，例如先松开 Shift。提交后 worker 先加载记录、校验文件源路径并写回剪贴板，再每 5ms 检查 8 个修饰键的 GetAsyncKeyState 逻辑状态；全部释放后才准备目标并粘贴，从开始等待起最多 1 秒，只有当前代号确实超时才提示“请松开修饰键后重试”。正常粘贴仅发送 Ctrl↓、V↓、V↑、Ctrl↑，不重新按下修饰键。主窗口路径与 inject 前的最终检查使用同一逻辑；PHYSICAL 仅供诊断，不再阻塞粘贴。钩子逐事件采样并清除已逻辑释放的陈旧记录，再叠加当前真实事件；Open/Commit 使用校正后的状态。
 - 面板预创建并隐藏，设置 NOACTIVATE / TOPMOST / TOOLWINDOW，以不激活方式显示，忽略鼠标输入。没有使用 AttachThreadInput。优先定位系统插入光标，失败则使用鼠标位置，并限制在屏幕工作区。
-- Open 到达 broker 后立即用 SendInput 发送未分配虚拟键 0xE8 的按下/抬起作为掩码，降低纯 Ctrl+Shift / Shift 被系统或输入法解释为切换命令的风险；钩子忽略注入事件，不更改物理键状态。实际输入法兼容性须人工复测。
+- Open 到达 broker 后立即用 SendInput 发送未分配虚拟键 0xE8 的按下/抬起作为掩码，降低纯 Ctrl+Shift / Shift 被系统或输入法解释为切换命令的风险；注入事件本身不更新对应键的真实按下记录，也不触发面板动作；其他键的陈旧状态仍可校正。实际输入法兼容性须人工复测。
 - 键盘钩子拥有独立消息循环。回调只更新固定大小状态、读写原子变量和 PostThreadMessage，不执行数据库、图片解码或 UI 调用。
-- 面板打开时固定最多九条的列表快照，选中状态由 Rust 事件推送。新采集记录不会改变当前选择。粘贴失败或队列繁忙时，以 NOACTIVATE 快速面板显示错误约 2 秒，随后清除提示并隐藏；重新开始选择会取消旧提示的关闭期限。
+- 面板打开时固定最多九条的列表快照，选中状态由 Rust 事件推送。新采集记录不会改变当前选择。粘贴失败或队列繁忙时，以 NOACTIVATE 快速面板显示错误约 2 秒，随后清除提示并隐藏；仅错误提示时按内容高度缩小窗口，不显示空白列表，重新选择时恢复原尺寸。重新开始选择会取消旧提示的关闭期限。
 - Alt+V 仅在主窗口可见、未最小化且位于前台时隐藏；其他情况恢复最小化、显示、提升窗口并请求焦点。托盘采用相同决策。回车或双击粘贴，Shift+Enter 只写回已有纯文本格式；无纯文本则返回错误。关闭按钮和 Esc 隐藏主窗口，托盘菜单退出应用。
 - 采集 CF_UNICODETEXT、HTML Format、Rich Text Format、PNG、CF_DIBV5、CF_DIB、CF_HDROP 和 Preferred DropEffect。文件规范化为 UTF-16 DROPFILES，缺失或不足 4 字节的 DropEffect 默认复制，写回时重新构造文件格式。
-- 受支持的单个格式读取失败时，只记录固定格式名并跳过该格式；其他成功格式仍保存，全部失败则不记录。总大小超限仍拒绝整条记录；隐私标记不可读时保持不记录。
+- 受支持的单个格式读取失败时，只记录固定格式名并跳过该格式；其他成功格式仍保存；正文格式全部失败则不记录，并提示“剪贴板格式无效或数据不可读，本次复制未记录”。孤立的可选 DropEffect 元数据仍静默丢弃。总大小超限仍拒绝整条记录；隐私标记不可读时保持不记录。
 - 自写回通过私有标记和序列号识别，成功粘贴后将原记录置顶。监控排除标记直接忽略；CanIncludeInClipboardHistory 为零或格式损坏时忽略。日志不记录内容。
 - 按 PNG、DIBV5、DIB 的顺序尝试解码；处理 32 位 DIBV5 位域透明度。失败显示格式、尺寸或“尺寸未知”，不会留下空白。
 - SQLCipher 整库加密，随机 32 字节主密钥由当前用户 DPAPI 保护。原图、缩略图、预览图及超过 64 KiB 的格式数据经 HKDF 派生密钥和 XChaCha20-Poly1305 加密。对象名为内容哈希，并绑定到认证数据。
@@ -79,18 +82,25 @@ Clip 保留同一记录的全部受支持格式，hash 对排序后的格式名�
 
 正常运行数据位于 %APPDATA%\ClipboardM0：key.bin、history.db、data/blobs/ 和 WebView 数据目录。不要单独删除 key.bin；存在数据库却缺少密钥时会拒绝生成替代密钥。启动时分别提示 DPAPI 解密失败（可能更换了 Windows 账户或电脑）、key.bin 长度异常和数据库密钥不匹配，并提醒不要删除数据。数据库损坏也可能产生与错密钥相同的 SQLCipher 错误，提示不会武断地排除损坏。
 
+- 新意图优先：快速面板 Open 在钩子中递增 AtomicU64 代号，主窗口 Toggle 决定显示时也递增。消息及任务保留原代号；过期任务在加载前、各阶段之间、等待期间和注入前静默放弃，旧任务报错在控制线程再次按代号过滤。已经写入的剪贴板可保留；成功后用单条 UPDATE 置顶，不重新哈希。
+- 写回图片同时具有 PNG 和 CF_DIBV5 时省略 CF_DIB，保留存储中的全部格式。普通格式直接从解密缓冲区复制到 HGLOBAL，取消中间 Vec 克隆；只有文件列表需要重新编码。缺少 PNG 或 DIBV5 时仍保留原有 DIB。
+
 ## 未实现与已知限制
 
 - 不实现 M1 的搜索、分组、收藏、历史清理、开机自启、应用忽略名单、敏感内容识别和自动删除。
 - 历史暂无自动清理，主界面只取最近 200 条。快捷键是源码常量，无设置界面；快速组合支持配置 Ctrl/Shift 与触发键，尚未开放 Alt/Win 组合配置；掩码机制已独立实现。
-- 单次采集总量上限 128 MiB，最多 4096 个文件；图片解码有尺寸和内存上限，超过限制会提示。
+- 单次采集总量上限 128 MiB，最多 4096 个文件；图片解码有尺寸和内存上限，超过限制会提示。采集超限和格式无效分别提示，不再与占用混用。
+- 剪贴板占用最多退避 50/100/200/400/800ms（累计等待 1.55 秒，不含系统调用耗时）；耗尽只提示一次“剪贴板被其他程序长时间占用，本次复制未记录”。同序列失败后不再补采，需要新的复制变化；中途换序列放弃旧轮次，自写回无需打开剪贴板。退避发生在共享 worker，可能短暂延后其后排队的粘贴任务，不阻塞 broker/UI 线程。
+- Alt+V 在 broker 立即发送 0xE8 掩码；主窗口显示不再调用 tao 的 set_focus，保留恢复、显示、提升及原生 SetForegroundWindow。显示流程开始至完成后 300ms 仅拦截键盘 Alt 的 SC_KEYMENU（lParam=0），Alt+空格和鼠标系统菜单仍可用；这段短时间内主动单按 Alt 也会被抑制。Windows 仍可能拒绝前台激活，结果会写日志；真实最小化恢复、遮挡恢复和高负载时序仍须人工验证。
 - 文件记录保存路径和复制/剪切语义，不保存文件快照。源文件失效时阻止粘贴并报错，详情在选中、窗口获取焦点或点击“刷新状态”时检查存在性；不进行持续文件监控。剪切记录使用后可能因源路径消失而失效。
 - 图片尾部填充仍可能影响去重（D-6）；本轮未处理 D-7、D-10 及 R 系列风险点。
 - 不抓取 HTML 远程图片，不对 HEIC、SVG 生成预览，GIF/WebP 仅预览静态帧。支持的剪贴板图片解码失败仍保留原始数据并显示占位。
 - 目标应用是否接受富文本、透明图片和文件取决于其格式支持。Word 专有格式、CF_BITMAP、OLE 对象不在本阶段范围。
 - 普通权限进程遇到管理员目标会报错，不提升权限或绕过 UIPI。窗口关闭、前台变化或系统拒绝恢复焦点时取消粘贴。
+- 本轮未采用延迟渲染。当前由 worker 分配和写回，listener 消息窗口持有所有权；若改为 64 KiB 以上格式使用 `SetClipboardData(fmt, NULL)`，必须同步设计内存缓存、`WM_RENDERFORMAT` / `WM_RENDERALLFORMATS` / `WM_DESTROYCLIPBOARD` 生命周期、退出前完整渲染及自写回识别，并避免 worker 持锁时同步窗口消息造成互等。本轮优先优化已测得的解密瓶颈和拷贝，延期实施跨线程所有权改造。
+- 取消是阶段间协作式取消，不中断已在执行的解密、系统写回或焦点准备。检查与 SendInput 之间仍有极短竞态；按键已成功发出后无法撤销目标应用的异步粘贴，大图解码/显示耗时取决于目标应用。
 - 剪贴板写回和目标程序消费之间没有事务保证。写回成功但按键发送失败时，剪贴板仍为选中记录。SendInput 成功也不表示目标应用一定接受内容。
-- 暂无生产级钩子健康监测和掉钩自动恢复。16ms 显示延迟、多屏 DPI、远程桌面、休眠、输入法和修饰键竞态需人工实测。
+- 钩子丢失抬起事件后的陈旧修饰键记录会在后续事件中校正，粘贴等待不再依赖该记录；若没有后续事件，状态机不会自行触发 Commit。暂无生产级钩子健康监测和掉钩自动恢复。16ms 显示延迟、多屏 DPI、远程桌面、休眠、输入法和修饰键竞态需人工实测。
 - 加密保护落盘数据，不防护当前 Windows 用户下的恶意进程或进程内存读取。
 
 ## 人工验收步骤
@@ -126,16 +136,94 @@ npm run tauri dev
 
 日志追加到数据目录的 `diag.log`。去掉 `CLIPBOARD_M0_DIAG` 或设为 `0` 后重新启动即可关闭；默认不记录。不要删除 `.test-data\manual` 或其中密钥、历史。分享前检查窗口类名是否涉及应用身份信息。
 
-- 会记录：会话 Unix 毫秒时间与相对毫秒时间；限定时段内按键的按下/抬起、是否注入、是否吞掉、Open/Next/Previous/Commit/Cancel 动作；粘贴前后 8 个修饰键的异步与物理状态；前台窗口类名和 HKL；每次 SendInput 的请求数量及实际返回数量；Toggle 的可见/最小化/前台状态与恢复、显示、提升、set_focus、SetForegroundWindow 结果。
+- 会记录：会话 Unix 毫秒时间与相对毫秒时间；限定时段内按键的按下/抬起、是否注入、是否吞掉、Open/Next/Previous/Commit/Cancel 动作；粘贴前后 8 个修饰键的异步与物理状态；前台窗口类名和 HKL；每次 SendInput 的请求数量及实际返回数量；Toggle 的可见/最小化/前台状态与恢复、显示、提升、SetForegroundWindow 结果（不再调用 set_focus），以及 Toggle 显示流程前后的 8 个修饰键快照（`toggle stage=before_show/after_show`）。
+- 采集每轮记录 capture sequence/current/self_write/busy/retries/result/reason，result 为 ok/skipped/busy/limit/invalid，不记录内容；retries 为实际退避次数，busy 表示本轮是否遇到占用，superseded 表示新序列留给下一轮。Alt+V 记录 hotkey mask_ok 和底层 SendInput 数量，以及 toggle stage=hotkey_after_mask；短时拦截记录 toggle alt_menu_suppressed=true。
 - 按键记录只在主窗口或快速面板打开期间及关闭后 2 秒内启用。只保留修饰键、V、方向键、Esc 的虚拟键码，其他键（包括掩码 0xE8）一律写 `other`；普通字符的键码不会进入日志消息队列。快速面板以钩子 Open/Commit/Cancel 时刻界定，确保掩码和提交后的输入能被观察。
+- 每个执行到的粘贴阶段各记录一次 `paste generation=… phase=load/write/wait/prepare/inject/touch elapsed_ms=… status=ok/error/superseded`，单位毫秒，保留三位小数。过期任务未执行的阶段不会伪造耗时；`paste_superseded` 表示静默退出。`before_wait` 现在位于 load/write 之后，不能再与旧日志同名快照直接对比关键路径。load 阶段列出受支持格式名与原始字节数，`clipboard_write` 列出实际写入格式名与字节数，可确认 DIB 被省略。inject 耗时包含准备期间重新按键时的最终可取消等待。
 - 不记录剪贴板文本、图片、文件路径、窗口标题、输入字符或密钥。日志为诊断元数据明文，不属于加密历史；HKL 只能反映键盘布局，不能单独证明输入法中英文模式没有变化。
 - 钩子不做 IO、堆分配或同步等待，仅向日志线程 PostThreadMessage 投递脱敏定长数据。日志拥堵时丢弃并累计 `dropped`，不阻塞键盘；非钩子日志也使用有界队列。
 - 验证输入法时分别选择微软拼音的中文/英文模式、不同键盘布局，交替先松 Ctrl/Shift、同时松键、Esc 取消，确认模式和布局均不切换。若出现异常，保留发生时间、按键顺序及相邻日志；不要仅凭推测认定 TSF 根因。
 
 
-## 本轮严重问题修复验证（2026-11-10）
+## 采集占用误报与 Alt+V 系统菜单修复（2026-11-10）
 
-- `npm run build`、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 全部通过；`cargo test` 当前共 130 项通过、0 失败。每次 cargo 命令前均在 PowerShell 加载 `scripts/env.ps1`，Rust 命令均指定 `--manifest-path src-tauri/Cargo.toml`。
+- 根因核实：修复前 open 为 8 次尝试、每次失败等待 8ms，capture 在打开后才识别 SELF_SEQUENCE；worker 只在成功时推进 LAST_SEQUENCE，250ms 定时器会再次排队。以上代码路径已确认；“QQ 持锁读取约 30MB”的实际时长及这次截图的具体消息顺序未进行现场测量，仍属待复测的触发条件。
+- 本地 Cargo.lock 锁定 tao 0.37.2；缓存源码 D:/DevTools/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tao-0.37.2/src/platform_impl/windows/window.rs:139 的 set_focus 调用 force_window_active，后者在 1514 行先尝试 SetForegroundWindow，失败后在 1524–1540 行构造并发送左 Alt 按下/抬起，再次激活。这是条件回退，不代表每次 set_focus 都注入；window_state.rs 的显示/恢复路径使用 ShowWindow，不走该 Alt 回退。
+- 采集新增 Busy/Limit/Invalid 类型化结果、worker 退避和序列去重；在打开前、取得锁后、读取后及等待前后核对序列。成功、跳过和最终失败均确认对应序列，等待期间的新变化在本轮结束后补排。保留隐私标记、所有权标记、有效格式容错与 DropEffect 默认复制行为。
+- Alt+V 的 WM_HOTKEY 在发送 Toggle 之前立即掩码并记录结果；保留 Toggle 原有“仅当前台、可见且非最小化时隐藏”的判定。移除 set_focus 的 Alt 回退，保留 unminimize/show/SetWindowPos/SetForegroundWindow；主线程安装主窗口子类化，仅在短时窗吞掉指定 SC_KEYMENU，销毁时移除，其余消息继续转发。
+- 新增 15 项纯逻辑测试：13 项采集测试覆盖自写回不读取、占用后成功、等待前/中换序列、等待中变自写回、耗尽仅报告一次、最后一次失败再核对、成功/跳过/失败去重、序列回绕、读取中换序列、所有权确认和日志不含内容；2 项菜单保护测试覆盖 300ms 边界、低位掩码、Alt+空格、鼠标及其他命令不被拦截。更新正文格式全部失败的既有测试预期；原短 DropEffect 回归测试保留。
+- 本轮不接管键鼠、不向 QQ 等应用实际粘贴；“连续粘贴大图 10 次”和“Alt+V 呼出 20 次无系统菜单”仍待人工执行，详见人工清单末节。未安装软件、未改系统/用户环境变量或 env.ps1、未 commit，未修改或删除 .test-data/manual。已有未提交改动保持；修改前相关文件备份在 .tools/capture-menu-backup，仅供对照，不应覆盖后续工作。
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| cargo fmt --manifest-path src-tauri/Cargo.toml --check | 通过 | .tools/capture-menu-fmt.log |
+| cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings | 通过 | .tools/capture-menu-clippy.log |
+| cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=2 | **172 项通过、0 失败、1 项基准默认忽略**（基线 157，新添 15） | .tools/capture-menu-test.log |
+| npm run build | TypeScript 与 Vite 生产构建通过 | .tools/capture-menu-frontend.log |
+| git diff --check | 通过 | 无空白错误 |
+
+每次 cargo 前均在 PowerShell 加载 scripts/env.ps1。测试使用已有私有窗口站，不覆盖桌面剪贴板；未运行 ignored 大图基准。既有 OpenSSL LNK4099 链接警告仍存在，错密钥测试的 SQLCipher HMAC 诊断属于预期输出。
+
+
+## 大图粘贴修复验证记录（2026-11-10）
+
+- 保留 HEAD adcc989 上已有的未提交修复，本轮未 commit、未安装软件、未修改环境配置文件或系统/用户环境变量；每次 cargo 前均加载 scripts/env.ps1。未写入或删除 .test-data/manual，未接管键鼠、未向 QQ/codeg 发送实际粘贴。
+- 日志旧样本：before_wait 129052 → before_send 134629 为 5577 ms，发送 134635 → paste_complete 135567 为 932 ms。旧日志没有分阶段计时，这两个值不能拆成精确的 load/write/touch；也不能直接与下面不同图片的合成测试比较。
+- 修复路径统一为 load → 文件源校验/write → 可取消 wait → prepare → 最终代号与修饰键检查/inject → touch → 列表刷新。新 Open/主窗口显示使旧代号失效；完成的粘贴只用已有 id 更新 touched。既有修饰键校正、掩码、正常成对 Ctrl+V 和 UI 修复均保留。
+
+性能数据使用同一固定种子的 3200×3200 RGB 噪声图片：PNG **30,725,608 B（约 29.3 MiB）**、DIBV5 **40,960,124 B**、DIB **30,720,040 B**，存储格式合计 **102,405,772 B（约 97.7 MiB）**。这是“约 30MB 图片”在多个格式中的完整存储载荷；写回后保留 PNG + DIBV5，减少 **30,720,040 B** 的显式分配与写入，并去掉普通格式的中间克隆。
+
+同机顺序执行，私有 Windows 窗口站真实 OpenClipboard/SetClipboardData；每种构建先预热 1 次，再取 5 次样本的中位数，文件缓存为热态。各列独立取中位数，合计列按每轮 load + write 实测，不包含样本生成、首次保存/缩略图、目标应用解码显示或按键注入。
+
+| 构建/实现 | load（ms） | write（ms） | load + write（ms） | 置顶（ms） |
+|---|---:|---:|---:|---:|
+| 未优化 dev / 旧实现 | 9991.748 | 48.833 | 10040.582 | 1362.053 |
+| 优化 dev / 新实现 | 112.028 | 25.228 | 137.622 | 0.650 |
+| release / 新实现 | 96.336 | 25.651 | 122.093 | 0.722 |
+
+- 未优化 dev 基线使用修改前生产实现及 opt-level 0；dev 测试 profile 继承新 dev 配置（本 crate 1 / 依赖 3），release 使用标准优化配置。dev 的 load + write 约快 **73.0 倍**，耗时减少 **98.6%**；这是合成基准收益，不等于 QQ/codeg 输入框的端到端耗时。
+- load + write 的 5 次测量范围：未优化 dev 9931.021–10220.821 ms；优化 dev 135.520–142.852 ms；release 119.977–125.963 ms。release 首次编译约 6 分 58 秒；本轮无先前 release 构建缓存。
+- 新 dev profile 首次切换重编译耗时 **10 分 16 秒**（构建+基准总计约 618.6 秒）；原未优化基线只增量编译测试目标用了 3.27 秒，不能作为全冷编译对照。优化依赖和原生依赖的初次构建成本显著增加，后续本 crate 修改会复用依赖缓存。
+- 每次优化后基准结束，在计时外读取 CF_DIB，确认 Windows 能提供兼容格式；随后 capture 确认仍跳过自写回。该检查不替代 QQ/codeg 中透明度、视觉效果及真实连续粘贴的人工验收。
+- **未实现延迟渲染**。评估理由见“已知限制”：当前线程分工需要一并解决缓存、同步回调、所有权变更、退出完整渲染与自写回识别；本轮优化已大幅缩短主要耗时，暂不扩大到这项生命周期改造。
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| cargo fmt --manifest-path src-tauri/Cargo.toml --check | 通过 | .tools/paste-fmt.log |
+| cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings | 通过 | .tools/paste-clippy.log |
+| cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=2 | **157 项通过、0 失败、1 项基准默认忽略** | .tools/paste-test.log |
+| npm run build | TypeScript 检查和 Vite 生产构建通过 | .tools/paste-frontend.log |
+| dev / release 大图基准 | 各 1 项显式测试通过，兼容 DIB 与自写回识别检查通过 | .tools/paste-bench-dev.log、paste-bench-release.log |
+| git diff --check | 通过 | 无空白错误 |
+
+既有 vendored OpenSSL 缺少 ossl_static.pdb 的 LNK4099 链接警告仍存在，不阻断构建；错密钥测试的 SQLCipher HMAC 诊断为预期输出，测试通过。
+
+新增 **20 项自动测试**：代号/等待/阶段顺序 11 项（等待中换代立即静默退出、超时边界、采样中换代优先、队列过期、各阶段取消、失败不置顶、已注入后仍置顶），文件源预检 2 项，touch 3 项（排序、元数据/blob 不变、无需读取对象、未知 id 无副作用），格式选择 4 项（PNG+DIBV5 省略 DIB、缺格式时保留 DIB、纯文本与过滤）。另新增 1 项默认 ignored 的性能基准，dev/release 分别显式运行。原有系统剪贴板测试现已使用私有窗口站，不覆盖用户桌面剪贴板；本进程切换窗口站串行执行。
+
+复现基准（一次只运行一个构建，避免同时运行其他重型测试）：
+
+~~~powershell
+. .\scripts\env.ps1
+cargo test --manifest-path src-tauri/Cargo.toml large_image_benchmark --lib -- --ignored --nocapture --test-threads=1
+. .\scripts\env.ps1
+cargo test --manifest-path src-tauri/Cargo.toml --release large_image_benchmark --lib -- --ignored --nocapture --test-threads=1
+~~~
+
+原始样本在每次打印的 .test-data/paste-bench-*/timings.csv；日志为 .tools/paste-bench-baseline.log、paste-bench-dev.log、paste-bench-release.log，统计为 .tools/paste-bench-summary.json。未优化源码快照位于 .tools/paste-fix-backup（不覆盖当前工作区恢复旧版本）。人工清单 D 节已增加“大图粘贴后立即重新打开面板选择另一条”及主窗口/快速面板交替复测，仍待真人在 QQ/codeg 执行。
+
+
+## 修饰键卡住修复验证记录（2026-11-10）
+
+- 根因已由只读日志与代码确认：`.test-data/manual/diag.log:1303–1307` 显示左 Alt 按下、Toggle 显示后，出现 `A4:async=0,physical=1` 并在约 1 秒后取消粘贴；旧 `(logical | physical)` 判定会持续超时。tao 注入 Alt 或抬起丢失的具体来源尚未证实，新增显示前后快照供人工追踪。
+- `release_decision` 已移除 physical 参数；等待和注入前检查都仅依据系统逻辑状态。钩子使用同一纯函数校正 Machine 与 PHYSICAL，不把逻辑按下补记为真实按下，注入事件不触发 Open/Commit。
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=2`、`npm run build` 全部通过。Rust 共 **137 项通过、0 失败**（基线 130 项，新增 7 项），每次 cargo 前均加载 `scripts/env.ps1`。证据：`.tools/modifier-fmt.log`、`.tools/modifier-clippy.log`、`.tools/modifier-test.log`、`.tools/modifier-frontend.log`。
+- 新增 7 项钩子回归测试覆盖：抬起丢失后单按 V 不 Open、后续真实事件 Commit 且仅一次、8 个当前事件覆盖旧采样、清除陈旧状态但不补记注入键、注入 Alt 不打开/提交、注入抬起不覆盖真实当前键、左右双修饰键与成对吞键。同步更新 4 项释放等待测试，覆盖逻辑按下、全部释放、逻辑滞后和 1 秒边界。
+- 独立 Edge 无头渲染 5 项检查通过：短提示、多行提示增高、超长提示限高滚动、重新打开列表恢复 530px、再次提示缩小。短提示 420×106、多行提示 420×178，已目视检查无空白列表或裁字。证据：`.tools/modifier-ui/result.json`、`short.jpg`、`long.jpg`；脚本为 `.tools/modifier-ui-check.mjs`。此项使用合成 IPC，不代表原生窗口缩放、焦点、多屏 DPI 或真实粘贴已验收。
+- 已在人工验收清单加入“Alt+V 呼出并关闭主窗口若干次，再连续快速粘贴 10 次”的复测项，当前仍待人工执行。未接管键鼠、未安装软件、未 commit、未修改系统/用户环境变量，未写入或删除 `.test-data/manual`。既有系统剪贴板测试会写入合成内容并清空系统剪贴板，不发送按键。
+
+## 此前严重问题修复验证（2026-11-10）
+
+- `npm run build`、`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 全部通过；该轮 `cargo test` 共 130 项通过、0 失败。每次 cargo 命令前均在 PowerShell 加载 `scripts/env.ps1`，Rust 命令均指定 `--manifest-path src-tauri/Cargo.toml`。
 - `cargo build --features custom-protocol` 成功；保留既有 vendored OpenSSL 缺少 `ossl_static.pdb` 的 LNK4099 非阻断警告。
 - `CLIPBOARD_M0_SMOKE=1`、`CLIPBOARD_M0_DIAG=1` 在新建隔离目录启动，退出码 0。两个前端、缩略图与大预览协议均就绪；diag.log 已生成；监听器和钩子关闭。证据：`.tools/m0-fix-smoke-summary.json`。
 - 使用独立 Edge 无头进程、合成 IPC 数据检查图片、图片文件、旧记录、加载失败占位、长文本、窄窗口和快速面板；7 项断言通过，另已检查大图、窄窗口和错误占位的压缩截图。此项验证前端渲染，不能证明原生焦点和真实粘贴。证据：`.tools/m0-ui/result.json` 与同目录图片。
@@ -169,7 +257,7 @@ npm run tauri dev
 - D-8：platform.rs 中 shell_blacklist_includes_popup_menu_and_all_shell_classes，覆盖 #32768 与原有外壳类名。
 - D-9：platform.rs 新增 dpapi_failure_has_actionable_message_and_preserves_file、invalid_key_length_is_distinct_and_preserves_file；storage/mod.rs 的 encrypted_persistence_and_dedup 增加错密钥错误类别及中文提示断言，并保留使用正确密钥重开的验证。
 
-现有 system_tests 会直接覆盖并清空系统剪贴板；它们未发送按键，也未向真实应用粘贴。D-1 的人工验收还需确认错误面板不抢焦点、约 2 秒隐藏，以及提示期间重新呼出面板不会被旧期限关闭。
+此前验证时的 system_tests 会直接覆盖并清空系统剪贴板；它们未发送按键，也未向真实应用粘贴。D-1 的人工验收还需确认错误面板不抢焦点、约 2 秒隐藏，以及提示期间重新呼出面板不会被旧期限关闭。
 
 已观察到的非阻断诊断：MSVC 链接器报告 vendored OpenSSL 缺失 ossl_static.pdb（LNK4099），构建成功但相关原生库缺少可用调试符号；隔离 WebView2 退出时出现一次窗口类注销错误 1412，应用退出码为 0。尚未确认后一诊断在正常交互退出时是否复现。
 

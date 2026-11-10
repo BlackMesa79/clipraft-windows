@@ -29,3 +29,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [profile.dev]
 debug = 1
+opt-level = 1
+
+# 依赖首次编译更慢；避免加解密、哈希和图片处理在开发构建中退化。
+[profile.dev.package."*"]
+opt-level = 3

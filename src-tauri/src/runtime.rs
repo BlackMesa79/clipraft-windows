@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Sender, SyncSender},
         Arc, Mutex, OnceLock,
     },
@@ -34,8 +34,17 @@ static LISTENER: AtomicIsize = AtomicIsize::new(0);
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
 static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
 static CAPTURE_PENDING: AtomicBool = AtomicBool::new(false);
-static LAST_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+use clipboard::LAST_SEQUENCE;
 static LAST_EXTERNAL: AtomicIsize = AtomicIsize::new(0);
+static PASTE_GENERATION: AtomicU64 = AtomicU64::new(0);
+pub fn paste_generation() -> u64 {
+    PASTE_GENERATION.load(Ordering::Acquire)
+}
+pub fn new_paste_intent() -> u64 {
+    PASTE_GENERATION
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1)
+}
 pub enum Job {
     Capture,
     Paste {
@@ -43,13 +52,15 @@ pub enum Job {
         target: isize,
         restore: bool,
         plain: bool,
+        generation: u64,
     },
 }
 pub enum Control {
-    Hook(Action),
+    Hook(Action, u64),
     Toggle,
     Hide,
     Report(String),
+    PasteReport(String, u64),
 }
 #[derive(Clone, Serialize, Default)]
 pub struct Panel {
@@ -88,6 +99,9 @@ pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
     Ok(())
 }
 fn queue_capture() {
+    if unsafe { GetClipboardSequenceNumber() } == LAST_SEQUENCE.load(Ordering::Acquire) {
+        return;
+    }
     if !CAPTURE_PENDING.swap(true, Ordering::AcqRel)
         && WORK
             .get()
@@ -103,6 +117,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             LRESULT(0)
         }
         WM_HOTKEY => {
+            // 先掩码再调度 Toggle，避免 Alt 松开后进入菜单模式。
+            let masked = paster::mask_shortcut();
+            diag::write(format!("hotkey mask_ok={}", masked.is_ok()));
+            diag::modifier_snapshot("toggle", "hotkey_after_mask");
             if let Some(tx) = CONTROL.get() {
                 let _ = tx.send(Control::Toggle);
             }
@@ -167,18 +185,23 @@ fn start_broker() -> Result<u32> {
                     while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                         if msg.message == hook::ACTION_MESSAGE {
                             if let Some(action) = Action::from_raw(msg.wParam.0) {
+                                let generation = msg.lParam.0 as u64;
+                                if generation != paste_generation() {
+                                    continue;
+                                }
                                 // 掩码必须先于 UI 调度，由 broker 尽快注入。
                                 if action == Action::Open {
                                     if let Err(error) = paster::mask_shortcut() {
                                         if let Some(tx) = CONTROL.get() {
-                                            let _ = tx.send(Control::Hook(Action::Cancel));
+                                            let _ =
+                                                tx.send(Control::Hook(Action::Cancel, generation));
                                             let _ = tx.send(Control::Report(error.to_string()));
                                         }
                                         continue;
                                     }
                                 }
                                 if let Some(tx) = CONTROL.get() {
-                                    let _ = tx.send(Control::Hook(action));
+                                    let _ = tx.send(Control::Hook(action, generation));
                                 }
                             }
                         } else {
@@ -258,10 +281,10 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
             while let Ok(job) = rx.recv() {
                 match job {
                     Job::Capture => {
-                        let sequence = unsafe { GetClipboardSequenceNumber() };
-                        match clipboard::capture(platform::hwnd(LISTENER.load(Ordering::Acquire))) {
+                        match clipboard::capture_pending(platform::hwnd(
+                            LISTENER.load(Ordering::Acquire),
+                        )) {
                             Ok(clip) => {
-                                LAST_SEQUENCE.store(sequence, Ordering::Release);
                                 if let Some(clip) = clip {
                                     let result = worker.storage.lock().unwrap().save(&clip);
                                     if result.is_err() {
@@ -271,52 +294,87 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                                     }
                                 }
                             }
-                            Err(_) => report(
-                                &a,
-                                &worker,
-                                "采集失败：剪贴板被占用、格式无效或超过 128 MiB 限制",
-                            ),
+                            Err(error) => report(&a, &worker, &error.to_string()),
                         }
                         CAPTURE_PENDING.store(false, Ordering::Release);
+                        // 等待期间的变化可能被合并，补排尚未处理的新序列。
+                        queue_capture();
                     }
                     Job::Paste {
                         id,
                         target,
                         restore,
                         plain,
+                        generation,
                     } => {
-                        diag::snapshot("before_wait");
-                        let result = (|| -> Result<()> {
-                            paster::wait_for_release()?;
-                            let clip = worker.storage.lock().unwrap().load(&id)?;
-                            if let Some(data) = clip.get("CF_HDROP") {
-                                for p in crate::model::decode_hdrop(data)
-                                    .ok_or_else(|| anyhow!("文件记录无效"))?
-                                {
-                                    if !std::path::Path::new(&p).exists() {
-                                        return Err(anyhow!("源文件已失效，无法粘贴"));
+                        let intent = paster::PasteIntent::new(&PASTE_GENERATION, generation);
+                        let mut clip = None;
+                        let result = paster::run_paste(&intent, |stage| {
+                            match stage {
+                                paster::PasteStage::Load => {
+                                    let loaded = worker.storage.lock().unwrap().load(&id)?;
+                                    for format in &loaded.formats {
+                                        // 仅输出固定支持格式的名称和大小，不记录内容或记录标识。
+                                        if clipboard::SUPPORTED
+                                            .iter()
+                                            .any(|(name, _)| *name == format.name)
+                                        {
+                                            diag::write(format!(
+                                                "paste generation={generation} format={} bytes={}",
+                                                format.name,
+                                                format.bytes.len()
+                                            ));
+                                        }
                                     }
+                                    clip = Some(loaded);
+                                }
+                                paster::PasteStage::Write => {
+                                    let clip =
+                                        clip.as_ref().ok_or_else(|| anyhow!("粘贴记录尚未加载"))?;
+                                    validate_sources(clip, |p| std::path::Path::new(p).exists())?;
+                                    clipboard::write(
+                                        platform::hwnd(LISTENER.load(Ordering::Acquire)),
+                                        clip,
+                                        plain,
+                                    )?;
+                                }
+                                paster::PasteStage::Wait => {
+                                    diag::snapshot("before_wait");
+                                    return paster::wait_for_release(&intent);
+                                }
+                                paster::PasteStage::Prepare => {
+                                    paster::prepare(
+                                        target,
+                                        worker.main.load(Ordering::Acquire),
+                                        restore,
+                                    )?;
+                                }
+                                paster::PasteStage::Inject => {
+                                    return paster::inject(target, &intent)
+                                }
+                                paster::PasteStage::Touch => {
+                                    worker.storage.lock().unwrap().touch(&id)?
                                 }
                             }
-                            paster::prepare(target, worker.main.load(Ordering::Acquire), restore)?;
-                            clipboard::write(
-                                platform::hwnd(LISTENER.load(Ordering::Acquire)),
-                                &clip,
-                                plain,
-                            )?;
-                            paster::inject(target)?;
-                            // 自写回不会重新采集，但成功粘贴仍应将已有记录置顶。
-                            worker.storage.lock().unwrap().save(&clip)?;
-                            refresh(&a, &worker)?;
+                            Ok(paster::PasteStatus::Complete)
+                        });
+                        diag::snapshot(match &result {
+                            Ok(paster::PasteStatus::Complete) => "paste_complete",
+                            Ok(paster::PasteStatus::Superseded) => "paste_superseded",
+                            Err(_) => "paste_cancelled",
+                        });
+                        let result = result.and_then(|status| {
+                            if status == paster::PasteStatus::Complete {
+                                refresh(&a, &worker)?;
+                            }
                             Ok(())
-                        })();
-                        diag::snapshot(if result.is_ok() {
-                            "paste_complete"
-                        } else {
-                            "paste_cancelled"
                         });
                         if let Err(e) = result {
-                            report(&a, &worker, &e.to_string());
+                            if intent.is_current() {
+                                let _ = worker
+                                    .control
+                                    .send(Control::PasteReport(e.to_string(), generation));
+                            }
                         }
                     }
                 }
@@ -346,7 +404,14 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 match event {
-                    Control::Report(message) => {
+                    Control::Report(_) | Control::PasteReport(_, _) => {
+                        let (message, generation) = match event {
+                            Control::Report(message) => (message, None),
+                            Control::PasteReport(message, generation) => (message, Some(generation)),
+                            _ => unreachable!(),
+                        };
+                        if generation.is_some_and(|g| g != paste_generation()) { continue; }
+                        *s.error.lock().unwrap() = Some(message.clone());
                         if !panel.visible {
                             panel.items.clear();
                             panel.selected = 0;
@@ -357,6 +422,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                         notice.reset(Instant::now());
                         let shared = s.clone();
                         on_main(&a, move || {
+                            if generation.is_some_and(|g| g != paste_generation()) { return; }
                             // 错误提示跟随当前前台位置，以 NOACTIVATE 显示，不恢复旧目标焦点。
                             let _ = platform::show_notice(shared.quick.load(Ordering::Acquire));
                             let mut error = shared.error.lock().unwrap();
@@ -366,6 +432,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                         });
                     }
                     Control::Toggle => {
+                        *s.error.lock().unwrap() = None;
                         notice.cancel();
                         panel.error = None;
                         let _ = a.emit("operation-error", "");
@@ -393,14 +460,21 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                                     diag::panel(false, result.is_err());
                                     diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=hide before={before:?} hide_ok={} after={}", result.is_ok(), diag::foreground()));
                                 } else {
+                                    new_paste_intent();
+                                    *shared.error.lock().unwrap() = None;
                                     shared.target.store(external, Ordering::Release);
+                                    diag::modifier_snapshot("toggle", "before_show");
+                                    platform::arm_main_menu_guard();
                                     let restored = window.unminimize();
                                     let shown = window.show();
                                     let raised = unsafe { SetWindowPos(platform::hwnd(shared.main.load(Ordering::Acquire)), Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
-                                    let focused = window.set_focus();
+                                    // tao 的 set_focus 失败回退会注入 Alt，这里只使用原生激活。
                                     let foreground_ok = unsafe { SetForegroundWindow(platform::hwnd(shared.main.load(Ordering::Acquire))).as_bool() };
+                                    // 显示过程也受保护，完成后再保留完整的 300ms 时窗。
+                                    platform::arm_main_menu_guard();
+                                    diag::modifier_snapshot("toggle", "after_show");
                                     diag::panel(false, shown.is_ok());
-                                    diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=show before={before:?} restore_ok={} show_ok={} raise_ok={} set_focus_ok={} set_foreground_ok={foreground_ok} after={}", restored.is_ok(), shown.is_ok(), raised.is_ok(), focused.is_ok(), diag::foreground()));
+                                    diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=show before={before:?} restore_ok={} show_ok={} raise_ok={} set_foreground_ok={foreground_ok} after={}", restored.is_ok(), shown.is_ok(), raised.is_ok(), diag::foreground()));
                                 }
                             }
                         });
@@ -409,8 +483,12 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                         let main = s.main.load(Ordering::Acquire);
                         on_main(&a, move || { platform::hide(main); diag::panel(false, false); });
                     }
-                    Control::Hook(action) => match action {
+                    Control::Hook(action, generation) => {
+                        // 消息携带产生时的代号，旧 Commit 不能借用新 Open 的代号。
+                        if generation != paste_generation() { continue; }
+                        match action {
                         Action::Open => {
+                            *s.error.lock().unwrap() = None;
                             target = platform::foreground();
                             if !platform::valid_external(target) {
                                 diag::panel(true, false);
@@ -435,8 +513,9 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                             let app = a.clone();
                             let shared = s.clone();
                             on_main(&a, move || {
+                                if generation != paste_generation() { return; }
                                 if platform::show_quick(quick, target).is_err() {
-                                    let _ = shared.control.send(Control::Hook(Action::Cancel));
+                                    let _ = shared.control.send(Control::Hook(Action::Cancel, generation));
                                     report(&app, &shared, "前台窗口已变化，面板已取消");
                                 }
                             });
@@ -466,6 +545,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                                             target,
                                             restore: false,
                                             plain: false,
+                                            generation,
                                         })
                                         .is_err()
                                     {
@@ -475,6 +555,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                             }
                         }
                         _ => {}
+                        }
                     },
                 }
             }
@@ -489,6 +570,16 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
         hook::start(receiver)?;
     }
     Ok(state)
+}
+fn validate_sources(clip: &crate::model::Clip, mut exists: impl FnMut(&str) -> bool) -> Result<()> {
+    if let Some(data) = clip.get("CF_HDROP") {
+        for path in crate::model::decode_hdrop(data).ok_or_else(|| anyhow!("文件记录无效"))? {
+            if !exists(&path) {
+                return Err(anyhow!("源文件已失效，无法粘贴"));
+            }
+        }
+    }
+    Ok(())
 }
 #[derive(Debug, PartialEq, Eq)]
 enum ToggleDecision {
@@ -585,5 +676,40 @@ mod tests {
             notice.remaining(now + Duration::from_secs(9)),
             Duration::ZERO
         );
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::model::{encode_hdrop, Clip, FormatData};
+    #[test]
+    fn file_sources_are_all_checked_before_write() {
+        let clip = Clip {
+            formats: vec![FormatData {
+                name: "CF_HDROP".into(),
+                bytes: encode_hdrop(&["first".into(), "missing".into()]),
+            }],
+        };
+        let mut checked = Vec::new();
+        let error = validate_sources(&clip, |p| {
+            checked.push(p.to_string());
+            p != "missing"
+        })
+        .unwrap_err();
+        assert_eq!(checked, ["first", "missing"]);
+        assert_eq!(error.to_string(), "源文件已失效，无法粘贴");
+        assert!(validate_sources(&clip, |_| true).is_ok());
+    }
+    #[test]
+    fn malformed_file_record_fails_and_non_file_record_needs_no_paths() {
+        let clip = Clip {
+            formats: vec![FormatData {
+                name: "CF_HDROP".into(),
+                bytes: vec![0; 3],
+            }],
+        };
+        assert!(validate_sources(&clip, |_| panic!("无效格式不应访问路径")).is_err());
+        assert!(validate_sources(&Clip::default(), |_| panic!("非文件记录无需检查路径")).is_ok());
     }
 }

@@ -1,16 +1,21 @@
 use anyhow::{anyhow, bail, Result};
 use std::{
+    cell::Cell,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use windows::{
     core::w,
     Win32::{
-        Foundation::{LocalFree, HLOCAL, HWND, POINT},
+        Foundation::{LocalFree, HLOCAL, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::*,
         Security::Cryptography::*,
-        UI::WindowsAndMessaging::*,
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            WindowsAndMessaging::*,
+        },
     },
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -137,6 +142,50 @@ pub fn master_key(root: &Path) -> Result<Zeroizing<[u8; 32]>> {
     file.sync_all()?;
     Ok(key)
 }
+
+// 仅主窗口 UI 线程读写；短时保护不影响 Alt+空格、鼠标菜单或正常尺寸调整。
+thread_local! {
+    static MAIN_MENU_SHOWN_AT: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+const MAIN_MENU_SUBCLASS: usize = 0x4D30;
+fn suppress_alt_menu(command: usize, parameter: isize, elapsed: Option<Duration>) -> bool {
+    command & 0xFFF0 == SC_KEYMENU as usize
+        && parameter == 0
+        && elapsed.is_some_and(|duration| duration < Duration::from_millis(300))
+}
+pub fn arm_main_menu_guard() {
+    MAIN_MENU_SHOWN_AT.with(|shown| shown.set(Some(Instant::now())));
+}
+unsafe extern "system" fn main_menu_subclass(
+    window: HWND,
+    message: u32,
+    w: WPARAM,
+    l: LPARAM,
+    id: usize,
+    _data: usize,
+) -> LRESULT {
+    let elapsed = MAIN_MENU_SHOWN_AT.with(|shown| shown.get().map(|time| time.elapsed()));
+    if message == WM_SYSCOMMAND && suppress_alt_menu(w.0, l.0, elapsed) {
+        crate::diag::write("toggle alt_menu_suppressed=true".into());
+        return LRESULT(0);
+    }
+    if message == WM_NCDESTROY {
+        MAIN_MENU_SHOWN_AT.with(|shown| shown.set(None));
+        let _ = RemoveWindowSubclass(window, Some(main_menu_subclass), id);
+    }
+    DefSubclassProc(window, message, w, l)
+}
+pub fn prepare_main(raw: isize) -> Result<()> {
+    // setup 在窗口所属线程安装；销毁时移除，并将其余消息继续交给 tao/WebView。
+    if unsafe { SetWindowSubclass(hwnd(raw), Some(main_menu_subclass), MAIN_MENU_SUBCLASS, 0) }
+        .as_bool()
+    {
+        Ok(())
+    } else {
+        bail!("主窗口菜单保护安装失败")
+    }
+}
+
 pub fn prepare_quick(raw: isize) -> Result<()> {
     unsafe {
         let h = hwnd(raw);
@@ -167,6 +216,35 @@ pub fn show_quick(raw: isize, target: isize) -> Result<()> {
 pub fn show_notice(raw: isize) -> Result<()> {
     // 提示不执行粘贴，不依赖原目标窗口仍在前台。
     position_quick(raw, foreground())
+}
+// 只调整现有窗口大小与屏内位置，不激活、不显示已经隐藏的窗口。
+pub fn resize_quick(raw: isize, height: i32) -> Result<()> {
+    unsafe {
+        let h = hwnd(raw);
+        let mut rect = Default::default();
+        GetWindowRect(h, &mut rect)?;
+        let mut monitor = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mut top = rect.top;
+        let mut height = height;
+        if GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mut monitor).as_bool() {
+            let area = monitor.rcWork;
+            height = height.min(area.bottom - area.top);
+            top = top.clamp(area.top, (area.bottom - height).max(area.top));
+        }
+        SetWindowPos(
+            h,
+            None,
+            rect.left,
+            top,
+            rect.right - rect.left,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )?;
+        Ok(())
+    }
 }
 fn position_quick(raw: isize, target: isize) -> Result<()> {
     unsafe {
@@ -351,5 +429,36 @@ mod tests {
             assert!(is_shell_window_class(name));
         }
         assert!(!is_shell_window_class("Notepad"));
+    }
+}
+
+#[cfg(test)]
+mod menu_guard_tests {
+    use super::*;
+    #[test]
+    fn suppresses_only_alt_menu_during_first_300ms() {
+        for ms in [0, 100, 299] {
+            assert!(suppress_alt_menu(
+                SC_KEYMENU as usize,
+                0,
+                Some(Duration::from_millis(ms))
+            ));
+        }
+        assert!(!suppress_alt_menu(
+            SC_KEYMENU as usize,
+            0,
+            Some(Duration::from_millis(300))
+        ));
+        assert!(!suppress_alt_menu(SC_KEYMENU as usize, 0, None));
+    }
+    #[test]
+    fn preserves_alt_space_mouse_and_other_commands() {
+        let elapsed = Some(Duration::from_millis(10));
+        assert!(!suppress_alt_menu(SC_KEYMENU as usize, 32, elapsed));
+        assert!(!suppress_alt_menu(SC_KEYMENU as usize, -1, elapsed));
+        for command in [SC_MOUSEMENU, SC_SIZE, SC_MOVE, SC_CLOSE] {
+            assert!(!suppress_alt_menu(command as usize, 0, elapsed));
+        }
+        assert!(suppress_alt_menu(SC_KEYMENU as usize | 3, 0, elapsed));
     }
 }

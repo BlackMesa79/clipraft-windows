@@ -182,6 +182,17 @@ impl Storage {
         tx.commit()?;
         Ok(())
     }
+    /// 只更新已有记录的顺序；不加载格式、不哈希内容、不重写加密对象。
+    pub fn touch(&self, id: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE items SET touched=(SELECT COALESCE(MAX(touched),0)+1 FROM items) WHERE id=?1",
+            [id],
+        )?;
+        if changed == 0 {
+            bail!("记录不存在");
+        }
+        Ok(())
+    }
     pub fn load(&self, id: &str) -> Result<Clip> {
         let mut stmt = self
             .conn
@@ -419,6 +430,109 @@ mod preview_tests {
             "预览对象文件不存在"
         );
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    fn store() -> (PathBuf, Storage) {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../.test-data")
+            .join(format!(
+                "touch-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let storage = Storage::open(&root, &[41; 32]).unwrap();
+        (root, storage)
+    }
+    fn clip(value: u8) -> Clip {
+        Clip {
+            formats: vec![model::FormatData {
+                name: "Rich Text Format".into(),
+                bytes: vec![value; 70 * 1024],
+            }],
+        }
+    }
+    #[test]
+    fn touch_reorders_without_changing_metadata_formats_or_blobs() {
+        let (root, mut storage) = store();
+        let first = clip(65);
+        let second = clip(66);
+        let id = first.hash();
+        storage.save(&first).unwrap();
+        storage.save(&second).unwrap();
+        let view_before: String = storage
+            .conn
+            .query_row("SELECT view FROM items WHERE id=?1", [&id], |r| r.get(0))
+            .unwrap();
+        let blobs_before: Vec<_> = fs::read_dir(&storage.blobs)
+            .unwrap()
+            .map(|e| {
+                let path = e.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        assert_eq!(storage.list().unwrap()[0].id, second.hash());
+        storage.touch(&id).unwrap();
+        storage.touch(&id).unwrap();
+        let items = storage.list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, id);
+        assert_eq!(storage.load(&id).unwrap().formats, first.formats);
+        let (view_after, touched): (String, i64) = storage
+            .conn
+            .query_row("SELECT view,touched FROM items WHERE id=?1", [&id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(view_before, view_after);
+        assert_eq!(touched, 4);
+        assert_eq!(
+            fs::read_dir(&storage.blobs).unwrap().count(),
+            blobs_before.len()
+        );
+        for (path, bytes) in blobs_before {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn touch_does_not_read_or_recreate_blob() {
+        let (root, mut storage) = store();
+        let clip = clip(65);
+        let id = clip.hash();
+        storage.save(&clip).unwrap();
+        // 删除本测试创建的对象，确认置顶路径完全不读取格式数据。
+        let blob = storage.blobs.join(model::digest(&clip.formats[0].bytes));
+        fs::remove_file(&blob).unwrap();
+        storage.touch(&id).unwrap();
+        assert!(!blob.exists());
+        drop(storage);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn touching_missing_id_errors_without_inserting_or_reordering() {
+        let (root, mut storage) = store();
+        storage.save(&clip(65)).unwrap();
+        for id in ["", "missing", "' OR 1=1 --"] {
+            assert_eq!(storage.touch(id).unwrap_err().to_string(), "记录不存在");
+        }
+        assert_eq!(storage.list().unwrap().len(), 1);
+        let touched: i64 = storage
+            .conn
+            .query_row("SELECT touched FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(touched, 1);
+        drop(storage);
         fs::remove_dir_all(root).unwrap();
     }
 }

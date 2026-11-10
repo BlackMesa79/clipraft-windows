@@ -1,6 +1,10 @@
-use crate::model::{encode_hdrop, Clip, FormatData};
+use crate::{
+    capture_policy::{self, CaptureError, Snapshot},
+    model::{encode_hdrop, Clip, FormatData},
+};
 use anyhow::{anyhow, bail, Result};
 use std::{
+    borrow::Cow,
     sync::{
         atomic::{AtomicU32, Ordering},
         OnceLock,
@@ -38,6 +42,35 @@ impl std::fmt::Display for CaptureLimit {
 impl std::error::Error for CaptureLimit {}
 static TOKEN: OnceLock<[u8; 32]> = OnceLock::new();
 static SELF_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+// 由单个采集 worker 推进；监听器据此过滤已结束的采集轮次。
+pub static LAST_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+fn snapshot() -> Snapshot {
+    let sequence = unsafe { GetClipboardSequenceNumber() };
+    Snapshot {
+        sequence,
+        self_write: sequence != 0 && sequence == SELF_SEQUENCE.load(Ordering::Acquire),
+    }
+}
+pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Clip>, CaptureError> {
+    capture_policy::run(
+        &LAST_SEQUENCE,
+        snapshot,
+        |sequence| {
+            capture_at(hwnd, sequence).map_err(|error| {
+                if error.is::<CaptureLimit>() {
+                    CaptureError::Limit
+                } else {
+                    error
+                        .downcast_ref::<CaptureError>()
+                        .copied()
+                        .unwrap_or(CaptureError::Invalid)
+                }
+            })
+        },
+        thread::sleep,
+        crate::diag::write,
+    )
+}
 const OWNER_MARKER: &str = "ClipboardM0.Owner.v1";
 pub fn initialize() -> Result<()> {
     let mut t = [0u8; 32];
@@ -113,11 +146,26 @@ pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
         })
 }
 
+#[cfg(test)]
 pub fn capture(hwnd: HWND) -> Result<Option<Clip>> {
-    let _guard = open(hwnd)?;
+    capture_at(hwnd, unsafe { GetClipboardSequenceNumber() })
+}
+fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Clip>> {
+    let current = snapshot();
+    if current.self_write {
+        LAST_SEQUENCE.store(current.sequence, Ordering::Release);
+        return Ok(None);
+    }
+    if current.sequence != expected {
+        return Ok(None);
+    }
+    // 采集只尝试打开一次；退避在 worker 进行，写回保留原有短重试。
+    unsafe { OpenClipboard(Some(hwnd)) }.map_err(|_| CaptureError::Busy)?;
+    let _guard = OpenGuard;
     unsafe {
-        let seq = GetClipboardSequenceNumber();
-        if seq != 0 && seq == SELF_SEQUENCE.load(Ordering::Acquire) {
+        // 打开前仍可能换序列，不能把新内容算作旧轮次采集。
+        let current = snapshot();
+        if current.self_write || current.sequence != expected {
             return Ok(None);
         }
         let excluded =
@@ -141,6 +189,8 @@ pub fn capture(hwnd: HWND) -> Result<Option<Clip>> {
             None
         }) {
             if TOKEN.get().is_some_and(|t| b.starts_with(t)) {
+                // 延迟渲染等操作可能推进序列，所有权标记也可确认自写回。
+                SELF_SEQUENCE.store(current.sequence, Ordering::Release);
                 return Ok(None);
             }
         }
@@ -181,12 +231,14 @@ fn collect_formats(
 ) -> Result<Option<Clip>> {
     let mut clip = Clip::default();
     let mut total = 0usize;
+    let mut invalid = false;
     for (name, _) in SUPPORTED {
         let bytes = match read(name) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => continue,
             Err(e) if e.is::<CaptureLimit>() => return Err(e),
             Err(_) => {
+                invalid |= name != "Preferred DropEffect";
                 // 只记录固定格式名，不输出内容、路径或底层错误文本。
                 eprintln!("剪贴板格式读取失败，已跳过：{name}");
                 continue;
@@ -197,6 +249,7 @@ fn collect_formats(
             return Err(CaptureLimit.into());
         }
         if bytes.is_empty() || (name == "Preferred DropEffect" && bytes.len() < 4) {
+            invalid |= name != "Preferred DropEffect";
             eprintln!("剪贴板格式长度无效，已跳过：{name}");
             continue;
         }
@@ -216,6 +269,9 @@ fn collect_formats(
         .iter()
         .all(|f| f.name == "Preferred DropEffect")
     {
+        if invalid {
+            return Err(CaptureError::Invalid.into());
+        }
         return Ok(None);
     }
     Ok(Some(clip))
@@ -244,36 +300,48 @@ fn allocate(bytes: &[u8]) -> Result<Allocation> {
         Ok(owned)
     }
 }
+fn write_formats(clip: &Clip, plain: bool) -> Result<Vec<&FormatData>> {
+    if plain {
+        return clip
+            .formats
+            .iter()
+            .find(|f| f.name == "CF_UNICODETEXT")
+            .map(|f| vec![f])
+            .ok_or_else(|| anyhow!("该记录没有纯文本格式"));
+    }
+    let redundant_dib = clip.get("PNG").is_some() && clip.get("CF_DIBV5").is_some();
+    Ok(clip
+        .formats
+        .iter()
+        .filter(|f| {
+            SUPPORTED.iter().any(|(name, _)| *name == f.name)
+                && !(f.name == "Preferred DropEffect" && f.bytes.len() < 4)
+                && !(redundant_dib && f.name == "CF_DIB")
+        })
+        .collect())
+}
 pub fn write(hwnd: HWND, clip: &Clip, plain: bool) -> Result<()> {
     let mut formats = Vec::new();
-    if plain {
-        let text = clip
-            .get("CF_UNICODETEXT")
-            .ok_or_else(|| anyhow!("该记录没有纯文本格式"))?;
-        formats.push((13, allocate(text)?));
-    } else {
-        for f in &clip.formats {
-            if !SUPPORTED.iter().any(|(n, _)| *n == f.name) {
-                continue;
-            }
-            if f.name == "Preferred DropEffect" && f.bytes.len() < 4 {
-                continue;
-            }
-            let bytes = if f.name == "CF_HDROP" {
-                encode_hdrop(
-                    &crate::model::decode_hdrop(&f.bytes).ok_or_else(|| anyhow!("文件记录无效"))?,
-                )
-            } else {
-                f.bytes.clone()
-            };
-            formats.push((format_id(&f.name), allocate(&bytes)?));
-        }
-        let effect_id = format_id("Preferred DropEffect");
-        if formats.iter().any(|(id, _)| *id == 15)
-            && !formats.iter().any(|(id, _)| *id == effect_id)
-        {
-            formats.push((effect_id, allocate(&1u32.to_le_bytes())?));
-        }
+    for f in write_formats(clip, plain)? {
+        // 普通格式直接借用解密结果，只向 HGLOBAL 拷贝一次；文件列表仍需规范化。
+        let bytes = if f.name == "CF_HDROP" {
+            Cow::Owned(encode_hdrop(
+                &crate::model::decode_hdrop(&f.bytes).ok_or_else(|| anyhow!("文件记录无效"))?,
+            ))
+        } else {
+            Cow::Borrowed(f.bytes.as_slice())
+        };
+        crate::diag::write(format!(
+            "clipboard_write format={} bytes={}",
+            f.name,
+            bytes.len()
+        ));
+        formats.push((format_id(&f.name), allocate(&bytes)?));
+    }
+    let effect_id = format_id("Preferred DropEffect");
+    if formats.iter().any(|(id, _)| *id == 15) && !formats.iter().any(|(id, _)| *id == effect_id) {
+        crate::diag::write("clipboard_write format=Preferred DropEffect bytes=4".into());
+        formats.push((effect_id, allocate(&1u32.to_le_bytes())?));
     }
     if formats.is_empty() {
         bail!("没有可写回的格式");
@@ -299,8 +367,7 @@ pub fn write(hwnd: HWND, clip: &Clip, plain: bool) -> Result<()> {
     Ok(())
 }
 
-// 以下为测试代码：直接用 Win32 写剪贴板再调用 capture/write，不接管键盘鼠标、不向任何真实应用粘贴。
-// 注意：这些测试会覆盖当前用户剪贴板内容，每个测试结束时清空剪贴板。
+// 以下为测试代码：在私有窗口站用 Win32 调用 capture/write，不接管键鼠、不改变用户桌面剪贴板。
 #[cfg(test)]
 mod system_tests {
     use super::*;
@@ -309,9 +376,16 @@ mod system_tests {
 
     static CLIPBOARD: Mutex<()> = Mutex::new(());
 
-    /// 真实剪贴板是全局单一资源，测试必须串行。
-    fn lock() -> MutexGuard<'static, ()> {
-        CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner())
+    /// 切换进程窗口站是全局操作，系统剪贴板测试必须串行。
+    fn lock() -> (
+        crate::test_support::PrivateClipboard,
+        MutexGuard<'static, ()>,
+    ) {
+        let lock = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+        let isolated = crate::test_support::PrivateClipboard::new();
+        SELF_SEQUENCE.store(0, Ordering::Release);
+        // 元组按字段顺序析构：先恢复原窗口站，再释放串行锁。
+        (isolated, lock)
     }
 
     fn init() {
@@ -319,7 +393,7 @@ mod system_tests {
         let _ = initialize();
     }
 
-    /// 无论测试成功还是 panic，都清空剪贴板，避免把合成内容留给用户。
+    /// 无论测试成功还是 panic，都释放测试窗口站中的合成内容。
     struct Cleanup;
 
     impl Drop for Cleanup {
@@ -698,10 +772,10 @@ mod tests {
         assert!(clip.get("CF_HDROP").is_none());
     }
     #[test]
-    fn all_failed_or_only_metadata_does_not_record() {
+    fn all_content_formats_failed_reports_invalid() {
         assert!(collect_formats(|_| Err(anyhow!("合成读取失败")), MAX_BYTES)
-            .unwrap()
-            .is_none());
+            .unwrap_err()
+            .is::<CaptureError>());
         assert!(collect_formats(
             |name| {
                 if name == "Preferred DropEffect" {
@@ -712,8 +786,8 @@ mod tests {
             },
             MAX_BYTES
         )
-        .unwrap()
-        .is_none());
+        .unwrap_err()
+        .is::<CaptureError>());
     }
     #[test]
     fn first_format_failure_keeps_remaining_formats() {
@@ -807,5 +881,65 @@ mod tests {
                 Some(effect.to_le_bytes().as_slice())
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod write_selection_tests {
+    use super::*;
+    fn clip(names: &[&str]) -> Clip {
+        Clip {
+            formats: names
+                .iter()
+                .map(|name| FormatData {
+                    name: (*name).into(),
+                    bytes: vec![1; 4],
+                })
+                .collect(),
+        }
+    }
+    fn names(clip: &Clip, plain: bool) -> Vec<&str> {
+        write_formats(clip, plain)
+            .unwrap()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect()
+    }
+    #[test]
+    fn png_and_dibv5_omit_dib_without_changing_stored_formats() {
+        let clip = clip(&["CF_DIB", "PNG", "CF_DIBV5"]);
+        assert_eq!(names(&clip, false), ["PNG", "CF_DIBV5"]);
+        assert_eq!(clip.formats.len(), 3);
+        assert!(std::ptr::eq(
+            write_formats(&clip, false).unwrap()[0],
+            &clip.formats[1]
+        ));
+    }
+    #[test]
+    fn dib_is_preserved_when_png_or_dibv5_is_missing() {
+        for formats in [
+            &["CF_DIB"][..],
+            &["PNG", "CF_DIB"][..],
+            &["CF_DIBV5", "CF_DIB"][..],
+        ] {
+            assert_eq!(names(&clip(formats), false), formats);
+        }
+    }
+    #[test]
+    fn plain_write_selects_only_text_or_fails() {
+        assert_eq!(
+            names(
+                &clip(&["PNG", "CF_DIBV5", "CF_DIB", "CF_UNICODETEXT"]),
+                true
+            ),
+            ["CF_UNICODETEXT"]
+        );
+        assert!(write_formats(&clip(&["PNG"]), true).is_err());
+    }
+    #[test]
+    fn selection_filters_unsupported_and_short_drop_effect() {
+        let mut clip = clip(&["unknown", "CF_UNICODETEXT", "Preferred DropEffect"]);
+        clip.formats[2].bytes.truncate(3);
+        assert_eq!(names(&clip, false), ["CF_UNICODETEXT"]);
     }
 }

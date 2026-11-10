@@ -62,6 +62,28 @@ pub struct Decision {
     pub action: Option<Action>,
 }
 impl Machine {
+    fn modifier_bits(&self) -> u16 {
+        MODIFIER_KEYS.iter().enumerate().fold(0, |bits, (i, key)| {
+            bits | (u16::from(self.down[*key as usize]) << i)
+        })
+    }
+    pub fn step_with_logical(
+        &mut self,
+        key: u32,
+        down: bool,
+        injected: bool,
+        enabled: bool,
+        logical: u16,
+    ) -> Decision {
+        self.seed(corrected_modifiers(
+            self.modifier_bits(),
+            logical,
+            key,
+            down,
+            injected,
+        ));
+        self.step(key, down, injected, enabled)
+    }
     pub fn step(&mut self, key: u32, down: bool, injected: bool, enabled: bool) -> Decision {
         let mut out = Decision {
             swallow: false,
@@ -77,8 +99,8 @@ impl Machine {
             out.swallow = self.swallowed[i];
             self.swallowed[i] = false;
         }
-        let ctrl = self.down[0xA2] || self.down[0xA3] || self.down[0x11];
-        let shift = self.down[0xA0] || self.down[0xA1] || self.down[0x10];
+        let ctrl = self.down[0xA2] || self.down[0xA3];
+        let shift = self.down[0xA0] || self.down[0xA1];
         let modifiers = (!REQUIRE_CTRL || ctrl) && (!REQUIRE_SHIFT || shift);
         if self.active {
             if !modifiers {
@@ -118,6 +140,23 @@ impl Machine {
         }
     }
 }
+// 只清除失效的按下记录，不把系统中的注入按键补记为真实按键。
+// 异步状态早于当前事件，因此当前真实事件覆盖采样；注入事件不改变对应键。
+pub fn corrected_modifiers(
+    recorded: u16,
+    logical: u16,
+    key: u32,
+    down: bool,
+    injected: bool,
+) -> u16 {
+    let mut corrected = recorded & logical & 0xff;
+    if let Some(i) = MODIFIER_KEYS.iter().position(|k| u32::from(*k) == key) {
+        let bit = 1 << i;
+        let held = if injected { recorded & bit != 0 } else { down };
+        corrected = (corrected & !bit) | if held { bit } else { 0 };
+    }
+    corrected
+}
 thread_local! {static MACHINE:Cell<Machine>=Cell::new(Machine::default());}
 unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code < 0 {
@@ -125,29 +164,42 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     }
     let data = &*(l.0 as *const KBDLLHOOKSTRUCT);
     let down = w.0 == WM_KEYDOWN as usize || w.0 == WM_SYSKEYDOWN as usize;
-    if data.flags.contains(LLKHF_INJECTED) {
-        crate::diag::keyboard(data.vkCode, down, true, false, None);
-        return CallNextHookEx(None, code, w, l);
-    }
-    if let Some(i) = MODIFIER_KEYS.iter().position(|k| *k as u32 == data.vkCode) {
-        if down {
-            PHYSICAL.fetch_or(1 << i, Ordering::SeqCst);
-        } else {
-            PHYSICAL.fetch_and(!(1 << i), Ordering::SeqCst);
-        }
-    }
+    let injected = data.flags.contains(LLKHF_INJECTED);
+    let logical = crate::paster::logical();
+    PHYSICAL.store(
+        corrected_modifiers(
+            PHYSICAL.load(Ordering::SeqCst),
+            logical,
+            data.vkCode,
+            down,
+            injected,
+        ),
+        Ordering::SeqCst,
+    );
     // 线程局部固定大小状态，无分配、锁、IO、UI 或同步等待。
     let swallow = MACHINE.with(|slot| {
         let mut state = slot.get();
-        let decision = state.step(data.vkCode, down, false, READY.load(Ordering::Relaxed));
+        let decision = state.step_with_logical(
+            data.vkCode,
+            down,
+            injected,
+            READY.load(Ordering::Relaxed),
+            logical,
+        );
         let mut swallow = decision.swallow;
         crate::diag::panel(true, state.active);
         if let Some(action) = decision.action {
+            // 在钩子观察到新 Open 时立即使旧粘贴过期，不等待 broker 或 UI 调度。
+            let generation = if action == Action::Open {
+                crate::runtime::new_paste_intent()
+            } else {
+                crate::runtime::paste_generation()
+            };
             if PostThreadMessageW(
                 RECEIVER.load(Ordering::Relaxed),
                 ACTION_MESSAGE,
                 WPARAM(action as usize),
-                LPARAM(0),
+                LPARAM(generation as isize),
             )
             .is_err()
             {
@@ -160,7 +212,7 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
         }
         crate::diag::panel(true, state.active);
-        crate::diag::keyboard(data.vkCode, down, false, swallow, decision.action);
+        crate::diag::keyboard(data.vkCode, down, injected, swallow, decision.action);
         slot.set(state);
         swallow
     });
@@ -315,5 +367,108 @@ mod tests {
         open(&mut m);
         assert!(m.step(0x28, true, false, true).swallow);
         assert!(!m.step(0x28, false, false, true).swallow);
+    }
+    #[test]
+    fn lost_releases_do_not_open_on_v_alone() {
+        for held in [0b0101, 0b1010, 0b1111] {
+            let mut m = Machine::default();
+            m.seed(held);
+            let d = m.step_with_logical(TRIGGER_VK, true, false, true, 0);
+            assert_eq!(d.action, None);
+            assert!(!d.swallow);
+            assert_eq!(m.modifier_bits(), 0);
+        }
+    }
+    #[test]
+    fn lost_releases_commit_on_next_real_event_once() {
+        let mut m = Machine::default();
+        open(&mut m);
+        // Ctrl/Shift 抬起都丢失，下一次 V 抬起仍应提交并配对吞键。
+        let d = m.step_with_logical(TRIGGER_VK, false, false, true, 0);
+        assert_eq!(d.action, Some(Action::Commit));
+        assert!(d.swallow);
+        assert!(!m.active);
+        assert_eq!(m.step_with_logical(0x41, true, false, true, 0).action, None);
+    }
+    #[test]
+    fn current_modifier_event_overrides_pre_event_sample() {
+        for (i, key) in MODIFIER_KEYS.iter().enumerate() {
+            assert_eq!(
+                corrected_modifiers(0, 0, u32::from(*key), true, false),
+                1 << i
+            );
+            assert_eq!(
+                corrected_modifiers(1 << i, 1 << i, u32::from(*key), false, false),
+                0
+            );
+        }
+        let mut m = Machine::default();
+        m.step_with_logical(0xA2, true, false, true, 0);
+        m.step_with_logical(0xA0, true, false, true, 1);
+        assert_eq!(
+            m.step_with_logical(TRIGGER_VK, true, false, true, 5).action,
+            Some(Action::Open)
+        );
+        assert_eq!(
+            m.step_with_logical(0xA0, false, false, true, 5).action,
+            Some(Action::Commit)
+        );
+    }
+    #[test]
+    fn correction_clears_all_stale_slots_without_promoting_logical_keys() {
+        assert_eq!(corrected_modifiers(0xff, 0, TRIGGER_VK, true, false), 0);
+        assert_eq!(corrected_modifiers(0, 0xff, TRIGGER_VK, true, false), 0);
+        assert_eq!(
+            corrected_modifiers(0xff, 0x0a, TRIGGER_VK, true, false),
+            0x0a
+        );
+    }
+    #[test]
+    fn injected_alt_neither_opens_nor_commits() {
+        let mut m = Machine::default();
+        open(&mut m);
+        for (down, logical) in [(true, 5), (false, 0x15)] {
+            let d = m.step_with_logical(0xA4, down, true, true, logical);
+            assert_eq!(d.action, None);
+            assert!(!d.swallow);
+            assert_eq!(m.modifier_bits(), 5);
+            assert!(m.active);
+        }
+        // 注入 Alt 的逻辑按下不能阻止真实 Shift 抬起提交。
+        assert_eq!(
+            m.step_with_logical(0xA0, false, false, true, 0x15).action,
+            Some(Action::Commit)
+        );
+        let mut idle = Machine::default();
+        idle.step_with_logical(0xA4, true, true, true, 0);
+        assert_eq!(
+            idle.step_with_logical(TRIGGER_VK, true, false, true, 0x10)
+                .action,
+            None
+        );
+        assert_eq!(idle.modifier_bits(), 0);
+    }
+    #[test]
+    fn injected_modifier_release_preserves_real_current_key() {
+        assert_eq!(corrected_modifiers(0x10, 0, 0xA4, false, true), 0x10);
+        assert_eq!(corrected_modifiers(0x10, 0, TRIGGER_VK, true, false), 0);
+    }
+    #[test]
+    fn corrected_dual_modifiers_keep_remaining_side_and_swallow_pairs() {
+        let mut m = Machine::default();
+        m.seed(0x0f);
+        assert_eq!(
+            m.step_with_logical(TRIGGER_VK, true, false, true, 0x0f)
+                .action,
+            Some(Action::Open)
+        );
+        let d = m.step_with_logical(TRIGGER_VK, false, false, true, 0x0a);
+        assert_eq!(d.action, None);
+        assert!(d.swallow);
+        assert_eq!(m.modifier_bits(), 0x0a);
+        assert_eq!(
+            m.step_with_logical(0xA3, false, false, true, 0x0a).action,
+            Some(Action::Commit)
+        );
     }
 }

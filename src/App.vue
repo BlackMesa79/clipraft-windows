@@ -23,6 +23,20 @@ async function loadDetail() {
 }
 const panelVisible = ref(false);
 const noticeOnly = computed(() => quick && !panelVisible.value && !!error.value);
+const panelRoot = ref<HTMLElement | null>(null);
+let panelObserver: ResizeObserver | undefined;
+let lastPanelSize = '';
+function resizeQuick() {
+  if (!quick || !panelRoot.value) return;
+  const notice = noticeOnly.value;
+  const height = notice ? Math.ceil(panelRoot.value.getBoundingClientRect().height) : 530;
+  const size = String(notice) + ':' + height;
+  if (size === lastPanelSize) return;
+  lastPanelSize = size;
+  // 使用实际换行后的内容高度；原生窗口调整保持不激活，不重新显示已关闭提示。
+  void invoke('resize_quick', { height, notice }).catch(() => { lastPanelSize = ''; });
+}
+watch([noticeOnly, error, panelVisible], resizeQuick, { flush: 'post' });
 function applyPanel(p: Panel) { items.value = p.items; selected.value = p.selected; panelVisible.value = p.visible; error.value = p.error ?? ''; }
 const stops: UnlistenFn[] = [];
 const active = computed(() => items.value[selected.value]);
@@ -49,6 +63,7 @@ function keydown(event: KeyboardEvent) {
   } else if (event.key === 'Escape') { void invoke('hide_main'); }
 }
 onMounted(async () => {
+  if (quick && panelRoot.value) { panelObserver = new ResizeObserver(resizeQuick); panelObserver.observe(panelRoot.value); }
   try {
     stops.push(await listen<Panel>('panel-state', ({ payload }) => { if (quick) applyPanel(payload); }));
     stops.push(await listen('history-changed', () => { if (!quick) void load(); }));
@@ -59,11 +74,11 @@ onMounted(async () => {
   window.addEventListener('keydown', keydown);
   window.addEventListener('focus', loadDetail);
 });
-onUnmounted(() => { stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); detailGeneration++; });
+onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); detailGeneration++; });
 </script>
 
 <template>
-  <main :class="['app', { quick }]">
+  <main ref="panelRoot" :class="['app', { quick, 'notice-only': noticeOnly }]">
     <header>
       <div class="brand"><span class="brand-mark">▤</span><div><h1>{{ noticeOnly ? '操作失败' : quick ? '快速粘贴' : '剪贴板' }} <small v-if="!quick">M0</small></h1><p>{{ noticeOnly ? '提示将在约 2 秒后自动关闭' : quick ? '保持 Ctrl + Shift · ↑ ↓ / V 选择' : '本地加密历史 · Alt + V 随时呼出' }}</p></div></div>
       <span v-if="!noticeOnly" class="count">{{ items.length }} 条</span>

@@ -1,3 +1,4 @@
+mod capture_policy;
 mod clipboard;
 mod diag;
 pub mod hook;
@@ -94,6 +95,33 @@ fn panel_state(state: tauri::State<'_, Arc<State>>) -> Panel {
     state.panel.lock().unwrap().clone()
 }
 #[tauri::command]
+fn resize_quick(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+    height: f64,
+    notice: bool,
+) -> Result<(), String> {
+    if window.label() != "quick" || !height.is_finite() {
+        return Err("无效的提示窗口尺寸".into());
+    }
+    let panel = state.panel.lock().map_err(|_| "面板状态不可用")?;
+    // 丢弃前端旧提示的延迟请求，避免缩小刚重新打开的选择面板。
+    if notice != (!panel.visible && panel.error.is_some()) {
+        return Ok(());
+    }
+    let height = if notice {
+        height.clamp(60.0, 530.0)
+    } else {
+        530.0
+    };
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    platform::resize_quick(
+        state.quick.load(Ordering::Acquire),
+        (height * scale).ceil() as i32,
+    )
+    .map_err(|e| e.to_string())
+}
+#[tauri::command]
 fn last_error(state: tauri::State<'_, Arc<State>>) -> Option<String> {
     state.error.lock().unwrap().take()
 }
@@ -132,6 +160,7 @@ fn paste_item(
     if window.label() != "main" || state.smoke {
         return Err("此窗口不能执行粘贴".into());
     }
+    let generation = runtime::paste_generation();
     let target = state.target.load(Ordering::Acquire);
     if !platform::valid_external(target) {
         return Err("没有可用的目标窗口，请先激活目标程序，再按 Alt+V".into());
@@ -145,6 +174,7 @@ fn paste_item(
             target,
             restore: true,
             plain,
+            generation,
         })
         .map_err(|_| {
             runtime::report(window.app_handle(), &state, "任务队列繁忙，请重试");
@@ -209,6 +239,7 @@ pub fn run() {
             item_detail,
             image_failure_reason,
             panel_state,
+            resize_quick,
             last_error,
             frontend_ready,
             thumbnail_loaded,
@@ -283,6 +314,7 @@ pub fn run() {
             state.main.store(main_hwnd, Ordering::Release);
             state.quick.store(quick_hwnd, Ordering::Release);
             platform::prepare_quick(quick_hwnd)?;
+            platform::prepare_main(main_hwnd)?;
             use tauri::{
                 menu::{Menu, MenuItem},
                 tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -424,3 +456,9 @@ mod tests {
         assert!(!smoke_enabled(None));
     }
 }
+
+#[cfg(test)]
+mod paste_bench;
+
+#[cfg(test)]
+mod test_support;
