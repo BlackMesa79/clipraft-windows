@@ -17,6 +17,22 @@ use std::{
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+// 仅接收已经过 read_thumbnail 白名单校验的内容。
+fn thumbnail_response(data: Option<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
+    let mime = data.as_deref().and_then(thumbnail::preview_mime);
+    tauri::http::Response::builder()
+        .status(if mime.is_some() { 200 } else { 404 })
+        .header("Content-Type", mime.unwrap_or("application/octet-stream"))
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(if mime.is_some() {
+            data.unwrap_or_default()
+        } else {
+            Vec::new()
+        })
+        .unwrap()
+}
+
 #[tauri::command]
 async fn list_items(
     filter: storage::ListFilter,
@@ -309,13 +325,7 @@ pub fn run() {
             } else {
                 None
             };
-            tauri::http::Response::builder()
-                .status(if data.is_some() { 200 } else { 404 })
-                .header("Content-Type", "image/png")
-                .header("Cache-Control", "no-store")
-                .header("X-Content-Type-Options", "nosniff")
-                .body(data.unwrap_or_default())
-                .unwrap()
+            thumbnail_response(data)
         })
         .setup(move |app| {
             if smoke {

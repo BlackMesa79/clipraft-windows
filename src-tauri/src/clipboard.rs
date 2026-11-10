@@ -31,7 +31,7 @@ pub const SUPPORTED: [(&str, u32); 8] = [
     ("CF_HDROP", 15),
     ("Preferred DropEffect", 0),
 ];
-const MAX_BYTES: usize = 128 * 1024 * 1024;
+const MAX_BYTES: usize = crate::storage::crypto::MAX_PLAIN_BYTES;
 #[derive(Debug)]
 struct CaptureLimit;
 impl std::fmt::Display for CaptureLimit {
@@ -275,7 +275,15 @@ fn collect_formats(
         }
         return Ok(None);
     }
+    remove_redundant_dib(&mut clip.formats);
     Ok(Some(clip))
+}
+
+/// 采集规范化发生在哈希之前；不改变旧记录的写回格式集合。
+fn remove_redundant_dib(formats: &mut Vec<FormatData>) {
+    if formats.iter().any(|f| f.name == "CF_DIBV5") {
+        formats.retain(|f| f.name != "CF_DIB");
+    }
 }
 
 struct Allocation(HGLOBAL);
@@ -613,6 +621,49 @@ mod system_tests {
                 .is_none(),
             "标记内容不足 4 字节时必须不记录"
         );
+    }
+
+    #[test]
+    fn dibv5_only_roundtrips_through_private_clipboard() {
+        let _lock = lock();
+        init();
+        let _cleanup = Cleanup;
+        let mut v5 = vec![0u8; 140];
+        for (offset, value) in [
+            (0, 124u32),
+            (4, 2),
+            (8, 2),
+            (16, 3),
+            (20, 16),
+            (40, 0xff0000),
+            (44, 0xff00),
+            (48, 0xff),
+            (52, 0xff000000),
+            (56, 0x73524742),
+        ] {
+            v5[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        v5[12] = 1;
+        v5[14] = 32;
+        for pixel in v5[124..].as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[3, 2, 1, 128]);
+        }
+        let mut dib = v5[..40].to_vec();
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[16..20].copy_from_slice(&0u32.to_le_bytes());
+        dib.extend_from_slice(&v5[124..]);
+        set_formats(&[("CF_DIB", &dib), ("CF_DIBV5", &v5)]);
+        let captured = capture(HWND::default()).unwrap().unwrap();
+        assert_eq!(captured.get("CF_DIBV5").unwrap(), v5);
+        assert!(captured.get("CF_DIB").is_none());
+        write(HWND::default(), &captured, false).unwrap();
+        assert_eq!(normalize("CF_DIBV5", read_format("CF_DIBV5").unwrap()), v5);
+        unsafe {
+            let _guard = open(HWND::default()).unwrap();
+            assert!(GetClipboardData(8).is_ok(), "Windows 应自动合成 CF_DIB");
+            assert!(GetClipboardData(2).is_ok(), "Windows 应自动合成 CF_BITMAP");
+        }
+        assert!(capture(HWND::default()).unwrap().is_none());
     }
 
     #[test]
@@ -977,5 +1028,65 @@ mod write_selection_tests {
         let mut clip = clip(&["unknown", "CF_UNICODETEXT", "Preferred DropEffect"]);
         clip.formats[2].bytes.truncate(3);
         assert_eq!(names(&clip, false), ["CF_UNICODETEXT"]);
+    }
+    fn image_formats(names: &[&str]) -> Vec<FormatData> {
+        names
+            .iter()
+            .map(|name| FormatData {
+                name: (*name).into(),
+                bytes: vec![1, 2, 3, 4],
+            })
+            .collect()
+    }
+    #[test]
+    fn redundant_dib_filter_preserves_other_formats_and_order() {
+        let mut formats = image_formats(&["CF_DIB", "PNG", "CF_DIBV5", "HTML Format"]);
+        let expected = image_formats(&["PNG", "CF_DIBV5", "HTML Format"]);
+        remove_redundant_dib(&mut formats);
+        assert_eq!(formats, expected);
+        remove_redundant_dib(&mut formats);
+        assert_eq!(formats, expected);
+        for names in [&["CF_DIB"][..], &["CF_DIBV5"], &["PNG", "CF_DIB"], &[]] {
+            let mut formats = image_formats(names);
+            let original = formats.clone();
+            remove_redundant_dib(&mut formats);
+            assert_eq!(formats, original);
+        }
+    }
+    #[test]
+    fn capture_removes_dib_before_identity_is_calculated() {
+        let capture =
+            |both| {
+                collect_formats(
+                    |name| {
+                        Ok((name == "CF_DIBV5" || (both && name == "CF_DIB"))
+                            .then(|| vec![1, 2, 3, 4]))
+                    },
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .unwrap()
+            };
+        let both = capture(true);
+        assert_eq!(both.formats, image_formats(&["CF_DIBV5"]));
+        assert_eq!(both.hash(), capture(false).hash());
+        assert_eq!(both.dedup_key(), capture(false).dedup_key());
+    }
+    #[test]
+    fn dibv5_only_write_and_legacy_format_lists() {
+        for (names, expected) in [
+            (vec!["CF_DIBV5"], vec!["CF_DIBV5"]),
+            (vec!["CF_DIBV5", "CF_DIB"], vec!["CF_DIBV5", "CF_DIB"]),
+            (vec!["PNG", "CF_DIBV5", "CF_DIB"], vec!["PNG", "CF_DIBV5"]),
+        ] {
+            let clip = Clip {
+                formats: image_formats(&names),
+            };
+            let selected = write_formats(&clip, false).unwrap();
+            assert_eq!(
+                selected.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 }

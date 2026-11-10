@@ -1,11 +1,18 @@
 use crate::model::{image_priority, Clip};
-use image::{DynamicImage, ImageFormat, ImageReader, Rgba, RgbaImage};
+use image::{
+    codecs::{
+        jpeg::JpegEncoder,
+        png::{CompressionType, FilterType, PngEncoder},
+    },
+    DynamicImage, ImageEncoder, ImageReader, Rgba, RgbaImage,
+};
 use std::{
     io::{Cursor, Read},
     path::Path,
 };
 
 pub struct Preview {
+    // 保留字段名兼容调用方；内容可以是 PNG 或 JPEG，以魔数为准。
     pub png: Option<Vec<u8>>,
     pub large_png: Option<Vec<u8>>,
     pub placeholder: Option<String>,
@@ -144,14 +151,58 @@ fn decode_image(bytes: &[u8]) -> Option<DynamicImage> {
     reader.decode().ok()
 }
 const FILE_LIMIT: u64 = 50 * 1024 * 1024;
+/// 仅识别支持的图片签名，不根据 blob 名称推断格式。
+pub(crate) fn preview_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else {
+        None
+    }
+}
+fn has_transparency(image: &DynamicImage) -> bool {
+    // 在缩放/降位深前判断，不能让稀疏的半透明像素被舍入后误选 JPEG。
+    match image {
+        DynamicImage::ImageLumaA8(pixels) => pixels.pixels().any(|p| p[1] != u8::MAX),
+        DynamicImage::ImageRgba8(pixels) => pixels.pixels().any(|p| p[3] != u8::MAX),
+        DynamicImage::ImageLumaA16(pixels) => pixels.pixels().any(|p| p[1] != u16::MAX),
+        DynamicImage::ImageRgba16(pixels) => pixels.pixels().any(|p| p[3] != u16::MAX),
+        DynamicImage::ImageRgba32F(pixels) => pixels.pixels().any(|p| p[3] != 1.0),
+        _ => image.color().has_alpha(),
+    }
+}
+fn encode_image(image: DynamicImage, transparent: bool) -> Option<Vec<u8>> {
+    let image = if transparent {
+        DynamicImage::ImageRgba8(image.to_rgba8())
+    } else {
+        DynamicImage::ImageRgb8(image.to_rgb8())
+    };
+    let mut png = Vec::new();
+    PngEncoder::new_with_quality(&mut png, CompressionType::Best, FilterType::Adaptive)
+        .write_image(
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image.color().into(),
+        )
+        .ok()?;
+    if transparent {
+        return Some(png);
+    }
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 85)
+        .encode_image(&image)
+        .ok()?;
+    Some(if jpeg.len() < png.len() { jpeg } else { png })
+}
 fn encode_preview(image: DynamicImage) -> Option<Preview> {
+    let transparent = has_transparency(&image);
     let encode = |width: u32, height: u32| {
-        let mut out = Cursor::new(Vec::new());
-        image
-            .thumbnail(width.min(image.width()), height.min(image.height()))
-            .write_to(&mut out, ImageFormat::Png)
-            .ok()?;
-        Some(out.into_inner())
+        encode_image(
+            image.thumbnail(width.min(image.width()), height.min(image.height())),
+            transparent,
+        )
     };
     Some(Preview {
         png: Some(encode(256u32, 160u32)?),
@@ -310,5 +361,188 @@ mod tests {
             ],
         });
         assert!(p.png.is_some());
+    }
+    #[test]
+    fn dibv5_only_generates_both_png_previews_with_alpha() {
+        let mut bytes = vec![0u8; 128];
+        for (offset, value) in [
+            (0, 124u32),
+            (4, 1),
+            (8, 1),
+            (16, 3),
+            (40, 0xff0000),
+            (44, 0xff00),
+            (48, 0xff),
+            (52, 0xff000000),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[12] = 1;
+        bytes[14] = 32;
+        bytes[124..].copy_from_slice(&[3, 2, 1, 128]);
+        let preview = generate(&Clip {
+            formats: vec![FormatData {
+                name: "CF_DIBV5".into(),
+                bytes,
+            }],
+        });
+        assert!(preview.placeholder.is_none());
+        for png in [preview.png.unwrap(), preview.large_png.unwrap()] {
+            assert_eq!(
+                image::load_from_memory(&png)
+                    .unwrap()
+                    .to_rgba8()
+                    .get_pixel(0, 0)
+                    .0,
+                [1, 2, 3, 128]
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    fn photo(rgba: bool) -> DynamicImage {
+        let mut random = 0x12345678u32;
+        let image = RgbaImage::from_fn(800, 600, |x, y| {
+            let mut p = [0, 0, 0, 255];
+            for (c, value) in p[..3].iter_mut().enumerate() {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                *value = ((x / (c as u32 + 2) + y / 3 + random % 17) % 256) as u8;
+            }
+            Rgba(p)
+        });
+        if rgba {
+            DynamicImage::ImageRgba8(image)
+        } else {
+            DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(image).to_rgb8())
+        }
+    }
+    #[test]
+    fn opaque_rgb_and_rgba_photos_choose_jpeg_and_save_space() {
+        for rgba in [false, true] {
+            let original = photo(rgba);
+            let preview = encode_preview(original.clone()).unwrap();
+            for (label, width, height, new) in [
+                ("thumbnail", 256, 160, preview.png.unwrap()),
+                ("preview", 800, 800, preview.large_png.unwrap()),
+            ] {
+                let resized = original.thumbnail(width, height);
+                let mut old = Cursor::new(Vec::new());
+                DynamicImage::ImageRgba8(resized.to_rgba8())
+                    .write_to(&mut old, image::ImageFormat::Png)
+                    .unwrap();
+                let mut best = Vec::new();
+                PngEncoder::new_with_quality(
+                    &mut best,
+                    CompressionType::Best,
+                    FilterType::Adaptive,
+                )
+                .write_image(
+                    resized.to_rgb8().as_raw(),
+                    resized.width(),
+                    resized.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
+                .unwrap();
+                assert_eq!(preview_mime(&new), Some("image/jpeg"));
+                assert!(new.len() * 2 < old.get_ref().len());
+                assert!(new.len() * 2 < best.len());
+                let decoded = image::load_from_memory(&new).unwrap();
+                assert_eq!(
+                    (decoded.width(), decoded.height()),
+                    (resized.width(), resized.height())
+                );
+                println!("preview_size rgba={rgba} kind={label} old_rgba_png={} best_rgb_png={} jpeg85={}", old.get_ref().len(), best.len(), new.len());
+            }
+        }
+    }
+    #[test]
+    fn solid_screenshot_prefers_rgb_png() {
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(640, 480, Rgba([38, 72, 103, 255])));
+        let preview = encode_preview(image).unwrap();
+        for bytes in [preview.png.unwrap(), preview.large_png.unwrap()] {
+            assert_eq!(preview_mime(&bytes), Some("image/png"));
+            let decoded = image::load_from_memory(&bytes).unwrap();
+            assert_eq!(decoded.color(), image::ColorType::Rgb8);
+            assert_eq!(decoded.to_rgb8().get_pixel(0, 0).0, [38, 72, 103]);
+        }
+    }
+    #[test]
+    fn transparent_image_preserves_every_rgba_byte_without_resize() {
+        let rgba = RgbaImage::from_fn(23, 17, |x, y| {
+            Rgba([x as u8 * 7, y as u8 * 11, 41, (x * 7 + y * 3) as u8])
+        });
+        let result = encode_preview(DynamicImage::ImageRgba8(rgba.clone())).unwrap();
+        for bytes in [result.png.unwrap(), result.large_png.unwrap()] {
+            assert_eq!(preview_mime(&bytes), Some("image/png"));
+            assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgba8(), rgba);
+        }
+    }
+    #[test]
+    fn protocol_returns_detected_mime_nosniff_and_no_store() {
+        for (data, mime) in [
+            (b"\x89PNG\r\n\x1a\n".to_vec(), "image/png"),
+            (b"\xff\xd8\xff".to_vec(), "image/jpeg"),
+        ] {
+            let response = crate::thumbnail_response(Some(data.clone()));
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()["Content-Type"], mime);
+            assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+            assert_eq!(response.headers()["Cache-Control"], "no-store");
+            assert_eq!(response.body(), &data);
+        }
+        for data in [None, Some(Vec::new()), Some(b"<html>".to_vec())] {
+            let response = crate::thumbnail_response(data);
+            assert_eq!(response.status(), 404);
+            assert!(response.body().is_empty());
+            assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sparse_alpha_tests {
+    use super::*;
+    #[test]
+    fn source_transparency_forces_png_even_if_downsampling_rounds_it_away() {
+        let mut pixels = RgbaImage::from_pixel(1000, 1000, Rgba([55, 88, 123, 255]));
+        pixels.put_pixel(0, 0, Rgba([55, 88, 123, 254]));
+        let source = DynamicImage::ImageRgba8(pixels);
+        assert!(has_transparency(&source));
+        let preview = encode_preview(source).unwrap();
+        for bytes in [preview.png.unwrap(), preview.large_png.unwrap()] {
+            assert_eq!(preview_mime(&bytes), Some("image/png"));
+            assert_eq!(
+                image::load_from_memory(&bytes).unwrap().color(),
+                image::ColorType::Rgba8
+            );
+        }
+    }
+    #[test]
+    fn sixteen_bit_alpha_is_checked_before_conversion_to_eight_bits() {
+        let source = DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(
+            1,
+            1,
+            image::Rgba([40000u16, 20000, 10000, 65534]),
+        ));
+        assert!(has_transparency(&source));
+        let preview = encode_preview(source).unwrap();
+        assert_eq!(
+            image::load_from_memory(&preview.large_png.unwrap())
+                .unwrap()
+                .color(),
+            image::ColorType::Rgba8
+        );
+        let opaque = DynamicImage::ImageLumaA16(image::ImageBuffer::from_pixel(
+            1,
+            1,
+            image::LumaA([20000u16, 65535]),
+        ));
+        assert!(!has_transparency(&opaque));
     }
 }

@@ -175,6 +175,8 @@ fn migrate_v1(tx: &Transaction<'_>, blobs: &Path, key: &[u8; 32]) -> Result<()> 
                 .as_deref()
                 .filter(|b| model::is_hash(b))
                 .map(|b| blobs.join(b));
+            // 此函数仅由 v0 → v1 调用：v0 旧库只含 CM01，故可减固定开销。
+            // CM02 不适用该估算；新记录保存时直接统计明文，后续迁移不回填 size。
             // 统计外部格式只读取文件元数据，不解密，也不计缩略图/预览。
             let length = inline_length.unwrap_or_else(|| {
                 blob_path

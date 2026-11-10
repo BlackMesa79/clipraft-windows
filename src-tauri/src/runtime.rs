@@ -347,8 +347,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                         )) {
                             Ok(clip) => {
                                 if let Some(clip) = clip {
-                                    let result =
-                                        worker.storage.lock().unwrap().save_with_outcome(&clip);
+                                    let result = Storage::save_shared(&worker.storage, &clip);
                                     match result {
                                         Err(_) => report(&a, &worker, "记录保存失败"),
                                         Ok(inserted) => {

@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod compression_tests;
 pub mod crypto;
 mod maintenance;
 #[cfg(test)]
@@ -5,6 +7,9 @@ mod maintenance_tests;
 #[cfg(test)]
 mod migration_tests;
 mod migrations;
+mod predict;
+#[cfg(test)]
+mod prediction_tests;
 use crate::{
     model::{self, Clip, ItemView},
     thumbnail,
@@ -14,9 +19,10 @@ pub use maintenance::{validate_retention_policy, DeleteReport, RetentionPolicy, 
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use zeroize::Zeroizing;
 
@@ -30,6 +36,116 @@ pub struct ListFilter {
 
 pub const PAGE_LIMIT: usize = 500;
 pub const QUICK_PAGE_SIZE: usize = 200;
+
+struct SaveIdentity {
+    id: String,
+    dedup_key: String,
+}
+impl SaveIdentity {
+    fn new(clip: &Clip) -> Self {
+        let id = clip.hash();
+        let dedup_key = clip.file_dedup_key().unwrap_or_else(|| id.clone());
+        Self { id, dedup_key }
+    }
+}
+struct BlobBatch<'a> {
+    key: &'a [u8; 32],
+    objects: HashMap<String, Vec<u8>>,
+}
+impl BlobBatch<'_> {
+    fn add(&mut self, plain: &[u8]) -> Result<String> {
+        let id = model::digest(plain);
+        if !self.objects.contains_key(&id) {
+            self.objects
+                .insert(id.clone(), crypto::encrypt_blob(self.key, &id, plain)?);
+        }
+        Ok(id)
+    }
+}
+struct StoredFormat {
+    name: String,
+    inline: Option<Vec<u8>>,
+    blob: Option<String>,
+}
+struct PreparedSave {
+    identity: SaveIdentity,
+    view: ItemView,
+    search: String,
+    formats: Vec<StoredFormat>,
+    blobs: HashMap<String, Vec<u8>>,
+}
+impl PreparedSave {
+    fn new(clip: &Clip, identity: SaveIdentity, key: &[u8; 32]) -> Result<Self> {
+        let mut blobs = BlobBatch {
+            key,
+            objects: HashMap::new(),
+        };
+        let files = clip
+            .get("CF_HDROP")
+            .and_then(model::decode_hdrop)
+            .unwrap_or_default();
+        let summary = if !files.is_empty() {
+            files
+                .iter()
+                .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p))
+                .collect::<Vec<_>>()
+                .join("、")
+        } else {
+            clip.text().unwrap_or_else(|| {
+                if clip.kind() == "image" {
+                    "图片".into()
+                } else {
+                    "富文本".into()
+                }
+            })
+        };
+        let preview = thumbnail::generate(clip);
+        let thumb = preview.png.as_ref().map(|b| blobs.add(b)).transpose()?;
+        let view = ItemView {
+            id: identity.id.clone(),
+            kind: clip.kind().into(),
+            summary: summary.chars().take(180).collect(),
+            formats: clip.formats.iter().map(|f| f.name.clone()).collect(),
+            thumbnail: thumb,
+            preview: preview
+                .large_png
+                .as_ref()
+                .map(|b| blobs.add(b))
+                .transpose()?,
+            placeholder: preview.placeholder,
+            files,
+
+            size: clip.formats.iter().map(|f| f.bytes.len() as i64).sum(),
+            ..ItemView::default()
+        };
+        let mut stored = Vec::new();
+        for f in &clip.formats {
+            let external =
+                model::image_priority().contains(&f.name.as_str()) || f.bytes.len() > 64 * 1024;
+            stored.push(StoredFormat {
+                name: f.name.clone(),
+                inline: if external {
+                    None
+                } else {
+                    Some(f.bytes.clone())
+                },
+                blob: if external {
+                    Some(blobs.add(&f.bytes)?)
+                } else {
+                    None
+                },
+            });
+        }
+
+        Ok(Self {
+            identity,
+            view,
+            search: search_text(clip),
+            formats: stored,
+            blobs: blobs.objects,
+        })
+    }
+}
 
 pub struct Storage {
     conn: Connection,
@@ -77,16 +193,20 @@ impl Storage {
         migrations::upgrade(&mut storage, root, hook)?;
         Ok(storage)
     }
+    #[cfg(test)]
     fn write_blob(&self, plain: &[u8]) -> Result<String> {
         let id = model::digest(plain);
-        let dest = self.blobs.join(&id);
+        self.install_blob(&id, &crypto::encrypt_blob(&self.key, &id, plain)?)?;
+        Ok(id)
+    }
+    fn install_blob(&self, id: &str, bytes: &[u8]) -> Result<()> {
+        let dest = self.blobs.join(id);
         if !dest.exists() {
-            let bytes = crypto::encrypt(&self.key, &id, plain)?;
             let temp = self.blobs.join(format!("{id}.tmp"));
             fs::write(&temp, bytes)?;
             fs::rename(temp, dest)?;
         }
-        Ok(id)
+        Ok(())
     }
     pub fn read_thumbnail(&self, id: &str) -> Result<Vec<u8>> {
         if !model::is_hash(id) {
@@ -191,93 +311,72 @@ impl Storage {
     pub fn save(&mut self, clip: &Clip) -> Result<()> {
         self.save_with_outcome(clip).map(|_| ())
     }
-    /// 返回是否插入新记录；命中去重仍沿用原有更新路径。
+    /// 无共享锁的调用者保留原接口；runtime 必须使用 save_shared。
     pub fn save_with_outcome(&mut self, clip: &Clip) -> Result<bool> {
-        let id = clip.hash();
-        let dedup_key = clip.file_dedup_key().unwrap_or_else(|| id.clone());
-        let now = unix_millis();
-        let order: i64 =
-            self.conn
-                .query_row("SELECT COALESCE(MAX(touched),0)+1 FROM items", [], |r| {
-                    r.get(0)
-                })?;
-        if self.conn.execute(
-            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1)",
-            params![order, dedup_key, now, id],
-        )? > 0
-        {
+        let identity = SaveIdentity::new(clip);
+        if self.update_duplicate(&identity)? {
             return Ok(false);
         }
-        let files = clip
-            .get("CF_HDROP")
-            .and_then(model::decode_hdrop)
-            .unwrap_or_default();
-        let summary = if !files.is_empty() {
-            files
-                .iter()
-                .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p))
-                .collect::<Vec<_>>()
-                .join("、")
-        } else {
-            clip.text().unwrap_or_else(|| {
-                if clip.kind() == "image" {
-                    "图片".into()
-                } else {
-                    "富文本".into()
-                }
-            })
+        let prepared = PreparedSave::new(clip, identity, &self.key)?;
+        self.commit_prepared(prepared)
+    }
+    /// 采集路径：锁内查重 → 锁外生成预览/压缩/加密 → 锁内复查并提交。
+    pub fn save_shared(storage: &Mutex<Self>, clip: &Clip) -> Result<bool> {
+        let identity = SaveIdentity::new(clip);
+        let key = {
+            let store = storage
+                .lock()
+                .map_err(|_| anyhow::anyhow!("存储锁不可用"))?;
+            if store.update_duplicate(&identity)? {
+                return Ok(false);
+            }
+            store.key.clone()
         };
-        let preview = thumbnail::generate(clip);
-        let thumb = preview
-            .png
-            .as_ref()
-            .map(|b| self.write_blob(b))
-            .transpose()?;
-        let view = ItemView {
-            id: id.clone(),
-            kind: clip.kind().into(),
-            summary: summary.chars().take(180).collect(),
-            formats: clip.formats.iter().map(|f| f.name.clone()).collect(),
-            thumbnail: thumb,
-            preview: preview
-                .large_png
-                .as_ref()
-                .map(|b| self.write_blob(b))
-                .transpose()?,
-            placeholder: preview.placeholder,
-            files,
-            created: now,
-            used_at: now,
-            size: clip.formats.iter().map(|f| f.bytes.len() as i64).sum(),
-            ..ItemView::default()
-        };
-        let mut stored = Vec::new();
-        for f in &clip.formats {
-            let external =
-                model::image_priority().contains(&f.name.as_str()) || f.bytes.len() > 64 * 1024;
-            stored.push((
-                f.name.clone(),
-                if external {
-                    None
-                } else {
-                    Some(f.bytes.clone())
-                },
-                if external {
-                    Some(self.write_blob(&f.bytes)?)
-                } else {
-                    None
-                },
-            ));
+        // 只准备内存对象；尚未登记的文件不能提前暴露给孤儿扫描。
+        let prepared = PreparedSave::new(clip, identity, &key)?;
+        storage
+            .lock()
+            .map_err(|_| anyhow::anyhow!("存储锁不可用"))?
+            .commit_prepared(prepared)
+    }
+    fn update_duplicate(&self, identity: &SaveIdentity) -> Result<bool> {
+        let now = unix_millis();
+        let order = self.next_order()?;
+        Ok(self.conn.execute(
+            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1)",
+            params![order, identity.dedup_key, now, identity.id],
+        )? > 0)
+    }
+    fn next_order(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(MAX(touched),0)+1 FROM items", [], |r| {
+                r.get(0)
+            })?)
+    }
+    fn commit_prepared(&mut self, mut prepared: PreparedSave) -> Result<bool> {
+        // 锁外准备期间可能有另一条相同记录完成保存；仍保留首次保存内容。
+        if self.update_duplicate(&prepared.identity)? {
+            return Ok(false);
         }
+        for (id, bytes) in &prepared.blobs {
+            self.install_blob(id, bytes)?;
+        }
+        let order = self.next_order()?;
+        let now = unix_millis();
+        prepared.view.created = now;
+        prepared.view.used_at = now;
+        let view = &prepared.view;
+        let id = &prepared.identity.id;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10)",
-            params![id, display_json(&view)?, order, view.kind, now, view.size, search_text(clip), view.thumbnail, view.preview, dedup_key],
+            params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key],
         )?;
-        for (name, inline, blob) in stored {
+        for format in prepared.formats {
             tx.execute(
                 "INSERT INTO formats(item,name,inline,blob) VALUES(?1,?2,?3,?4)",
-                params![id, name, inline, blob],
+                params![id, format.name, format.inline, format.blob],
             )?;
         }
         tx.commit()?;

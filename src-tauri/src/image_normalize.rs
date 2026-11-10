@@ -46,7 +46,24 @@ fn png_length(bytes: &[u8]) -> Option<usize> {
         offset = end;
     }
 }
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DibPixels {
+    pub offset: usize,
+    pub stride: usize,
+    pub rows: usize,
+    pub row_bytes: usize,
+}
+
 fn dib_length(bytes: &[u8]) -> Option<usize> {
+    parse_dib(bytes, false).map(|(length, _)| length)
+}
+
+/// 与规范化复用头部、掩码、调色板及 ICC 校验；仅预测支持 24 位位域。
+pub(crate) fn dib_pixels(bytes: &[u8]) -> Option<DibPixels> {
+    parse_dib(bytes, true)?.1
+}
+
+fn parse_dib(bytes: &[u8], predict: bool) -> Option<(usize, Option<DibPixels>)> {
     let header = u32_at(bytes, 0)? as usize;
     if !matches!(header, 12 | 40 | 52 | 56 | 108 | 124) || header > bytes.len() {
         return None;
@@ -81,7 +98,8 @@ fn dib_length(bytes: &[u8]) -> Option<usize> {
             0 => matches!(depth, 1 | 4 | 8 | 16 | 24 | 32),
             1 => depth == 8 && height > 0 && declared > 0,
             2 => depth == 4 && height > 0 && declared > 0,
-            3 | 6 => matches!(depth, 16 | 32),
+            3 => matches!(depth, 16 | 32) || (predict && depth == 24),
+            6 => matches!(depth, 16 | 32),
             4 | 5 => depth == 0 && height > 0 && declared > 0,
             _ => false,
         };
@@ -105,7 +123,7 @@ fn dib_length(bytes: &[u8]) -> Option<usize> {
                 let shifted = mask.checked_shr(mask.trailing_zeros()).unwrap_or(0);
                 if mask == 0
                     || mask & seen != 0
-                    || (depth == 16 && mask > 0xffff)
+                    || (depth < 32 && mask >> depth != 0)
                     || shifted & shifted.wrapping_add(1) != 0
                 {
                     return None;
@@ -136,6 +154,7 @@ fn dib_length(bytes: &[u8]) -> Option<usize> {
     let offset = header
         .checked_add(masks)?
         .checked_add(colors.checked_mul(if header == 12 { 3 } else { 4 })?)?;
+    let mut pixels = None;
     let payload = if matches!(compression, 0 | 3 | 6) {
         let stride = width
             .checked_mul(depth)?
@@ -145,6 +164,14 @@ fn dib_length(bytes: &[u8]) -> Option<usize> {
         let expected = stride.checked_mul(height)?;
         if declared != 0 && declared < expected {
             return None;
+        }
+        if matches!(compression, 0 | 3) && matches!(depth, 24 | 32) {
+            pixels = Some(DibPixels {
+                offset,
+                stride,
+                rows: height,
+                row_bytes: width.checked_mul(depth / 8)?,
+            });
         }
         // 非零 sizeImage 可能包含调用者声明的有效数据，保守保留。
         declared.max(expected)
@@ -164,7 +191,7 @@ fn dib_length(bytes: &[u8]) -> Option<usize> {
             end = profile.checked_add(size)?;
         }
     }
-    (end <= bytes.len()).then_some(end)
+    (end <= bytes.len()).then_some((end, pixels))
 }
 
 #[cfg(test)]
