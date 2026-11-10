@@ -36,6 +36,34 @@ async fn list_items(
     .await
     .map_err(|_| "历史列表任务失败")?
 }
+#[tauri::command]
+async fn delete_items(
+    ids: Vec<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<storage::DeleteReport, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("此窗口不能执行删除".into());
+    }
+    let shared = state.inner().clone();
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut report = shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .delete(&ids)
+            .map_err(|e| format!("删除失败：{e}"))?;
+        if let Err(e) = runtime::refresh(&app, &shared) {
+            let message = format!("记录已删除，但刷新失败：{e}");
+            diag::write(message.clone());
+            report.maintenance_errors.push(message);
+        }
+        Ok(report)
+    })
+    .await
+    .map_err(|_| "删除任务失败")?
+}
 #[derive(serde::Serialize)]
 struct FileDetail {
     path: String,
@@ -243,6 +271,10 @@ pub fn run() {
         diag::init(&root)?;
         let key = platform::master_key(&root)?;
         let storage = storage::Storage::open(&root, &key)?;
+        // 迁移完成之后、runtime 启动之前扫描；维护失败只记录诊断。
+        if let Err(e) = storage.scan_orphan_blobs() {
+            diag::write(format!("startup orphan scan failed: {e}"));
+        }
         Ok((root, storage))
     })();
     let (root, mut storage) = match data {
@@ -252,6 +284,7 @@ pub fn run() {
     let result = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             list_items,
+            delete_items,
             item_detail,
             image_failure_reason,
             panel_state,

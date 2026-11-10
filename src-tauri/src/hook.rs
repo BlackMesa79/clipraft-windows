@@ -20,6 +20,12 @@ pub static PHYSICAL: AtomicU16 = AtomicU16::new(0);
 pub static READY: AtomicBool = AtomicBool::new(false);
 static RECEIVER: AtomicU32 = AtomicU32::new(0);
 static THREAD: AtomicU32 = AtomicU32::new(0);
+static CANCEL_PANEL: AtomicBool = AtomicBool::new(false);
+
+// 控制线程的隐藏请求在下一次键盘事件前生效，不注入按键或改动修饰键状态。
+pub fn cancel_panel() {
+    CANCEL_PANEL.store(true, Ordering::Release);
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Action {
@@ -62,6 +68,10 @@ pub struct Decision {
     pub action: Option<Action>,
 }
 impl Machine {
+    fn cancel(&mut self) {
+        // 与 Esc 一致：保留已吞按键的配对释放和重复按下记录。
+        self.active = false;
+    }
     fn modifier_bits(&self) -> u16 {
         MODIFIER_KEYS.iter().enumerate().fold(0, |bits, (i, key)| {
             bits | (u16::from(self.down[*key as usize]) << i)
@@ -109,7 +119,7 @@ impl Machine {
             } else if down {
                 out.action = match key {
                     0x1B => {
-                        self.active = false;
+                        self.cancel();
                         Some(Action::Cancel)
                     }
                     k if k == TRIGGER_VK && !repeated => Some(Action::Next),
@@ -179,6 +189,9 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     // 线程局部固定大小状态，无分配、锁、IO、UI 或同步等待。
     let swallow = MACHINE.with(|slot| {
         let mut state = slot.get();
+        if CANCEL_PANEL.swap(false, Ordering::AcqRel) {
+            state.cancel();
+        }
         let decision = state.step_with_logical(
             data.vkCode,
             down,
@@ -313,6 +326,50 @@ mod tests {
         open(&mut m);
         assert_eq!(m.step(0x1B, true, false, true).action, Some(Action::Cancel));
         assert_eq!(m.step(0xA2, false, false, true).action, None);
+    }
+    #[test]
+    fn external_cancel_passes_navigation_while_modifiers_are_held() {
+        let mut m = Machine::default();
+        open(&mut m);
+        m.cancel();
+        assert!(!m.active);
+        for key in [0x28, 0x26] {
+            for down in [true, false] {
+                assert_eq!(
+                    m.step(key, down, false, true),
+                    Decision {
+                        swallow: false,
+                        action: None
+                    }
+                );
+            }
+        }
+        assert_eq!(m.step(0xA2, false, false, true).action, None);
+        assert_eq!(m.step(0xA0, false, false, true).action, None);
+    }
+    #[test]
+    fn external_cancel_keeps_swallowed_pairs_and_allows_reopening() {
+        let mut m = Machine::default();
+        open(&mut m);
+        assert!(m.step(0x28, true, false, true).swallow);
+        m.cancel();
+        for key in [TRIGGER_VK, 0x28] {
+            for down in [true, false] {
+                assert_eq!(
+                    m.step(key, down, false, true),
+                    Decision {
+                        swallow: true,
+                        action: None
+                    }
+                );
+            }
+        }
+        assert!(!m.step(0x28, true, false, true).swallow);
+        assert!(!m.step(0x28, false, false, true).swallow);
+        assert_eq!(
+            m.step(TRIGGER_VK, true, false, true).action,
+            Some(Action::Open)
+        );
     }
     #[test]
     fn injected_ignored_and_not_ready() {

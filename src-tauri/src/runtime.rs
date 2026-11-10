@@ -3,11 +3,12 @@ use crate::{
     hook::{self, Action},
     model::ItemView,
     paster, platform,
-    storage::Storage,
+    storage::{RetentionPolicy, Storage},
 };
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Sender, SyncSender},
@@ -61,6 +62,7 @@ pub enum Control {
     Hide,
     Report(String),
     PasteReport(String, u64),
+    HistoryChanged,
 }
 #[derive(Clone, Serialize, Default)]
 pub struct Panel {
@@ -72,6 +74,7 @@ pub struct Panel {
 pub struct State {
     pub items: Mutex<Vec<ItemView>>,
     pub storage: Mutex<Storage>,
+    pub retention_policy: Mutex<RetentionPolicy>,
     pub jobs: SyncSender<Job>,
     pub control: Sender<Control>,
     pub target: AtomicIsize,
@@ -91,14 +94,17 @@ pub fn report(_app: &AppHandle, state: &State, message: &str) {
     let _ = state.control.send(Control::Report(message.into()));
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
-    let items = state.storage.lock().unwrap().list_page(
+    let storage = state.storage.lock().unwrap();
+    let items = storage.list_page(
         &crate::storage::ListFilter::default(),
         0,
         crate::storage::QUICK_PAGE_SIZE,
     )?;
-    let enabled = !items.is_empty() && state.ready.load(Ordering::Acquire);
+    let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
     *state.items.lock().unwrap() = items;
     hook::READY.store(enabled, Ordering::Release);
+    drop(storage);
+    let _ = state.control.send(Control::HistoryChanged);
     app.emit("history-changed", ())?;
     Ok(())
 }
@@ -232,6 +238,32 @@ fn publish(app: &AppHandle, state: &State, panel: &Panel) {
     *state.panel.lock().unwrap() = panel.clone();
     let _ = app.emit_to("quick", "panel-state", panel);
 }
+// 选中记录消失时取消，绝不把原下标解释为另一条记录。
+fn refresh_panel_snapshot(
+    snapshot: &[ItemView],
+    existing_ids: &HashSet<String>,
+    selected_id: Option<&str>,
+) -> Option<(Vec<ItemView>, usize)> {
+    let selected_id = selected_id?;
+    let items: Vec<_> = snapshot
+        .iter()
+        .filter(|item| existing_ids.contains(&item.id))
+        .cloned()
+        .collect();
+    let selected = items.iter().position(|item| item.id == selected_id)?;
+    Some((items, selected))
+}
+
+fn hide_panel(app: &AppHandle, state: &State, panel: &mut Panel) {
+    panel.visible = false;
+    diag::panel(true, false);
+    publish(app, state, panel);
+    if panel.error.is_none() {
+        let quick = state.quick.load(Ordering::Acquire);
+        on_main(app, move || platform::hide(quick));
+    }
+}
+
 // 控制线程独占提示期限；新提示替换旧期限，重新打开面板会取消期限。
 #[derive(Default)]
 struct NoticeDeadline(Option<Instant>);
@@ -256,7 +288,25 @@ impl NoticeDeadline {
         }
     }
 }
-pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>> {
+/// 只在新记录插入后调用；时长使用单调时钟，避免系统时间调整影响节流。
+fn cleanup_due(elapsed: Duration, inserted: u32) -> bool {
+    inserted > 0 && (elapsed >= Duration::from_secs(30) || inserted >= 20)
+}
+
+pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<State>> {
+    let policy = RetentionPolicy::default();
+    let vacuumed = match storage.cleanup(&policy, crate::storage::unix_millis()) {
+        Ok(report) => report.vacuumed,
+        Err(e) => {
+            diag::write(format!("startup cleanup failed: {e}"));
+            false
+        }
+    };
+    if !vacuumed {
+        if let Err(e) = storage.vacuum_on_startup() {
+            diag::write(format!("startup vacuum failed: {e}"));
+        }
+    }
     let (jobs, rx) = mpsc::sync_channel(32);
     let (control, controls) = mpsc::channel();
     let items = storage.list_page(
@@ -267,6 +317,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
     let state = Arc::new(State {
         items: Mutex::new(items),
         storage: Mutex::new(storage),
+        retention_policy: Mutex::new(policy),
         jobs: jobs.clone(),
         control: control.clone(),
         target: AtomicIsize::new(0),
@@ -286,6 +337,8 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
     thread::Builder::new()
         .name("clipboard-storage-worker".into())
         .spawn(move || {
+            let mut last_cleanup = Instant::now();
+            let mut inserted_since_cleanup = 0u32;
             while let Ok(job) = rx.recv() {
                 match job {
                     Job::Capture => {
@@ -294,11 +347,43 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                         )) {
                             Ok(clip) => {
                                 if let Some(clip) = clip {
-                                    let result = worker.storage.lock().unwrap().save(&clip);
-                                    if result.is_err() {
-                                        report(&a, &worker, "记录保存失败");
-                                    } else if refresh(&a, &worker).is_err() {
-                                        report(&a, &worker, "历史列表刷新失败");
+                                    let result =
+                                        worker.storage.lock().unwrap().save_with_outcome(&clip);
+                                    match result {
+                                        Err(_) => report(&a, &worker, "记录保存失败"),
+                                        Ok(inserted) => {
+                                            if inserted {
+                                                inserted_since_cleanup =
+                                                    inserted_since_cleanup.saturating_add(1);
+                                                if cleanup_due(
+                                                    last_cleanup.elapsed(),
+                                                    inserted_since_cleanup,
+                                                ) {
+                                                    let policy = worker
+                                                        .retention_policy
+                                                        .lock()
+                                                        .unwrap()
+                                                        .clone();
+                                                    let result =
+                                                        worker.storage.lock().unwrap().cleanup(
+                                                            &policy,
+                                                            crate::storage::unix_millis(),
+                                                        );
+                                                    if let Err(e) = result {
+                                                        diag::write(format!(
+                                                            "capture cleanup failed: {e}"
+                                                        ));
+                                                    }
+                                                    // 失败也节流，避免故障时每次采集重复做昂贵维护。
+                                                    last_cleanup = Instant::now();
+                                                    inserted_since_cleanup = 0;
+                                                }
+                                            }
+                                            // 保存与清理共用一次刷新；去重更新仍需要重排列表。
+                                            if refresh(&a, &worker).is_err() {
+                                                report(&a, &worker, "历史列表刷新失败");
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -487,6 +572,36 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                             }
                         });
                     }
+                    Control::HistoryChanged => {
+                        if panel.visible {
+                            let ids: Vec<_> = panel.items.iter().map(|item| item.id.as_str()).collect();
+                            let existing = s.storage.lock().unwrap().existing_panel_ids(&ids);
+                            let refreshed = match existing {
+                                Ok(existing) => refresh_panel_snapshot(
+                                    &panel.items,
+                                    &existing,
+                                    panel.items.get(panel.selected).map(|item| item.id.as_str()),
+                                ),
+                                Err(error) => {
+                                    diag::write(format!("panel snapshot lookup failed: {error}"));
+                                    None
+                                }
+                            };
+                            if let Some((items, selected)) = refreshed {
+                                panel.items = items;
+                                panel.selected = selected;
+                                publish(&a, &s, &panel);
+                            } else {
+                                // 查询失败或选中项被删除都取消；后续 Commit 无可粘贴的记录。
+                                hook::cancel_panel();
+                                panel.items.clear();
+                                panel.selected = 0;
+                                panel.error = None;
+                                notice.cancel();
+                                hide_panel(&a, &s, &mut panel);
+                            }
+                        }
+                    }
                     Control::Hide => {
                         let main = s.main.load(Ordering::Acquire);
                         on_main(&a, move || { platform::hide(main); diag::panel(false, false); });
@@ -538,13 +653,7 @@ pub fn start(app: AppHandle, storage: Storage, smoke: bool) -> Result<Arc<State>
                         }
                         Action::Commit | Action::Cancel => {
                             let paste = action == Action::Commit && panel.visible;
-                            panel.visible = false;
-                            diag::panel(true, false);
-                            publish(&a, &s, &panel);
-                            let quick = s.quick.load(Ordering::Acquire);
-                            if panel.error.is_none() {
-                                on_main(&a, move || platform::hide(quick));
-                            }
+                            hide_panel(&a, &s, &mut panel);
                             if paste {
                                 if let Some(item) = panel.items.get(panel.selected) {
                                     if s.jobs
@@ -614,6 +723,69 @@ pub fn stop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn snapshot() -> Vec<ItemView> {
+        ["a", "b", "c"]
+            .into_iter()
+            .map(|id| ItemView {
+                id: id.into(),
+                summary: format!("快照内容 {id}"),
+                ..Default::default()
+            })
+            .collect()
+    }
+    fn existing(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|id| (*id).into()).collect()
+    }
+    #[test]
+    fn snapshot_cancels_when_selected_item_is_deleted() {
+        assert!(refresh_panel_snapshot(&snapshot(), &existing(&["a", "c"]), Some("b")).is_none());
+    }
+    #[test]
+    fn snapshot_preserves_selected_id_when_other_items_are_deleted() {
+        let (items, selected) =
+            refresh_panel_snapshot(&snapshot(), &existing(&["b", "c"]), Some("b")).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c"]
+        );
+        assert_eq!(selected, 0);
+        assert_eq!(items[selected].id, "b");
+        assert_eq!(items[selected].summary, "快照内容 b");
+    }
+    #[test]
+    fn snapshot_does_not_add_new_items_or_reorder_existing_items() {
+        let (items, selected) =
+            refresh_panel_snapshot(&snapshot(), &existing(&["new", "c", "b", "a"]), Some("b"))
+                .unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(selected, 1);
+    }
+    #[test]
+    fn snapshot_cancels_when_all_items_are_deleted() {
+        assert!(refresh_panel_snapshot(&snapshot(), &HashSet::new(), Some("b")).is_none());
+    }
+    #[test]
+    fn snapshot_cancels_when_selection_is_missing() {
+        assert!(refresh_panel_snapshot(&snapshot(), &existing(&["a", "b", "c"]), None).is_none());
+        assert!(refresh_panel_snapshot(&[], &existing(&["b"]), Some("b")).is_none());
+    }
+    #[test]
+    fn cleanup_throttle_boundaries() {
+        assert!(!cleanup_due(Duration::from_secs(300), 0));
+        assert!(!cleanup_due(Duration::from_millis(29_999), 19));
+        assert!(cleanup_due(Duration::from_secs(30), 1));
+        assert!(cleanup_due(Duration::ZERO, 20));
+        assert!(cleanup_due(Duration::ZERO, u32::MAX));
+    }
     #[test]
     fn toggle_only_hides_a_visible_restored_foreground_window() {
         for visible in [false, true] {

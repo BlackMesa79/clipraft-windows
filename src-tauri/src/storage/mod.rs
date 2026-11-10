@@ -1,4 +1,7 @@
 pub mod crypto;
+mod maintenance;
+#[cfg(test)]
+mod maintenance_tests;
 #[cfg(test)]
 mod migration_tests;
 mod migrations;
@@ -7,9 +10,11 @@ use crate::{
     thumbnail,
 };
 use anyhow::{bail, Context, Result};
+pub use maintenance::{validate_retention_policy, DeleteReport, RetentionPolicy, ScanReport};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -116,6 +121,22 @@ impl Storage {
     pub fn list(&self) -> Result<Vec<ItemView>> {
         self.list_page(&ListFilter::default(), 0, QUICK_PAGE_SIZE)
     }
+    /// 只查询快速面板快照中的 id，不受历史第一页缓存或排序影响。
+    pub fn existing_panel_ids(&self, ids: &[&str]) -> Result<HashSet<String>> {
+        if ids.len() > 9 {
+            bail!("快速面板快照不能超过 9 条");
+        }
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id FROM items WHERE id IN ({placeholders})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()
+            .map_err(Into::into)
+    }
     pub fn list_page(
         &self,
         filter: &ListFilter,
@@ -168,6 +189,10 @@ impl Storage {
             .map_err(Into::into)
     }
     pub fn save(&mut self, clip: &Clip) -> Result<()> {
+        self.save_with_outcome(clip).map(|_| ())
+    }
+    /// 返回是否插入新记录；命中去重仍沿用原有更新路径。
+    pub fn save_with_outcome(&mut self, clip: &Clip) -> Result<bool> {
         let id = clip.hash();
         let dedup_key = clip.file_dedup_key().unwrap_or_else(|| id.clone());
         let now = unix_millis();
@@ -181,7 +206,7 @@ impl Storage {
             params![order, dedup_key, now, id],
         )? > 0
         {
-            return Ok(());
+            return Ok(false);
         }
         let files = clip
             .get("CF_HDROP")
@@ -256,7 +281,7 @@ impl Storage {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
     /// 只更新已有记录的顺序；不加载格式、不哈希内容、不重写加密对象。
     pub fn touch(&self, id: &str) -> Result<()> {
@@ -345,6 +370,65 @@ fn search_text(clip: &Clip) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 此查询只依赖 items.id；内存库避免读取真实记录或创建 blob 文件。
+    fn panel_id_storage() -> Storage {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE items (id TEXT PRIMARY KEY)")
+            .unwrap();
+        Storage {
+            conn,
+            blobs: PathBuf::new(),
+            key: Zeroizing::new([0; 32]),
+        }
+    }
+    #[test]
+    fn panel_ids_include_records_outside_cached_page_and_exclude_deleted_records() {
+        let s = panel_id_storage();
+        for index in 0..=QUICK_PAGE_SIZE {
+            s.conn
+                .execute(
+                    "INSERT INTO items(id) VALUES (?1)",
+                    [format!("item-{index:03}")],
+                )
+                .unwrap();
+        }
+        // 最旧记录已被挤出整个缓存页，仍必须保留在呼出时的快照中。
+        let in_cached_page: bool = s.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM (SELECT id FROM items ORDER BY id DESC LIMIT ?1) WHERE id='item-000')",
+            [QUICK_PAGE_SIZE], |row| row.get(0),
+        ).unwrap();
+        assert!(!in_cached_page);
+        assert_eq!(
+            s.existing_panel_ids(&["item-000", "item-001", "missing"])
+                .unwrap(),
+            HashSet::from(["item-000".into(), "item-001".into()])
+        );
+        s.conn
+            .execute("DELETE FROM items WHERE id=?1", ["item-001"])
+            .unwrap();
+        assert_eq!(
+            s.existing_panel_ids(&["item-000", "item-001"]).unwrap(),
+            HashSet::from(["item-000".into()])
+        );
+    }
+    #[test]
+    fn panel_ids_handle_empty_and_maximum_snapshot_sizes() {
+        let s = panel_id_storage();
+        assert!(s.existing_panel_ids(&[]).unwrap().is_empty());
+        let ids: Vec<_> = (0..9).map(|index| format!("item-{index}")).collect();
+        for id in &ids {
+            s.conn
+                .execute("INSERT INTO items(id) VALUES (?1)", [id])
+                .unwrap();
+        }
+        let mut requested: Vec<_> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            s.existing_panel_ids(&requested).unwrap(),
+            ids.iter().cloned().collect()
+        );
+        requested.push("tenth");
+        assert!(s.existing_panel_ids(&requested).is_err());
+    }
     #[test]
     fn encrypted_persistence_and_dedup() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

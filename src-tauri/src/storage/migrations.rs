@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const VERSION: i64 = 2;
+pub const VERSION: i64 = 3;
 const V0: &str = "CREATE TABLE items(id TEXT PRIMARY KEY, view TEXT NOT NULL, touched INTEGER NOT NULL);
 CREATE TABLE formats(item TEXT NOT NULL REFERENCES items(id), name TEXT NOT NULL, inline BLOB, blob TEXT, PRIMARY KEY(item,name));";
 const V1: &str = "CREATE TABLE groups(id INTEGER PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL, created INTEGER NOT NULL);
@@ -118,6 +118,10 @@ pub(super) fn upgrade(
                     migrate_v1(&tx, &storage.blobs, &storage.key)?;
                 }
                 1 => migrate_v2(&tx)?,
+                2 => tx.execute_batch("CREATE INDEX formats_blob ON formats(blob);
+                    CREATE INDEX items_touched ON items(touched DESC,id ASC);
+                    CREATE INDEX items_expiry ON items(expires_at) WHERE expires_at IS NOT NULL;
+                    CREATE INDEX items_retention ON items(used_at,touched) WHERE pinned=0 AND favorite=0 AND group_id IS NULL;")?,
                 _ => bail!("缺少从版本 {version} 升级的迁移步骤"),
             }
             tx.pragma_update(None, "user_version", version + 1)?;

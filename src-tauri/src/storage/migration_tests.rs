@@ -220,7 +220,7 @@ fn encrypted_v0_migration_preserves_data_and_backup_and_is_idempotent() {
     let before = unix_millis();
     let s = Storage::open(&root.0, &MASTER).unwrap();
     let after = unix_millis();
-    assert_eq!(version(&s.conn), 2);
+    assert_eq!(version(&s.conn), 3);
     for clip in &clips {
         assert_eq!(s.load(&clip.hash()).unwrap().formats, {
             let mut f = clip.formats.clone();
@@ -667,7 +667,7 @@ fn migration_succeeds_without_overwriting_existing_backup() {
     let existing = root.0.join("history.db.bak-v0");
     fs::write(&existing, b"existing backup").unwrap();
     let s = Storage::open(&root.0, &MASTER).unwrap();
-    assert_eq!(version(&s.conn), 2);
+    assert_eq!(version(&s.conn), 3);
     assert_eq!(s.list().unwrap().len(), clips.len());
     assert_eq!(fs::read(&existing).unwrap(), b"existing backup");
     let all = backups(&root.0);
@@ -756,7 +756,7 @@ fn corrupt_view_json_rolls_back_and_keeps_original_database() {
         .unwrap();
     drop(conn);
     let s = Storage::open(&root.0, &MASTER).unwrap();
-    assert_eq!(version(&s.conn), 2);
+    assert_eq!(version(&s.conn), 3);
     assert_eq!(s.list().unwrap().len(), 1);
     assert_eq!(s.load(&good.hash()).unwrap().formats, good.formats);
     assert_eq!(backups(&root.0).len(), 2);
@@ -817,14 +817,14 @@ fn unsupported_version_with_data_is_rejected_without_side_effects() {
     let root = Fixture::new();
     let (clips, _, _) = legacy(&root.0);
     let conn = connect(&root.0.join("history.db"));
-    conn.pragma_update(None, "user_version", 3).unwrap();
+    conn.pragma_update(None, "user_version", 4).unwrap();
     drop(conn);
     let error = Storage::open(&root.0, &MASTER).err().unwrap().to_string();
     assert!(error.contains("不受支持"), "{error}");
     assert!(error.contains("原数据未改动"), "{error}");
     assert!(backups(&root.0).is_empty(), "拒绝打开时不应写备份");
     let conn = connect(&root.0.join("history.db"));
-    assert_eq!(version(&conn), 3);
+    assert_eq!(version(&conn), 4);
     assert_eq!(columns(&conn), ["id", "view", "touched"]);
     assert_eq!(
         conn.query_row("SELECT count(*) FROM items", [], |r| r.get::<_, usize>(0))
@@ -1306,7 +1306,7 @@ fn check_dedup_migration(start_version: i64) {
     }
     let blobs = blob_snapshot(&root.0);
     let mut s = Storage::open(&root.0, &MASTER).unwrap();
-    assert_eq!(version(&s.conn), 2);
+    assert_eq!(version(&s.conn), 3);
     assert_eq!(s.list().unwrap().len(), clips.len());
     for (n, clip) in clips.iter().enumerate() {
         let (key, touched): (String, i64) = s
@@ -1372,8 +1372,8 @@ fn check_dedup_migration(start_version: i64) {
     assert_eq!(blob_snapshot(&root.0), blobs);
     drop(s);
     let reopened =
-        Storage::open_with_hook(&root.0, &MASTER, |_| panic!("v2 不应再次执行迁移")).unwrap();
-    assert_eq!(version(&reopened.conn), 2);
+        Storage::open_with_hook(&root.0, &MASTER, |_| panic!("当前版本不应再次执行迁移")).unwrap();
+    assert_eq!(version(&reopened.conn), 3);
     assert_eq!(reopened.list().unwrap().len(), clips.len());
     assert_eq!(reopened.list().unwrap()[0].id, qq.hash());
     assert_eq!(backups(&root.0), backup_paths);
@@ -1418,5 +1418,5 @@ fn v2_failure_rolls_back_dedup_column_index_and_version() {
         clips.len()
     );
     drop(conn);
-    assert_eq!(version(&Storage::open(&root.0, &MASTER).unwrap().conn), 2);
+    assert_eq!(version(&Storage::open(&root.0, &MASTER).unwrap().conn), 3);
 }
