@@ -7,7 +7,7 @@ import HistoryList from './HistoryList.vue';
 import SettingsView from './SettingsView.vue';
 import type { Settings, SettingOptions } from './settings';
 import ContextMenu from './ContextMenu.vue';
-import { kindLabel, type Item } from './history';
+import { kindLabel, type Item, type HistoryFilter, type HistoryKind } from './history';
 interface Panel { items: Item[]; selected: number; visible: boolean; error: string | null }
 const quick = new URLSearchParams(location.search).get('panel') === 'quick';
 const items = ref<Item[]>([]), selected = ref(0), error = ref(''), busy = ref(false);
@@ -18,8 +18,32 @@ const quickKey = computed(() => settingOptions.value?.quick_hotkeys.find(k => k.
 function toggleSettings() {
   if (settingsBusy.value || deleting.value || busy.value) return;
   settingsOpen.value = !settingsOpen.value; contextMenu.value = null; pendingDelete.value = null;
-  if (!settingsOpen.value) void nextTick(checkLoadMore);
+  if (!settingsOpen.value) { void nextTick(checkLoadMore); void focusSearch(); }
 }
+const searchInput = ref<HTMLInputElement | null>(null);
+const query = ref(''), kind = ref<HistoryKind | null>(null), composing = ref(false);
+const kinds: { value: HistoryKind | null; label: string }[] = [
+  { value: null, label: '全部' }, { value: 'text', label: '文本' }, { value: 'image', label: '图片' },
+  { value: 'files', label: '文件' }, { value: 'link', label: '链接' },
+];
+const listFilter = computed<HistoryFilter>(() => ({ query: query.value, kind: kind.value }));
+const filtered = computed(() => !!query.value.trim() || kind.value !== null);
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+async function focusSearch() { await nextTick(); if (!quick && !settingsOpen.value) searchInput.value?.focus(); }
+function filtersChanged(delay = 150) {
+  if (quick) return;
+  clearTimeout(searchTimer); searchTimer = undefined;
+  ++listGeneration; ++detailGeneration;
+  afterDelete = undefined; contextMenu.value = null; pendingDelete.value = null;
+  items.value = []; selectOnly(0); nextOffset = 0; hasMore.value = true;
+  pageError.value = ''; pageLoading.value = true;
+  if (listRoot.value) listRoot.value.scrollTop = 0;
+  if (!composing.value) searchTimer = setTimeout(() => { searchTimer = undefined; void load(); }, delay);
+}
+watch(query, () => filtersChanged());
+watch(kind, () => filtersChanged(0));
+function compositionStart() { composing.value = true; clearTimeout(searchTimer); searchTimer = undefined; }
+function compositionEnd() { composing.value = false; filtersChanged(); }
 const PAGE_SIZE = 100;
 const historyList = ref<InstanceType<typeof HistoryList> | null>(null);
 const listRoot = computed(() => historyList.value?.element ?? null);
@@ -87,7 +111,7 @@ async function performDelete(ids: string[]) {
 function confirmDelete() { if (pendingDelete.value) void performDelete(pendingDelete.value); }
 function historyChanged() {
   contextMenu.value = null;
-  if (deleting.value) deferredHistory = true; else void load();
+  if (deleting.value) deferredHistory = true; else if (!searchTimer && !composing.value) void load();
 }
 function contextPaste() { contextMenu.value = null; void paste(false); }
 
@@ -100,7 +124,7 @@ async function loadMore() {
   const generation = listGeneration, offset = nextOffset;
   pageLoading.value = true;
   try {
-    const page = await invoke<Item[]>('list_items', { filter: {}, offset, limit: PAGE_SIZE });
+    const page = await invoke<Item[]>('list_items', { filter: listFilter.value, offset, limit: PAGE_SIZE });
     if (generation !== listGeneration) return;
     const known = new Set(items.value.map(item => item.id));
     items.value.push(...page.filter(item => !known.has(item.id)));
@@ -161,7 +185,7 @@ async function load() {
     let more = true;
     // 重建已加载范围；选中项移到下一页时继续查找，保留选择。
     while (more) {
-      const page = await invoke<Item[]>('list_items', { filter: {}, offset: refreshed.length, limit: PAGE_SIZE });
+      const page = await invoke<Item[]>('list_items', { filter: listFilter.value, offset: refreshed.length, limit: PAGE_SIZE });
       if (generation !== listGeneration) return;
       refreshed.push(...page); more = page.length === PAGE_SIZE;
       const id = deletion?.id ?? active.value?.id;
@@ -199,20 +223,33 @@ async function paste(plain = false) {
   finally { busy.value = false; }
 }
 async function keydown(event: KeyboardEvent) {
-  if (quick || event.isComposing) return;
+  if (quick || event.isComposing || composing.value || event.keyCode === 229) return;
   if (settingsOpen.value) {
     if (event.key === 'Escape') { event.preventDefault(); if (!settingsBusy.value) toggleSettings(); }
     return;
   }
-  if ((event.target as Element | null)?.closest?.('.settings-toggle') && (event.key === 'Enter' || event.key === ' ')) return;
+  // 保留控件的原生激活/编辑行为；列表项本身也是 button，不接管其 Enter。
+  if (event.key === ' ') return;
+  if (event.key === 'Enter') {
+    const target = event.target instanceof Element ? event.target : document.activeElement;
+    if (target?.closest('button, select, a, textarea, input:not([type="search"]), [contenteditable]')) return;
+    const inSearch = target === searchInput.value;
+    const inList = !!target?.closest('.list');
+    const noFocus = !target || target === document.body || target === document.documentElement;
+    if (!inSearch && !inList && !noFocus) return;
+  }
   if (pendingDelete.value) {
     if (event.key === 'Escape') { event.preventDefault(); pendingDelete.value = null; }
     // 确认条按钮仍可通过 Tab / Enter 操作，但不触发列表粘贴。
     return;
   }
   if (deleting.value) { event.preventDefault(); return; }
-  if (event.key === 'Delete') { event.preventDefault(); requestDelete(); return; }
+  const inSearch = event.target === searchInput.value;
+  if (event.key === 'Escape' && contextMenu.value) { event.preventDefault(); contextMenu.value = null; return; }
+  // 搜索框非空时保留原生 Delete，光标在末尾也不会误删历史。
+  if (event.key === 'Delete') { if (inSearch && query.value.length) return; event.preventDefault(); requestDelete(); return; }
   if (event.ctrlKey && event.key.toLowerCase() === 'a') {
+    if (inSearch) return;
     event.preventDefault(); selectedIds.value = new Set(items.value.map(item => item.id)); contextMenu.value = null; return;
   }
   if (event.key === 'Enter' && contextMenu.value) return;
@@ -221,18 +258,24 @@ async function keydown(event: KeyboardEvent) {
     event.preventDefault();
     if (event.key === 'ArrowDown' && selected.value === items.value.length - 1 && hasMore.value) {
       if (pageLoading.value || pageError.value) return;
+      const generation = listGeneration;
       await loadMore();
+      if (generation !== listGeneration) return;
       if (selected.value === items.value.length - 1 && hasMore.value) return;
     }
     if (items.value.length) selectOnly((selected.value + (event.key === 'ArrowDown' ? 1 : -1) + items.value.length) % items.value.length);
     contextMenu.value = null;
     void nextTick(() => document.querySelector('.item.selected')?.scrollIntoView({ block: 'nearest' }));
-  } else if (event.key === 'Escape') { contextMenu.value = null; void invoke('hide_main'); }
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    if (query.value.length) { query.value = ''; void focusSearch(); } else void invoke('hide_main');
+  }
 }
 onMounted(async () => {
   if (quick && panelRoot.value) { panelObserver = new ResizeObserver(resizeQuick); panelObserver.observe(panelRoot.value); }
   try {
     stops.push(await listen<Panel>('panel-state', ({ payload }) => { if (quick) applyPanel(payload); }));
+    stops.push(await listen('main-shown', () => { void focusSearch(); }));
     stops.push(await listen('history-changed', () => { if (!quick) historyChanged(); }));
     stops.push(await listen<string>('operation-error', ({ payload }) => { if (!quick) error.value = payload; }));
     stops.push(await listen<Settings>('settings-changed', ({ payload }) => { settings.value = payload; }));
@@ -241,12 +284,13 @@ onMounted(async () => {
     if (!quick) startupError.value = (await invoke<string | null>('startup_error')) ?? '';
     await load(); if (!quick) error.value = (await invoke<string | null>('last_error')) ?? '';
     await invoke('frontend_ready');
+    await focusSearch();
   } catch (e) { error.value = '初始化失败：' + String(e); }
   window.addEventListener('keydown', keydown);
   window.addEventListener('focus', loadDetail);
   window.addEventListener('resize', checkLoadMore);
 });
-onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; });
+onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; });
 </script>
 
 <template>
@@ -256,6 +300,12 @@ onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); 
       <button v-if="!quick" type="button" class="settings-toggle" :aria-label="settingsOpen ? '返回列表' : '设置'" :disabled="settingsBusy || deleting || busy" @click="toggleSettings">{{ settingsOpen ? '返回列表' : '⚙ 设置' }}</button>
       <span v-if="!noticeOnly && !settingsOpen" class="count">{{ quick ? '' : '已加载 ' }}{{ items.length }} 条</span>
     </header>
+    <div v-if="!quick && !settingsOpen" class="search-tools">
+      <input ref="searchInput" v-model="query" type="search" aria-label="搜索历史" placeholder="搜索文本、文件或拼音…" autocomplete="off" :disabled="deleting || !!pendingDelete" @compositionstart="compositionStart" @compositionend="compositionEnd">
+      <div class="kind-filters" role="group" aria-label="类型筛选">
+        <button v-for="option in kinds" :key="option.label" type="button" :aria-pressed="kind === option.value" :disabled="deleting || !!pendingDelete" @click="kind = option.value">{{ option.label }}</button>
+      </div>
+    </div>
     <div v-if="!quick && startupError" class="error" role="alert">{{ startupError }}</div>
     <SettingsView v-if="settingsOpen && !quick" @saved="settings = $event" @busy="settingsBusy = $event" />
     <div v-if="error" class="error" role="alert">{{ error }}</div>
@@ -265,9 +315,9 @@ onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); 
       <button type="button" @click="confirmDelete">确认</button><button type="button" @click="pendingDelete = null">取消</button>
     </div>
     <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
-    <section v-if="!settingsOpen && !noticeOnly && !items.length" class="empty"><span>▤</span><h2>从一次复制开始</h2><p>复制文本、图片或文件后，会显示在这里。</p><p v-if="!quick">{{ quickKey?.label }} 打开快速面板</p></section>
+    <section v-if="!settingsOpen && !noticeOnly && !items.length" class="empty"><span>▤</span><h2>{{ !quick && pageLoading ? '正在搜索…' : !quick && filtered ? '没有匹配的记录' : '从一次复制开始' }}</h2><p>{{ !quick && filtered ? '试试其他关键词或类型。' : '复制文本、图片或文件后，会显示在这里。' }}</p><p v-if="!quick && !filtered">{{ quickKey?.label }} 打开快速面板</p></section>
     <div v-else-if="!settingsOpen && !noticeOnly" class="workspace">
-    <HistoryList ref="historyList" :items="items" :selected="selected" :selected-ids="selectedIds" :quick="quick" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
+    <HistoryList ref="historyList" :items="items" :selected="selected" :selected-ids="selectedIds" :quick="quick" :filtered="filtered" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
     <aside v-if="!quick && active" class="detail" aria-label="选中项预览">
       <div class="detail-header"><h2>{{ kindLabel(active) }}预览</h2><button type="button" @click="loadDetail">刷新状态</button></div>
       <PreviewImage v-if="active.kind === 'image' || active.thumbnail || active.preview || active.placeholder" :hash="active.preview || active.thumbnail" :placeholder="active.placeholder" large @loaded="invoke('preview_loaded').catch(() => {})" />

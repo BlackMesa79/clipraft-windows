@@ -705,6 +705,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                     // 显示过程也受保护，完成后再保留完整的 300ms 时窗。
                                     platform::arm_main_menu_guard();
                                     diag::modifier_snapshot("toggle", "after_show");
+                                    if shown.is_ok() { let _ = window.emit("main-shown", ()); }
                                     diag::panel(false, shown.is_ok());
                                     diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=show before={before:?} restore_ok={} show_ok={} raise_ok={} set_foreground_ok={foreground_ok} after={}", restored.is_ok(), shown.is_ok(), raised.is_ok(), diag::foreground()));
                                 }

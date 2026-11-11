@@ -1,13 +1,13 @@
 use super::{crypto, display_json, search_text, unix_millis, Storage};
 use crate::model::{self, Clip, FormatData, ItemView};
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-pub const VERSION: i64 = 3;
+pub const VERSION: i64 = 4;
 const V0: &str = "CREATE TABLE items(id TEXT PRIMARY KEY, view TEXT NOT NULL, touched INTEGER NOT NULL);
 CREATE TABLE formats(item TEXT NOT NULL REFERENCES items(id), name TEXT NOT NULL, inline BLOB, blob TEXT, PRIMARY KEY(item,name));";
 const V1: &str = "CREATE TABLE groups(id INTEGER PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL, created INTEGER NOT NULL);
@@ -122,6 +122,7 @@ pub(super) fn upgrade(
                     CREATE INDEX items_touched ON items(touched DESC,id ASC);
                     CREATE INDEX items_expiry ON items(expires_at) WHERE expires_at IS NOT NULL;
                     CREATE INDEX items_retention ON items(used_at,touched) WHERE pinned=0 AND favorite=0 AND group_id IS NULL;")?,
+                3 => migrate_v4(&tx, &storage.blobs, &storage.key)?,
                 _ => bail!("缺少从版本 {version} 升级的迁移步骤"),
             }
             tx.pragma_update(None, "user_version", version + 1)?;
@@ -263,5 +264,113 @@ fn migrate_v2(tx: &Transaction<'_>) -> Result<()> {
             params![id, dedup_key],
         )?;
     }
+    Ok(())
+}
+
+fn v4_is_link(
+    tx: &Transaction<'_>,
+    blobs: &Path,
+    key: &[u8; 32],
+    id: &str,
+    kind: &str,
+    search_text: &str,
+) -> Result<bool> {
+    if kind != "text" {
+        return Ok(false);
+    }
+    let format = tx
+        .query_row(
+            "SELECT inline,blob FROM formats WHERE item=?1 AND name='CF_UNICODETEXT'",
+            [id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<Vec<u8>>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let bytes = format.and_then(|(inline, blob)| {
+        inline.or_else(|| {
+            let blob = blob.filter(|b| model::is_hash(b))?;
+            let encrypted = fs::read(blobs.join(&blob)).ok()?;
+            crypto::decrypt(key, &blob, &encrypted).ok()
+        })
+    });
+    if let Some(bytes) = bytes {
+        let clip = Clip {
+            formats: vec![FormatData {
+                name: "CF_UNICODETEXT".into(),
+                bytes,
+            }],
+        };
+        return Ok(super::search::is_link(
+            kind,
+            &clip.text().unwrap_or_default(),
+        ));
+    }
+    // 完整载荷不可用才回退；is_link 的 8KiB 上限确保可接受文本远短于
+    // 16KiB 搜索截断边界（包括 UTF-8 边界回退），不会将截断前缀认作链接。
+    Ok(super::search::is_link(kind, search_text))
+}
+
+fn migrate_v4(tx: &Transaction<'_>, blobs: &Path, key: &[u8; 32]) -> Result<()> {
+    tx.execute_batch(
+        "ALTER TABLE items ADD COLUMN search_pinyin TEXT NOT NULL DEFAULT '';
+        ALTER TABLE items ADD COLUMN is_link INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX items_link ON items(is_link,pinned DESC,touched DESC,id ASC);",
+    )?;
+    // 分页回填，避免一次把所有 16KiB 搜索文本加载进内存。
+    let mut last_id: Option<String> = None;
+    loop {
+        let rows = {
+            let mut stmt = tx.prepare("SELECT id,kind,search_text FROM items WHERE ?1 IS NULL OR id>?1 ORDER BY id LIMIT 128")?;
+            let rows = stmt.query_map([&last_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if rows.is_empty() {
+            break;
+        }
+        for (id, kind, text) in rows {
+            tx.execute(
+                "UPDATE items SET search_pinyin=?2,is_link=?3 WHERE id=?1",
+                params![
+                    id,
+                    super::search::pinyin_text(&text),
+                    v4_is_link(tx, blobs, key, &id, &kind, &text)?
+                ],
+            )?;
+            last_id = Some(id);
+        }
+    }
+    // items 的隐式 rowid 会被 VACUUM 改写；显式 INTEGER PRIMARY KEY 保证映射稳定。
+    tx.execute_batch("CREATE TABLE items_fts_map (
+            search_id INTEGER PRIMARY KEY,
+            item_id TEXT NOT NULL UNIQUE REFERENCES items(id)
+        );
+        CREATE VIRTUAL TABLE items_fts USING fts5(search_text,search_pinyin,tokenize='trigram');
+        INSERT INTO items_fts_map(item_id) SELECT id FROM items ORDER BY id;
+        INSERT INTO items_fts(rowid,search_text,search_pinyin)
+            SELECT m.search_id,i.search_text,i.search_pinyin FROM items i JOIN items_fts_map m ON m.item_id=i.id;
+        CREATE TRIGGER items_search_insert AFTER INSERT ON items BEGIN
+            INSERT INTO items_fts_map(item_id) VALUES(new.id);
+            INSERT INTO items_fts(rowid,search_text,search_pinyin)
+                SELECT search_id,new.search_text,new.search_pinyin FROM items_fts_map WHERE item_id=new.id;
+        END;
+        CREATE TRIGGER items_search_delete BEFORE DELETE ON items BEGIN
+            DELETE FROM items_fts WHERE rowid=(SELECT search_id FROM items_fts_map WHERE item_id=old.id);
+            DELETE FROM items_fts_map WHERE item_id=old.id;
+        END;
+        CREATE TRIGGER items_search_update AFTER UPDATE OF search_text,search_pinyin ON items BEGIN
+            UPDATE items_fts SET search_text=new.search_text,search_pinyin=new.search_pinyin
+                WHERE rowid=(SELECT search_id FROM items_fts_map WHERE item_id=new.id);
+        END;
+        INSERT INTO items_fts(items_fts) VALUES('integrity-check');")?;
     Ok(())
 }

@@ -104,7 +104,7 @@ try {
   const scroll = () => evaluate(`(() => {const list=document.querySelector('.list');list.scrollTop=list.scrollHeight;list.dispatchEvent(new Event('scroll'));})()`);
   const text = () => evaluate(`document.querySelector('.text-detail')?.textContent`);
   await send('Page.navigate', { url: origin }); await ready(); await count(100);
-  assert.deepEqual(await evaluate('window.calls[0]'), { filter: {}, offset: 0, limit: 100 });
+  assert.deepEqual(await evaluate('window.calls[0]'), { filter: { query: '', kind: null }, offset: 0, limit: 100 });
   assert(await evaluate(`document.querySelector('.list').getBoundingClientRect().height > 200`));
   checks.push('首屏 100 条并实际完成布局');
   await evaluate(`document.querySelectorAll('.item')[98].click()`);

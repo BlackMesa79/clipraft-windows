@@ -485,6 +485,7 @@ fn v3_indexes_migrate_from_v2_with_encrypted_backup_and_rollback() {
     let f = Fixture::new();
     let s = f.open();
     seed(&s, 2);
+    super::search_tests::remove_v4(&s.conn);
     s.conn.execute_batch("DROP INDEX formats_blob; DROP INDEX items_touched; DROP INDEX items_expiry; DROP INDEX items_retention; PRAGMA user_version=2;").unwrap();
     drop(s);
     assert!(Storage::open_with_hook(&f.0, &[72; 32], |_| anyhow::bail!(
@@ -514,7 +515,7 @@ fn v3_indexes_migrate_from_v2_with_encrypted_backup_and_rollback() {
         s.conn
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        migrations::VERSION
     );
     assert_eq!(s.conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('formats_blob','items_touched','items_expiry','items_retention')",[],|r|r.get::<_,i64>(0)).unwrap(),4);
     assert_eq!(ids(&s).len(), 2);

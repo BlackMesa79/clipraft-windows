@@ -10,6 +10,9 @@ mod migrations;
 mod predict;
 #[cfg(test)]
 mod prediction_tests;
+mod search;
+#[cfg(test)]
+mod search_tests;
 mod settings;
 use crate::{
     model::{self, Clip, ItemView},
@@ -30,6 +33,7 @@ use zeroize::Zeroizing;
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ListFilter {
+    pub query: Option<String>,
     pub kind: Option<String>,
     pub favorite_only: bool,
     pub group_id: Option<i64>,
@@ -78,6 +82,8 @@ struct PreparedSave {
     identity: SaveIdentity,
     view: ItemView,
     search: String,
+    search_pinyin: String,
+    is_link: bool,
     formats: Vec<StoredFormat>,
     blobs: HashMap<String, Vec<u8>>,
 }
@@ -144,10 +150,15 @@ impl PreparedSave {
             });
         }
 
+        let search = search_text(clip);
+        let search_pinyin = search::pinyin_text(&search);
+        let is_link = search::is_link(&view.kind, &clip.text().unwrap_or_default());
         Ok(Self {
             identity,
             view,
-            search: search_text(clip),
+            search,
+            search_pinyin,
+            is_link,
             formats: stored,
             blobs: blobs.objects,
         })
@@ -273,8 +284,14 @@ impl Storage {
         let mut sql = String::from("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE 1=1");
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(kind) = &filter.kind {
-            sql.push_str(" AND kind=?");
-            values.push(kind.clone().into());
+            match kind.as_str() {
+                "text" => sql.push_str(" AND kind IN ('text','rich')"),
+                "link" => sql.push_str(" AND is_link=1"),
+                _ => {
+                    sql.push_str(" AND kind=?");
+                    values.push(kind.clone().into());
+                }
+            }
         }
         if filter.favorite_only {
             sql.push_str(" AND favorite=1");
@@ -283,6 +300,7 @@ impl Storage {
             sql.push_str(" AND group_id=?");
             values.push(group.into());
         }
+        search::append_query(&mut sql, &mut values, filter.query.as_deref());
         sql.push_str(" ORDER BY pinned DESC,touched DESC,id ASC LIMIT ? OFFSET ?");
         values.push((limit.min(PAGE_LIMIT) as i64).into());
         values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
@@ -386,8 +404,8 @@ impl Storage {
         let id = &prepared.identity.id;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10)",
-            params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key],
+            "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key,search_pinyin,is_link) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key, prepared.search_pinyin, prepared.is_link],
         )?;
         for format in prepared.formats {
             tx.execute(

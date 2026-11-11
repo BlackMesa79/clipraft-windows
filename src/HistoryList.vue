@@ -2,7 +2,7 @@
 import { ref } from 'vue';
 import PreviewImage from './PreviewImage.vue';
 import { filename, kindLabel, type Item } from './history';
-defineProps<{ items: Item[]; selected: number; selectedIds: Set<string>; quick: boolean; loading: boolean; hasMore: boolean; disabled: boolean }>();
+defineProps<{ items: Item[]; selected: number; selectedIds: Set<string>; quick: boolean; filtered?: boolean; loading: boolean; hasMore: boolean; disabled: boolean }>();
 const emit = defineEmits<{
   choose: [index: number, event: MouseEvent];
   context: [index: number, event: MouseEvent];
@@ -22,6 +22,6 @@ defineExpose({ element });
       <div class="content"><div class="summary">{{ item.kind === 'files' ? item.files.map(filename).join('、') : item.summary || '空文本' }}</div><div class="meta">{{ kindLabel(item) }}<span v-if="item.kind === 'files'"> · {{ item.files.length }} 个 · {{ item.formats.includes('Preferred DropEffect') ? '保留复制 / 剪切语义' : '' }}</span><span v-else> · {{ item.formats.join(' / ') }}</span></div></div>
       <span v-if="index === selected" class="selected-mark">↵</span>
     </button>
-    <p v-if="!quick" class="detail-note" role="status">{{ loading ? '正在加载…' : hasMore ? '向下滚动加载更多' : '已加载全部历史' }}</p>
+    <p v-if="!quick" class="detail-note" role="status">{{ loading ? '正在加载…' : hasMore ? '向下滚动加载更多' : filtered ? '已加载全部匹配记录' : '已加载全部历史' }}</p>
   </section>
 </template>
