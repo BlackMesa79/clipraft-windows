@@ -131,7 +131,7 @@ pub fn validate_hotkeys(main: Hotkey, quick: Hotkey) -> Result<()> {
     Ok(())
 }
 // 纯函数：同时识别 Windows/斜杠路径，空白项直接丢弃。
-fn normalize_ignored_app(raw: &str) -> Result<Option<&str>> {
+pub(crate) fn normalize_ignored_app(raw: &str) -> Result<Option<&str>> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(None);

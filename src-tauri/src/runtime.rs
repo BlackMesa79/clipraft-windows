@@ -401,7 +401,8 @@ pub(crate) fn save_capture(
             ));
         }
     }
-    let outcome = Storage::save_shared(storage, &captured.clip)?;
+    let outcome =
+        Storage::save_shared_with_source(storage, &captured.clip, Some(&captured.source))?;
     captured.context.record_id = Some(outcome.id);
     *previous = Some(captured.context);
     Ok(Some(outcome.inserted))
@@ -457,9 +458,10 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
             while let Ok(job) = rx.recv() {
                 match job {
                     Job::Capture => {
-                        match clipboard::capture_pending(platform::hwnd(
-                            LISTENER.load(Ordering::Acquire),
-                        )) {
+                        match clipboard::capture_pending_with_settings(
+                            platform::hwnd(LISTENER.load(Ordering::Acquire)),
+                            || worker.settings.lock().unwrap().ignored_apps.clone(),
+                        ) {
                             Ok(clip) => {
                                 if let Some(clip) = clip {
                                     let result = save_capture(

@@ -97,7 +97,7 @@ onMounted(load);
       </fieldset>
       <fieldset :disabled="busy">
         <legend>隐私</legend>
-        <p class="detail-note">忽略列表在 T6 生效；敏感内容识别及保留时间在 T7 生效。</p>
+        <p class="detail-note">忽略列表保存后对后续复制立即生效，不删除已有历史；敏感内容识别及保留时间将在后续版本生效。</p>
         <label class="check"><input v-model="draft.sensitive_detection" type="checkbox">识别敏感内容</label>
         <label class="number-field"><span>敏感内容保留分钟数</span><input v-model.number="draft.sensitive_ttl_minutes" type="number" v-bind="range('sensitive_ttl_minutes')" required><small>范围 {{ range('sensitive_ttl_minutes').min }}–{{ range('sensitive_ttl_minutes').max }}</small></label>
         <p>忽略程序（每行一个 exe 名）</p>

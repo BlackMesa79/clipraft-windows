@@ -64,15 +64,23 @@ fn snapshot() -> Snapshot {
 }
 pub(crate) struct Captured {
     pub clip: Clip,
+    pub source: crate::capture_source::CaptureSource,
     pub context: crate::owner_flush::CaptureContext,
     pub sequence: u32,
 }
+#[cfg(test)]
 pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Captured>, CaptureError> {
+    capture_pending_with_settings(hwnd, Vec::new)
+}
+pub fn capture_pending_with_settings(
+    hwnd: HWND,
+    ignored_apps: impl Fn() -> Vec<String>,
+) -> std::result::Result<Option<Captured>, CaptureError> {
     capture_policy::run(
         &LAST_SEQUENCE,
         snapshot,
         |sequence| {
-            capture_at(hwnd, sequence).map_err(|error| {
+            capture_at(hwnd, sequence, &ignored_apps()).map_err(|error| {
                 if let Some(limit) = error.downcast_ref::<CaptureLimit>() {
                     CaptureError::Limit {
                         actual: limit.actual,
@@ -121,6 +129,15 @@ fn open(hwnd: HWND) -> Result<OpenGuard> {
     }
     bail!("剪贴板被其他程序占用")
 }
+#[cfg(test)]
+thread_local! { static DATA_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+unsafe fn clipboard_data(id: u32) -> windows::core::Result<HANDLE> {
+    #[cfg(test)]
+    DATA_REQUESTS.with(|count| count.set(count.get() + 1));
+    GetClipboardData(id)
+}
+
 unsafe fn read_raw(
     id: u32,
     diagnostics: &mut crate::clipboard_diag::CaptureLog,
@@ -135,7 +152,7 @@ unsafe fn read_raw_limited(
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
     }
-    let h = GetClipboardData(id).inspect_err(|_| diagnostics.empty(id))?;
+    let h = clipboard_data(id).inspect_err(|_| diagnostics.empty(id))?;
     let global = HGLOBAL(h.0);
     let size = GlobalSize(global);
     if size > limit {
@@ -186,10 +203,10 @@ pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
 
 #[cfg(test)]
 pub fn capture(hwnd: HWND) -> Result<Option<Clip>> {
-    capture_at(hwnd, unsafe { GetClipboardSequenceNumber() })
+    capture_at(hwnd, unsafe { GetClipboardSequenceNumber() }, &[])
         .map(|capture| capture.map(|capture| capture.clip))
 }
-fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Captured>> {
+fn capture_at(hwnd: HWND, expected: u32, ignored_apps: &[String]) -> Result<Option<Captured>> {
     let current = snapshot();
     if current.self_write {
         LAST_SEQUENCE.store(current.sequence, Ordering::Release);
@@ -210,6 +227,13 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Captured>> {
         }
         let formats = offered_formats();
         let owner = crate::clipboard_owner::clipboard_owner();
+        let source = crate::capture_source::capture(&owner);
+        if crate::capture_source::ignored(source.exe.as_deref(), ignored_apps) {
+            crate::diag::write(format!(
+                "capture sequence={expected} result=skipped reason=ignored_app"
+            ));
+            return Ok(None);
+        }
         let bitmap_offered = formats.as_ref().is_none_or(|ids| {
             [2, 8, 17, format_id("PNG"), format_id("image/png")]
                 .iter()
@@ -248,6 +272,7 @@ fn capture_at(hwnd: HWND, expected: u32) -> Result<Option<Captured>> {
         .map(|clip| {
             clip.map(|clip| Captured {
                 clip,
+                source,
                 sequence: expected,
                 context: crate::owner_flush::CaptureContext {
                     record_id: None,
@@ -305,7 +330,7 @@ unsafe fn read_format_limited(
     if IsClipboardFormatAvailable(id).is_err() {
         return Ok(None);
     }
-    let handle = GetClipboardData(id).inspect_err(|_| diagnostics.empty(id))?;
+    let handle = clipboard_data(id).inspect_err(|_| diagnostics.empty(id))?;
     let h = HDROP(handle.0);
     let count = DragQueryFileW(h, u32::MAX, None);
     if count == 0 {
@@ -641,6 +666,83 @@ mod system_tests {
             }
             out
         }
+    }
+
+    #[test]
+    fn ignored_owner_skips_all_payload_reads_and_settings_change_applies_next_capture() {
+        use windows::{
+            core::w,
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+            },
+        };
+        let _lock = lock();
+        let _cleanup = Cleanup;
+        struct Window(HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        let window = Window(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("合成来源窗口"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        });
+        let bytes = text_bytes("合成忽略测试");
+        set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
+        let owner = crate::clipboard_owner::clipboard_owner();
+        assert!(owner.is_real());
+        let apps = std::cell::RefCell::new(vec![owner.exe.to_uppercase()]);
+        LAST_SEQUENCE.store(0, Ordering::Release);
+        DATA_REQUESTS.with(|count| count.set(0));
+        assert!(
+            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(DATA_REQUESTS.with(|count| count.get()), 0);
+        assert_eq!(LAST_SEQUENCE.load(Ordering::Acquire), unsafe {
+            GetClipboardSequenceNumber()
+        });
+        // 已忽略的序列不补采；移除设置后下一次复制立即恢复，无需重启。
+        apps.borrow_mut().clear();
+        assert!(
+            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+                .unwrap()
+                .is_none()
+        );
+        set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
+        let captured = capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+            .unwrap()
+            .unwrap();
+        assert!(DATA_REQUESTS.with(|count| count.get()) > 0);
+        assert_eq!(captured.source.exe.as_deref(), Some(owner.exe.as_str()));
+        assert_eq!(captured.source.title.as_deref(), Some("合成来源窗口"));
+        assert!(captured.context.owner.same_process_window(&owner));
+        apps.borrow_mut().push(owner.exe);
+        set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
+        DATA_REQUESTS.with(|count| count.set(0));
+        assert!(
+            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(DATA_REQUESTS.with(|count| count.get()), 0);
     }
 
     #[test]

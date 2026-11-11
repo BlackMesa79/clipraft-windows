@@ -1428,3 +1428,43 @@ fn v2_failure_rolls_back_dedup_column_index_and_version() {
         migrations::VERSION
     );
 }
+
+#[test]
+fn migrated_legacy_library_accepts_latest_source_without_new_migration() {
+    let fixture = Fixture::new();
+    let (clips, _, _) = legacy(&fixture.0);
+    let store = Mutex::new(Storage::open(&fixture.0, &MASTER).unwrap());
+    assert!(store
+        .lock()
+        .unwrap()
+        .list()
+        .unwrap()
+        .iter()
+        .all(|row| row.source_exe.is_none() && row.source_title.is_none()));
+    let source = crate::capture_source::CaptureSource {
+        exe: Some("notepad.exe".into()),
+        title: Some("合成迁移测试".into()),
+    };
+    assert!(
+        !Storage::save_shared_with_source(&store, &clips[0], Some(&source))
+            .unwrap()
+            .inserted
+    );
+    drop(store);
+    let reopened = Storage::open(&fixture.0, &MASTER).unwrap();
+    let row = reopened
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == clips[0].hash())
+        .unwrap();
+    assert_eq!(row.source_exe, source.exe);
+    assert_eq!(row.source_title, source.title);
+    assert_eq!(
+        reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0))
+            .unwrap(),
+        4
+    );
+}

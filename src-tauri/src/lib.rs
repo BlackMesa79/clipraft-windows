@@ -1,4 +1,5 @@
 mod capture_policy;
+mod capture_source;
 mod clipboard;
 mod clipboard_diag;
 mod clipboard_owner;

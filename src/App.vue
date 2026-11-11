@@ -379,6 +379,7 @@ onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stop
     <div v-else-if="!settingsOpen && !noticeOnly" class="workspace">
     <HistoryList ref="historyList" :items="items" :groups="groups" :selected="selected" :selected-ids="selectedIds" :quick="quick" :filtered="filtered" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || organizing || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
     <aside v-if="!quick && active" class="detail" aria-label="选中项预览">
+      <p v-if="active.source_exe" class="source-name" :title="active.source_exe">来源：{{ active.source_exe }}</p>
       <div class="detail-header"><h2>{{ kindLabel(active) }}预览</h2><button type="button" @click="loadDetail">刷新状态</button></div>
       <PreviewImage v-if="active.kind === 'image' || active.thumbnail || active.preview || active.placeholder" :hash="active.preview || active.thumbnail" :placeholder="active.placeholder" large @loaded="invoke('preview_loaded').catch(() => {})" />
       <p v-if="active.kind === 'image' && !active.preview && active.thumbnail" class="detail-note">旧记录：显示缩略图</p>

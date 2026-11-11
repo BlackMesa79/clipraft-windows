@@ -859,6 +859,7 @@ fn startup_vacuum_runs_only_strictly_above_twenty_five_percent() {
 fn flush_capture(owned: bool) -> crate::clipboard::Captured {
     let depth = if owned { 24 } else { 32 };
     crate::clipboard::Captured {
+        source: Default::default(),
         clip: Clip {
             formats: vec![model::FormatData {
                 name: "CF_DIB".into(),

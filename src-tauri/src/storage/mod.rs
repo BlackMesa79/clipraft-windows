@@ -18,6 +18,8 @@ mod search;
 #[cfg(test)]
 mod search_tests;
 mod settings;
+#[cfg(test)]
+mod source_tests;
 use crate::{
     model::{self, Clip, ItemView},
     thumbnail,
@@ -83,6 +85,7 @@ struct StoredFormat {
     blob: Option<String>,
 }
 struct PreparedSave {
+    source: Option<crate::capture_source::CaptureSource>,
     identity: SaveIdentity,
     view: ItemView,
     search: String,
@@ -158,6 +161,7 @@ impl PreparedSave {
         let search_pinyin = search::pinyin_text(&search);
         let is_link = search::is_link(&view.kind, &clip.text().unwrap_or_default());
         Ok(Self {
+            source: None,
             identity,
             view,
             search,
@@ -347,7 +351,7 @@ impl Storage {
     /// 无共享锁的调用者保留原接口；runtime 必须使用 save_shared。
     pub fn save_with_outcome(&mut self, clip: &Clip) -> Result<bool> {
         let identity = SaveIdentity::new(clip);
-        if self.update_duplicate(&identity)?.is_some() {
+        if self.update_duplicate(&identity, None)?.is_some() {
             return Ok(false);
         }
         let prepared = PreparedSave::new(clip, identity, &self.key)?;
@@ -356,12 +360,19 @@ impl Storage {
     }
     /// 采集路径：锁内查重 → 锁外生成预览/压缩/加密 → 锁内复查并提交。
     pub fn save_shared(storage: &Mutex<Self>, clip: &Clip) -> Result<SaveOutcome> {
+        Self::save_shared_with_source(storage, clip, None)
+    }
+    pub(crate) fn save_shared_with_source(
+        storage: &Mutex<Self>,
+        clip: &Clip,
+        source: Option<&crate::capture_source::CaptureSource>,
+    ) -> Result<SaveOutcome> {
         let identity = SaveIdentity::new(clip);
         let key = {
             let store = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("存储锁不可用"))?;
-            if let Some(id) = store.update_duplicate(&identity)? {
+            if let Some(id) = store.update_duplicate(&identity, source)? {
                 return Ok(SaveOutcome {
                     id,
                     inserted: false,
@@ -370,19 +381,24 @@ impl Storage {
             store.key.clone()
         };
         // 只准备内存对象；尚未登记的文件不能提前暴露给孤儿扫描。
-        let prepared = PreparedSave::new(clip, identity, &key)?;
+        let mut prepared = PreparedSave::new(clip, identity, &key)?;
+        prepared.source = source.cloned();
         storage
             .lock()
             .map_err(|_| anyhow::anyhow!("存储锁不可用"))?
             .commit_prepared(prepared)
     }
-    fn update_duplicate(&self, identity: &SaveIdentity) -> Result<Option<String>> {
+    fn update_duplicate(
+        &self,
+        identity: &SaveIdentity,
+        source: Option<&crate::capture_source::CaptureSource>,
+    ) -> Result<Option<String>> {
         let now = unix_millis();
         let order = self.next_order()?;
         // RETURNING 返回实际命中的旧 id；文件去重命中时它可能不同于本次 clip.hash()。
         Ok(self.conn.query_row(
-            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2 WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1) RETURNING id",
-            params![order, identity.dedup_key, now, identity.id],
+            "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2,source_exe=CASE WHEN ?5 THEN ?6 ELSE source_exe END,source_title=CASE WHEN ?5 THEN ?7 ELSE source_title END WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1) RETURNING id",
+            params![order, identity.dedup_key, now, identity.id, source.is_some(), source.and_then(|s| s.exe.as_deref()), source.and_then(|s| s.title.as_deref())],
             |row| row.get(0),
         ).optional()?)
     }
@@ -395,7 +411,7 @@ impl Storage {
     }
     fn commit_prepared(&mut self, mut prepared: PreparedSave) -> Result<SaveOutcome> {
         // 锁外准备期间可能有另一条相同记录完成保存；仍保留首次保存内容。
-        if let Some(id) = self.update_duplicate(&prepared.identity)? {
+        if let Some(id) = self.update_duplicate(&prepared.identity, prepared.source.as_ref())? {
             return Ok(SaveOutcome {
                 id,
                 inserted: false,
@@ -412,8 +428,8 @@ impl Storage {
         let id = &prepared.identity.id;
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key,search_pinyin,is_link) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key, prepared.search_pinyin, prepared.is_link],
+            "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key,search_pinyin,is_link,source_exe,source_title) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key, prepared.search_pinyin, prepared.is_link, prepared.source.as_ref().and_then(|s| s.exe.as_deref()), prepared.source.as_ref().and_then(|s| s.title.as_deref())],
         )?;
         for format in prepared.formats {
             tx.execute(

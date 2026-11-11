@@ -2,7 +2,7 @@
 use windows::{
     core::PWSTR,
     Win32::{
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, HWND},
         System::{
             DataExchange::GetClipboardOwner,
             Threading::{
@@ -60,11 +60,13 @@ pub(crate) fn exe_filename(path: Option<&str>) -> &str {
 
 /// 查询失败不等于进程退出：权限不足或状态不明时保留 Unknown，禁止据此跳过。
 pub(crate) fn clipboard_owner() -> ClipboardOwner {
+    window_process(unsafe { GetClipboardOwner() }.unwrap_or_default())
+}
+
+/// 与 owner 使用相同查询方式，但不改变 owner 的状态与退出固化语义。
+pub(crate) fn window_process(hwnd: HWND) -> ClipboardOwner {
     let mut owner = ClipboardOwner::absent();
     unsafe {
-        let Ok(hwnd) = GetClipboardOwner() else {
-            return owner;
-        };
         if hwnd.is_invalid() {
             return owner;
         }
