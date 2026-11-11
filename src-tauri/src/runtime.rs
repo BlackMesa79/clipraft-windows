@@ -153,11 +153,7 @@ pub fn report(_app: &AppHandle, state: &State, message: &str) {
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
     let storage = state.storage.lock().unwrap();
-    let items = storage.list_page(
-        &crate::storage::ListFilter::default(),
-        0,
-        crate::storage::QUICK_PAGE_SIZE,
-    )?;
+    let items = storage.list()?;
     let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
     *state.items.lock().unwrap() = items;
     hook::READY.store(enabled, Ordering::Release);
@@ -429,11 +425,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
     }
     let (jobs, rx) = mpsc::sync_channel(32);
     let (control, controls) = mpsc::channel();
-    let items = storage.list_page(
-        &crate::storage::ListFilter::default(),
-        0,
-        crate::storage::QUICK_PAGE_SIZE,
-    )?;
+    let items = storage.list()?;
     let state = Arc::new(State {
         items: Mutex::new(items),
         storage: Mutex::new(storage),

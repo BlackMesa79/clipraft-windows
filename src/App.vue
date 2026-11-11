@@ -7,7 +7,8 @@ import HistoryList from './HistoryList.vue';
 import SettingsView from './SettingsView.vue';
 import type { Settings, SettingOptions } from './settings';
 import ContextMenu from './ContextMenu.vue';
-import { kindLabel, type Item, type HistoryFilter, type HistoryKind } from './history';
+import GroupSidebar from './GroupSidebar.vue';
+import { kindLabel, type Item, type HistoryFilter, type HistoryKind, type Group, type HistoryView } from './history';
 interface Panel { items: Item[]; selected: number; visible: boolean; error: string | null }
 const quick = new URLSearchParams(location.search).get('panel') === 'quick';
 const items = ref<Item[]>([]), selected = ref(0), error = ref(''), busy = ref(false);
@@ -16,7 +17,7 @@ const settings = ref<Settings>(), settingOptions = ref<SettingOptions>();
 const mainLabel = computed(() => settingOptions.value?.main_hotkeys.find(k => k.id === settings.value?.main_hotkey)?.label ?? '');
 const quickKey = computed(() => settingOptions.value?.quick_hotkeys.find(k => k.id === settings.value?.quick_hotkey));
 function toggleSettings() {
-  if (settingsBusy.value || deleting.value || busy.value) return;
+  if (settingsBusy.value || deleting.value || busy.value || organizing.value) return;
   settingsOpen.value = !settingsOpen.value; contextMenu.value = null; pendingDelete.value = null;
   if (!settingsOpen.value) { void nextTick(checkLoadMore); void focusSearch(); }
 }
@@ -26,8 +27,46 @@ const kinds: { value: HistoryKind | null; label: string }[] = [
   { value: null, label: '全部' }, { value: 'text', label: '文本' }, { value: 'image', label: '图片' },
   { value: 'files', label: '文件' }, { value: 'link', label: '链接' },
 ];
-const listFilter = computed<HistoryFilter>(() => ({ query: query.value, kind: kind.value }));
-const filtered = computed(() => !!query.value.trim() || kind.value !== null);
+const groups = ref<Group[]>([]), view = ref<HistoryView>('all'), groupError = ref('');
+const mutationBusy = ref(false), groupInteracting = ref(false), groupMenuOpen = ref(false);
+const organizing = computed(() => mutationBusy.value || groupInteracting.value);
+const selectedItems = computed(() => items.value.filter(item => selectedIds.value.has(item.id)));
+const allPinned = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.pinned));
+const allFavorite = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.favorite));
+const protectedDeleteCount = computed(() => items.value.filter(item => pendingDelete.value?.includes(item.id) && (item.pinned || item.favorite)).length);
+const listFilter = computed<HistoryFilter>(() => ({ query: query.value, kind: kind.value,
+  ...(view.value === 'favorites' ? { favorite_only: true } : {}),
+  ...(view.value === 'ungrouped' ? { group_id: -1 } : typeof view.value === 'number' ? { group_id: view.value } : {}),
+}));
+let groupGeneration = 0;
+async function loadGroups() {
+  const generation = ++groupGeneration;
+  try {
+    const result = await invoke<Group[]>('list_groups');
+    if (generation !== groupGeneration) return;
+    groups.value = result; groupError.value = '';
+    if (typeof view.value === 'number' && !result.some(group => group.id === view.value)) view.value = 'ungrouped';
+  } catch (e) { if (generation === groupGeneration) groupError.value = '分组读取失败：' + String(e); }
+}
+function groupsChanged() { void loadGroups(); void load(); }
+async function changeItems(command: 'set_pinned' | 'set_favorite' | 'move_to_group', groupId?: number | null) {
+  if (quick || organizing.value || deleting.value || busy.value || pendingDelete.value || !selectedItems.value.length) return;
+  const ids = selectedItems.value.map(item => item.id);
+  const args = command === 'move_to_group' ? { ids, groupId } : { ids, value: command === 'set_pinned' ? !allPinned.value : !allFavorite.value };
+  mutationBusy.value = true; contextMenu.value = null; error.value = '';
+  ++listGeneration; ++detailGeneration;
+  try { await invoke(command, args); }
+  catch (e) { error.value = String(e); }
+  finally {
+    // 即使刷新事件失败，仍重新读库，避免把已提交的修改显示为未保存。
+    deferredHistory = false;
+    await Promise.all([loadGroups(), load()]);
+    mutationBusy.value = false;
+    if (deferredHistory) { deferredHistory = false; historyChanged(); }
+    void nextTick(checkLoadMore);
+  }
+}
+const filtered = computed(() => !!query.value.trim() || kind.value !== null || view.value !== 'all');
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 async function focusSearch() { await nextTick(); if (!quick && !settingsOpen.value) searchInput.value?.focus(); }
 function filtersChanged(delay = 150) {
@@ -42,6 +81,7 @@ function filtersChanged(delay = 150) {
 }
 watch(query, () => filtersChanged());
 watch(kind, () => filtersChanged(0));
+watch(view, () => filtersChanged(0));
 function compositionStart() { composing.value = true; clearTimeout(searchTimer); searchTimer = undefined; }
 function compositionEnd() { composing.value = false; filtersChanged(); }
 const PAGE_SIZE = 100;
@@ -51,6 +91,7 @@ const pageLoading = ref(false), pageError = ref(''), hasMore = ref(true);
 let listGeneration = 0, nextOffset = 0, retryRefresh = false;
 const selectedIds = ref(new Set<string>()), pendingDelete = ref<string[] | null>(null), deleting = ref(false);
 const contextMenu = ref<{ x: number; y: number; id: string } | null>(null);
+const menuInteracting = computed(() => groupMenuOpen.value || contextMenu.value !== null);
 let anchorId: string | undefined, deferredHistory = false;
 let afterDelete: { index: number; id?: string; count: number } | undefined;
 function selectOnly(index: number) {
@@ -59,7 +100,7 @@ function selectOnly(index: number) {
   selectedIds.value = new Set(anchorId ? [anchorId] : []);
 }
 function choose(index: number, event: MouseEvent) {
-  if (quick || deleting.value || pendingDelete.value) return;
+  if (quick || deleting.value || organizing.value || pendingDelete.value) return;
   contextMenu.value = null;
   const id = items.value[index]?.id;
   if (!id) return;
@@ -75,14 +116,14 @@ function choose(index: number, event: MouseEvent) {
   } else selectOnly(index);
 }
 function openContext(index: number, event: MouseEvent) {
-  if (quick || deleting.value || pendingDelete.value) return;
+  if (quick || deleting.value || organizing.value || pendingDelete.value) return;
   const id = items.value[index]?.id;
   if (!id) return;
   if (!selectedIds.value.has(id)) selectOnly(index); else selected.value = index;
   contextMenu.value = { x: event.clientX, y: event.clientY, id };
 }
 function requestDelete() {
-  if (quick || deleting.value || busy.value || pendingDelete.value) return;
+  if (quick || deleting.value || organizing.value || busy.value || pendingDelete.value) return;
   contextMenu.value = null;
   const ids = items.value.filter(item => selectedIds.value.has(item.id)).map(item => item.id);
   if (ids.length > 1) pendingDelete.value = ids;
@@ -90,7 +131,7 @@ function requestDelete() {
 }
 interface DeleteReport { deleted_items: number; reclaimed_blobs: number; failed_blobs: string[]; maintenance_errors: string[] }
 async function performDelete(ids: string[]) {
-  if (deleting.value || busy.value) return;
+  if (deleting.value || busy.value || organizing.value) return;
   const removed = new Set(ids), index = items.value.findIndex(item => removed.has(item.id));
   const next = items.value.slice(Math.max(0, index)).find(item => !removed.has(item.id));
   const position = { index: Math.max(0, index), id: next?.id, count: items.value.length };
@@ -111,7 +152,8 @@ async function performDelete(ids: string[]) {
 function confirmDelete() { if (pendingDelete.value) void performDelete(pendingDelete.value); }
 function historyChanged() {
   contextMenu.value = null;
-  if (deleting.value) deferredHistory = true; else if (!searchTimer && !composing.value) void load();
+  void loadGroups();
+  if (deleting.value || mutationBusy.value) deferredHistory = true; else if (!searchTimer && !composing.value) void load();
 }
 function contextPaste() { contextMenu.value = null; void paste(false); }
 
@@ -120,7 +162,7 @@ function checkLoadMore() {
   if (!quick && list && list.scrollHeight - list.scrollTop - list.clientHeight < 120) void loadMore();
 }
 async function loadMore() {
-  if (quick || deleting.value || pageLoading.value || pageError.value || !hasMore.value) return;
+  if (quick || deleting.value || mutationBusy.value || pageLoading.value || pageError.value || !hasMore.value) return;
   const generation = listGeneration, offset = nextOffset;
   pageLoading.value = true;
   try {
@@ -216,7 +258,7 @@ async function load() {
   }
 }
 async function paste(plain = false) {
-  if (quick || !active.value || busy.value || deleting.value || pendingDelete.value) return;
+  if (quick || !active.value || busy.value || deleting.value || organizing.value || pendingDelete.value) return;
   busy.value = true; error.value = '';
   try { await invoke('paste_item', { id: active.value.id, plain }); }
   catch (e) { error.value = String(e); }
@@ -224,10 +266,25 @@ async function paste(plain = false) {
 }
 async function keydown(event: KeyboardEvent) {
   if (quick || event.isComposing || composing.value || event.keyCode === 229) return;
+  if (menuInteracting.value) {
+    if (event.key === 'Escape') { event.preventDefault(); contextMenu.value = null; }
+    return;
+  }
+  const recordShortcut = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && ['p', 'd'].includes(event.key.toLowerCase());
   if (settingsOpen.value) {
+    if (recordShortcut) event.preventDefault();
     if (event.key === 'Escape') { event.preventDefault(); if (!settingsBusy.value) toggleSettings(); }
     return;
   }
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  const otherInput = target !== searchInput.value && !!target?.closest('input, textarea, select, [contenteditable]');
+  if (otherInput) return;
+  if (recordShortcut) {
+    event.preventDefault();
+    if (!event.repeat && !organizing.value && !pendingDelete.value) void changeItems(event.key.toLowerCase() === 'p' ? 'set_pinned' : 'set_favorite');
+    return;
+  }
+  if (organizing.value) return;
   // 保留控件的原生激活/编辑行为；列表项本身也是 button，不接管其 Enter。
   if (event.key === ' ') return;
   if (event.key === 'Enter') {
@@ -282,6 +339,7 @@ onMounted(async () => {
     stops.push(await listen<string>('startup-error', ({ payload }) => { startupError.value = payload; }));
     [settings.value, settingOptions.value] = await Promise.all([invoke<Settings>('get_settings'), invoke<SettingOptions>('get_setting_options')]);
     if (!quick) startupError.value = (await invoke<string | null>('startup_error')) ?? '';
+    if (!quick) await loadGroups();
     await load(); if (!quick) error.value = (await invoke<string | null>('last_error')) ?? '';
     await invoke('frontend_ready');
     await focusSearch();
@@ -290,34 +348,36 @@ onMounted(async () => {
   window.addEventListener('focus', loadDetail);
   window.addEventListener('resize', checkLoadMore);
 });
-onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; });
+onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
 </script>
 
 <template>
   <main ref="panelRoot" :class="['app', { quick, 'notice-only': noticeOnly }]">
     <header>
       <div class="brand"><span class="brand-mark">▤</span><div><h1>{{ noticeOnly ? '操作失败' : quick ? '快速粘贴' : '剪贴板' }} <small v-if="!quick">M1</small></h1><p>{{ noticeOnly ? '提示将在约 2 秒后自动关闭' : quick ? `保持 ${quickKey?.hold_label ?? ''} · ↑ ↓ / V 选择` : `本地加密历史 · ${mainLabel} 随时呼出` }}</p></div></div>
-      <button v-if="!quick" type="button" class="settings-toggle" :aria-label="settingsOpen ? '返回列表' : '设置'" :disabled="settingsBusy || deleting || busy" @click="toggleSettings">{{ settingsOpen ? '返回列表' : '⚙ 设置' }}</button>
+      <button v-if="!quick" type="button" class="settings-toggle" :aria-label="settingsOpen ? '返回列表' : '设置'" :disabled="settingsBusy || deleting || busy || organizing" @click="toggleSettings">{{ settingsOpen ? '返回列表' : '⚙ 设置' }}</button>
       <span v-if="!noticeOnly && !settingsOpen" class="count">{{ quick ? '' : '已加载 ' }}{{ items.length }} 条</span>
     </header>
     <div v-if="!quick && !settingsOpen" class="search-tools">
-      <input ref="searchInput" v-model="query" type="search" aria-label="搜索历史" placeholder="搜索文本、文件或拼音…" autocomplete="off" :disabled="deleting || !!pendingDelete" @compositionstart="compositionStart" @compositionend="compositionEnd">
+      <input ref="searchInput" v-model="query" type="search" aria-label="搜索历史" placeholder="搜索文本、文件或拼音…" autocomplete="off" :readonly="mutationBusy" :disabled="deleting || groupInteracting || !!pendingDelete" @compositionstart="compositionStart" @compositionend="compositionEnd">
       <div class="kind-filters" role="group" aria-label="类型筛选">
-        <button v-for="option in kinds" :key="option.label" type="button" :aria-pressed="kind === option.value" :disabled="deleting || !!pendingDelete" @click="kind = option.value">{{ option.label }}</button>
+        <button v-for="option in kinds" :key="option.label" type="button" :aria-pressed="kind === option.value" :disabled="deleting || organizing || !!pendingDelete" @click="kind = option.value">{{ option.label }}</button>
       </div>
     </div>
+    <GroupSidebar v-if="!quick && !settingsOpen" :groups="groups" :view="view" :disabled="deleting || mutationBusy || busy || !!pendingDelete" @select="view = $event" @changed="groupsChanged" @interacting="groupInteracting = $event; contextMenu = null" @menu-open="groupMenuOpen = $event; if ($event) contextMenu = null" />
+    <div v-if="!quick && !settingsOpen && groupError" class="error" role="alert">{{ groupError }} <button type="button" @click="loadGroups">重试分组</button></div>
     <div v-if="!quick && startupError" class="error" role="alert">{{ startupError }}</div>
     <SettingsView v-if="settingsOpen && !quick" @saved="settings = $event" @busy="settingsBusy = $event" />
     <div v-if="error" class="error" role="alert">{{ error }}</div>
     <div v-if="!quick && !settingsOpen && pageError" class="error" role="alert">{{ pageError }} <button type="button" @click="retryPage">重试</button></div>
     <div v-if="!quick && !settingsOpen && pendingDelete" class="delete-confirm" role="alertdialog" aria-label="确认删除" aria-describedby="delete-description">
-      <span id="delete-description">将删除 {{ pendingDelete.length }} 条</span>
+      <span id="delete-description">将删除 {{ pendingDelete.length }} 条，其中 {{ protectedDeleteCount }} 条是置顶或收藏记录</span>
       <button type="button" @click="confirmDelete">确认</button><button type="button" @click="pendingDelete = null">取消</button>
     </div>
-    <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
+    <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" :groups="groups" :all-pinned="allPinned" :all-favorite="allFavorite" @pin="changeItems('set_pinned')" @favorite="changeItems('set_favorite')" @move="changeItems('move_to_group', $event)" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
     <section v-if="!settingsOpen && !noticeOnly && !items.length" class="empty"><span>▤</span><h2>{{ !quick && pageLoading ? '正在搜索…' : !quick && filtered ? '没有匹配的记录' : '从一次复制开始' }}</h2><p>{{ !quick && filtered ? '试试其他关键词或类型。' : '复制文本、图片或文件后，会显示在这里。' }}</p><p v-if="!quick && !filtered">{{ quickKey?.label }} 打开快速面板</p></section>
     <div v-else-if="!settingsOpen && !noticeOnly" class="workspace">
-    <HistoryList ref="historyList" :items="items" :selected="selected" :selected-ids="selectedIds" :quick="quick" :filtered="filtered" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
+    <HistoryList ref="historyList" :items="items" :groups="groups" :selected="selected" :selected-ids="selectedIds" :quick="quick" :filtered="filtered" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || organizing || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
     <aside v-if="!quick && active" class="detail" aria-label="选中项预览">
       <div class="detail-header"><h2>{{ kindLabel(active) }}预览</h2><button type="button" @click="loadDetail">刷新状态</button></div>
       <PreviewImage v-if="active.kind === 'image' || active.thumbnail || active.preview || active.placeholder" :hash="active.preview || active.thumbnail" :placeholder="active.placeholder" large @loaded="invoke('preview_loaded').catch(() => {})" />
@@ -336,6 +396,6 @@ onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stop
     </aside>
     </div>
     <footer v-if="quick && !noticeOnly"><span>松开修饰键即可粘贴</span><span>Esc 取消</span></footer>
-    <footer v-else-if="!quick && !settingsOpen"><span>Enter 粘贴 · Shift + Enter 纯文本</span><button :disabled="!active || busy || deleting || !!pendingDelete" @click="paste(false)">粘贴选中项 ↵</button></footer>
+    <footer v-else-if="!quick && !settingsOpen"><span>Enter 粘贴 · Shift + Enter 纯文本</span><button :disabled="!active || busy || deleting || organizing || !!pendingDelete" @click="paste(false)">粘贴选中项 ↵</button></footer>
   </main>
 </template>

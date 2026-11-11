@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod compression_tests;
 pub mod crypto;
+mod groups;
+#[cfg(test)]
+mod groups_tests;
+pub use groups::GroupView;
 mod maintenance;
 #[cfg(test)]
 mod maintenance_tests;
@@ -297,8 +301,12 @@ impl Storage {
             sql.push_str(" AND favorite=1");
         }
         if let Some(group) = filter.group_id {
-            sql.push_str(" AND group_id=?");
-            values.push(group.into());
+            if group == -1 {
+                sql.push_str(" AND group_id IS NULL");
+            } else {
+                sql.push_str(" AND group_id=?");
+                values.push(group.into());
+            }
         }
         search::append_query(&mut sql, &mut values, filter.query.as_deref());
         sql.push_str(" ORDER BY pinned DESC,touched DESC,id ASC LIMIT ? OFFSET ?");

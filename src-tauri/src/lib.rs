@@ -91,6 +91,112 @@ async fn delete_items(
     .await
     .map_err(|_| "删除任务失败")?
 }
+// 所有 T5 修改只允许主窗口调用；事务结束并释放 storage 锁后刷新缓存。
+async fn update_history<T: Send + 'static>(
+    window: tauri::WebviewWindow,
+    state: Arc<State>,
+    change: impl FnOnce(&mut storage::Storage) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("此窗口不能修改历史或分组".into());
+    }
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = {
+            let mut store = state.storage.lock().map_err(|_| "存储不可用")?;
+            change(&mut store).map_err(|e| e.to_string())?
+        };
+        runtime::refresh(&app, &state).map_err(|e| format!("修改已保存，但刷新失败：{e}"))?;
+        Ok(result)
+    })
+    .await
+    .map_err(|_| "修改历史任务失败")?
+}
+
+#[tauri::command]
+async fn set_pinned(
+    ids: Vec<String>,
+    value: bool,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    update_history(window, state.inner().clone(), move |s| {
+        s.set_pinned(&ids, value)
+    })
+    .await
+}
+#[tauri::command]
+async fn set_favorite(
+    ids: Vec<String>,
+    value: bool,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    update_history(window, state.inner().clone(), move |s| {
+        s.set_favorite(&ids, value)
+    })
+    .await
+}
+#[tauri::command]
+async fn list_groups(
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<Vec<storage::GroupView>, String> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .list_groups()
+            .map_err(|e| format!("分组读取失败：{e}"))
+    })
+    .await
+    .map_err(|_| "分组读取任务失败")?
+}
+#[tauri::command]
+async fn create_group(
+    name: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<storage::GroupView, String> {
+    update_history(window, state.inner().clone(), move |s| {
+        s.create_group(&name)
+    })
+    .await
+}
+#[tauri::command]
+async fn rename_group(
+    id: i64,
+    name: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), String> {
+    update_history(window, state.inner().clone(), move |s| {
+        s.rename_group(id, &name)
+    })
+    .await
+}
+#[tauri::command]
+async fn delete_group(
+    id: i64,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), String> {
+    update_history(window, state.inner().clone(), move |s| s.delete_group(id)).await
+}
+#[tauri::command]
+async fn move_to_group(
+    ids: Vec<String>,
+    group_id: Option<i64>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    update_history(window, state.inner().clone(), move |s| {
+        s.move_to_group(&ids, group_id)
+    })
+    .await
+}
+
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, Arc<State>>) -> settings::Settings {
     state.settings.lock().unwrap().clone()
@@ -376,6 +482,13 @@ pub fn run() {
             startup_error,
             list_items,
             delete_items,
+            set_pinned,
+            set_favorite,
+            list_groups,
+            create_group,
+            rename_group,
+            delete_group,
+            move_to_group,
             item_detail,
             image_failure_reason,
             panel_state,
