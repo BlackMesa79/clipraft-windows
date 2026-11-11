@@ -6,3 +6,5 @@
 .quick.notice-only{height:auto;max-height:530px;overflow:auto}.quick.notice-only .error{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 
 .delete-confirm{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #e8c9c0;background:#fff2ee;border-radius:7px;font-size:13px;color:#913e2e}.delete-confirm span{flex:1}.delete-confirm button{border:1px solid #d8e3e7;border-radius:5px;background:#fff;padding:5px 12px;cursor:pointer}.context-menu{position:fixed;z-index:10;min-width:130px;padding:5px;border:1px solid #d8e3e7;border-radius:7px;background:#fff;box-shadow:0 4px 16px #24333e22}.context-menu button{display:block;width:100%;border:0;border-radius:4px;background:transparent;color:#24333e;text-align:left;padding:8px 12px;cursor:pointer}.context-menu button:hover,.context-menu button:focus-visible{background:#e9f3f3}.item:disabled{cursor:default}
+
+.settings-toggle{margin-left:auto;border:1px solid #b8cdd3;border-radius:7px;background:#fff;color:#276d78;padding:7px 12px;cursor:pointer}

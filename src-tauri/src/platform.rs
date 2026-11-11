@@ -299,15 +299,38 @@ fn position_quick(raw: isize, target: isize) -> Result<()> {
         Ok(())
     }
 }
+pub fn unattended_startup(smoke: bool, data_dir: bool, diag: bool) -> bool {
+    smoke || data_dir || diag
+}
 pub fn show_startup_error(message: &str) {
+    // 使用现有 user32 导出，无新增依赖；缺失时只诊断，不退回无限等待的对话框。
+    type MessageBoxTimeout = unsafe extern "system" fn(
+        HWND,
+        windows::core::PCWSTR,
+        windows::core::PCWSTR,
+        u32,
+        u16,
+        u32,
+    ) -> i32;
     let wide: Vec<u16> = message.encode_utf16().chain([0]).collect();
     unsafe {
-        let _ = MessageBoxW(
-            None,
-            windows::core::PCWSTR(wide.as_ptr()),
-            w!("剪贴板 M0 启动失败"),
-            MB_OK | MB_ICONERROR,
-        );
+        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        let function = GetModuleHandleW(w!("user32.dll"))
+            .ok()
+            .and_then(|module| GetProcAddress(module, windows::core::s!("MessageBoxTimeoutW")));
+        if let Some(function) = function {
+            let show: MessageBoxTimeout = std::mem::transmute(function);
+            show(
+                HWND::default(),
+                windows::core::PCWSTR(wide.as_ptr()),
+                w!("剪贴板 M1 启动失败"),
+                (MB_OK | MB_ICONERROR).0,
+                0,
+                60_000,
+            );
+        } else {
+            crate::diag::startup_failure("MessageBoxTimeoutW 不可用，启动错误仅写日志");
+        }
     }
 }
 pub fn hide(raw: isize) {
@@ -318,6 +341,15 @@ pub fn hide(raw: isize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unattended_environment_never_prompts() {
+        for bits in 0..8 {
+            assert_eq!(
+                unattended_startup(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0),
+                bits != 0
+            );
+        }
+    }
     #[test]
     fn dpapi_roundtrip() {
         let c = protect(&[53; 32], true).unwrap();

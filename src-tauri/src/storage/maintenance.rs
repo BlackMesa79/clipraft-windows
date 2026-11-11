@@ -2,10 +2,10 @@ use super::Storage;
 use crate::{diag, model};
 use anyhow::{bail, Result};
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fs, io::ErrorKind, time::Instant};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     pub max_items: u32,
     pub max_bytes: u64,
@@ -154,7 +154,14 @@ impl Storage {
         Ok(report)
     }
 
+    pub fn preview_cleanup(&self, policy: &RetentionPolicy, now: i64) -> Result<usize> {
+        Ok(self.cleanup_ids(policy, now)?.len())
+    }
     pub fn cleanup(&mut self, policy: &RetentionPolicy, now: i64) -> Result<DeleteReport> {
+        let ids = self.cleanup_ids(policy, now)?;
+        self.delete(&ids)
+    }
+    fn cleanup_ids(&self, policy: &RetentionPolicy, now: i64) -> Result<Vec<String>> {
         validate_retention_policy(policy)?;
         let cutoff = now.saturating_sub(i64::from(policy.max_days) * 86_400_000);
         let ids = {
@@ -188,7 +195,7 @@ impl Storage {
             )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        self.delete(&ids)
+        Ok(ids)
     }
 
     fn vacuum(&self) -> Result<()> {

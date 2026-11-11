@@ -10,6 +10,7 @@ mod migrations;
 mod predict;
 #[cfg(test)]
 mod prediction_tests;
+mod settings;
 use crate::{
     model::{self, Clip, ItemView},
     thumbnail,

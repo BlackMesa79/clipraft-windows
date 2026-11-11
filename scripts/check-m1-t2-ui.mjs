@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { settingsMock } from './settings-ui-mock.mjs';
 const root = process.cwd();
 const out = path.join(root, '.test-data/m1-t2-ui');
 const profile = path.join(out, 'profile-' + Date.now());
@@ -57,6 +58,7 @@ try {
     window.rows = Array.from({length:250},(_,i)=>({id:'item-'+i,kind:'text',summary:'合成记录 '+i,formats:['CF_UNICODETEXT'],files:[],thumbnail:null,placeholder:null}));
     window.calls = []; window.deletes = []; window.pastes = []; window.hidden = 0; window.ready = false; window.failNext = false; window.holdNext = false;
     window.changed = () => callbacks.get(events.get('history-changed'))?.({event:'history-changed',id:1,payload:null});
+    window.emitEvent=(event,payload)=>callbacks.get(events.get(event))?.({event,id:1,payload});
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {unregisterListener(){}};
     window.__TAURI_INTERNALS__ = {
       transformCallback(fn){const id=++callbackId; callbacks.set(id,fn); return id;},
@@ -94,7 +96,7 @@ try {
     };
   })();`;
   await send('Page.enable'); await send('Runtime.enable');
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: mock });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: mock + settingsMock });
   await send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
   const checks = [];
   const ready = () => until(() => evaluate('window.ready === true'), '前端未就绪');
@@ -236,7 +238,7 @@ try {
   checks.push('快速面板使用缓存，不发分页请求且不提供删除');
   await writeFile(path.join(out, 'result.json'), JSON.stringify({ passed: true, checks, scope: '离屏 Edge + 合成 IPC 数据；未验证原生焦点、输入法、真实粘贴和跨应用图片复制' }, null, 2));
   console.log(JSON.stringify({ passed: true, checks }, null, 2));
-  await send('Browser.close').catch(() => {});
+  await Promise.race([send('Browser.close').catch(() => {}), pause(1000)]);
 } finally {
   ws?.close(); server.close(); if (browser.exitCode === null) browser.kill();
 }

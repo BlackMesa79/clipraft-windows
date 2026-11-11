@@ -1066,3 +1066,190 @@ fn prepared_save_recheck_returns_actual_duplicate_id() {
         }
     );
 }
+
+#[test]
+fn preview_matches_cleanup_for_each_policy_and_protections() {
+    for policy in [
+        policy(10, 10000, 0),
+        policy(100, 30, 0),
+        policy(100, 10000, 1),
+        policy(10, 30, 1),
+    ] {
+        let fixture = Fixture::new();
+        let mut s = fixture.open();
+        seed(&s, 30);
+        s.conn.execute_batch("UPDATE items SET used_at=0 WHERE touched < 10; UPDATE items SET pinned=1 WHERE touched=2; UPDATE items SET favorite=1 WHERE touched=3; UPDATE items SET expires_at=0 WHERE touched=4;").unwrap();
+        let before = ids(&s);
+        let preview = s.preview_cleanup(&policy, NOW).unwrap();
+        assert_eq!(ids(&s), before);
+        let actual = s.cleanup(&policy, NOW).unwrap();
+        assert_eq!(preview, actual.deleted_items);
+        assert_eq!(s.preview_cleanup(&policy, NOW).unwrap(), 0);
+    }
+}
+
+// T3-4：query_only 和 total_changes 同时约束预估；预期删除对象独立于 cleanup_ids。
+fn assert_readonly_preview_then_cleanup(
+    s: &mut Storage,
+    policy: &RetentionPolicy,
+    now: i64,
+    expected: &[&str],
+) {
+    let before_ids = ids(s);
+    let changes = s.conn.total_changes();
+    let blobs: Vec<_> = fs::read_dir(&s.blobs)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    s.conn.pragma_update(None, "query_only", true).unwrap();
+    for _ in 0..2 {
+        assert_eq!(s.preview_cleanup(policy, now).unwrap(), expected.len());
+        assert_eq!(ids(s), before_ids);
+        assert_eq!(s.conn.total_changes(), changes);
+        for (path, bytes) in &blobs {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+        }
+        assert_eq!(fs::read_dir(&s.blobs).unwrap().count(), blobs.len());
+    }
+    s.conn.pragma_update(None, "query_only", false).unwrap();
+    let report = s.cleanup(policy, now).unwrap();
+    assert_eq!(report.deleted_items, expected.len());
+    assert_eq!(report.deleted_ids, expected);
+    assert_eq!(ids(s).len(), before_ids.len() - expected.len());
+    assert_eq!(s.preview_cleanup(policy, now).unwrap(), 0);
+}
+
+#[test]
+fn preview_days_and_count_combined_have_independent_expected_victims() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    seed(&s, 6);
+    s.conn
+        .execute(
+            "UPDATE items SET used_at=?1 WHERE id='item-4'",
+            [NOW - 30 * 86_400_000 - 1],
+        )
+        .unwrap();
+    assert_readonly_preview_then_cleanup(
+        &mut s,
+        &policy(3, 1000, 30),
+        NOW,
+        &["item-0", "item-1", "item-4"],
+    );
+}
+
+#[test]
+fn preview_preserves_each_protection_and_does_not_count_it_toward_limits() {
+    for protection in ["pinned=1", "favorite=1", "group_id=1"] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        seed(&s, 6);
+        s.conn
+            .execute_batch("INSERT INTO groups VALUES(1,'synthetic',0,0)")
+            .unwrap();
+        s.conn
+            .execute_batch(&format!(
+                "UPDATE items SET {protection},size=999999,used_at=0 WHERE touched<3"
+            ))
+            .unwrap();
+        assert_readonly_preview_then_cleanup(&mut s, &policy(2, 20, 1), NOW, &["item-3"]);
+    }
+}
+
+#[test]
+fn preview_expiration_overrides_each_protection_but_preserves_newest() {
+    for protection in ["pinned=1", "favorite=1", "group_id=1"] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        seed(&s, 3);
+        s.conn
+            .execute_batch("INSERT INTO groups VALUES(1,'synthetic',0,0)")
+            .unwrap();
+        s.conn
+            .execute(
+                &format!("UPDATE items SET {protection},expires_at=?1,size=999999,used_at=0"),
+                [NOW],
+            )
+            .unwrap();
+        assert_readonly_preview_then_cleanup(&mut s, &policy(1, 1, 1), NOW, &["item-0", "item-1"]);
+        assert_eq!(ids(&s), ["item-2"]);
+    }
+}
+
+#[test]
+fn preview_age_cutoff_and_zero_days_are_exact() {
+    for (days, expected) in [(0, vec![]), (30, vec!["item-0"])] {
+        let f = Fixture::new();
+        let mut s = f.open();
+        seed(&s, 4);
+        let cutoff = NOW - 30 * 86_400_000;
+        for (id, used) in [
+            ("item-0", cutoff - 1),
+            ("item-1", cutoff),
+            ("item-2", cutoff + 1),
+            ("item-3", 0),
+        ] {
+            s.conn
+                .execute("UPDATE items SET used_at=?1 WHERE id=?2", params![used, id])
+                .unwrap();
+        }
+        assert_readonly_preview_then_cleanup(&mut s, &policy(100, 1000, days), NOW, &expected);
+    }
+}
+
+#[test]
+fn preview_tied_newest_and_overlapping_limits_count_victims_once() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    seed(&s, 4);
+    s.conn
+        .execute_batch("UPDATE items SET touched=1,used_at=0,expires_at=0,size=999999")
+        .unwrap();
+    assert_readonly_preview_then_cleanup(
+        &mut s,
+        &policy(1, 1, 1),
+        NOW,
+        &["item-3", "item-2", "item-1"],
+    );
+    assert_eq!(ids(&s), ["item-0"]);
+}
+
+#[test]
+fn preview_queries_without_deleting_or_reclaiming_shared_blobs() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    seed(&s, 3);
+    let shared = s.write_blob(b"shared preview blob").unwrap();
+    let victim_only = s.write_blob(b"victim-only preview blob").unwrap();
+    s.conn
+        .execute("UPDATE items SET thumbnail=?1", [&shared])
+        .unwrap();
+    s.conn
+        .execute(
+            "UPDATE items SET preview=?1 WHERE id='item-0'",
+            [&victim_only],
+        )
+        .unwrap();
+    assert_readonly_preview_then_cleanup(&mut s, &policy(1, 1000, 0), NOW, &["item-0", "item-1"]);
+    assert!(s.blobs.join(shared).is_file());
+    assert!(!s.blobs.join(victim_only).exists());
+}
+
+#[test]
+fn preview_empty_and_invalid_policies_never_change_database() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    assert_readonly_preview_then_cleanup(&mut s, &policy(1, 1, 1), NOW, &[]);
+    seed(&s, 3);
+    let before = ids(&s);
+    let changes = s.conn.total_changes();
+    for invalid in [policy(0, 1, 0), policy(1, 0, 0), policy(1, u64::MAX, 0)] {
+        assert!(s.preview_cleanup(&invalid, NOW).is_err());
+        assert_eq!(ids(&s), before);
+        assert_eq!(s.conn.total_changes(), changes);
+    }
+}

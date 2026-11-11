@@ -3,6 +3,7 @@ use crate::{
     hook::{self, Action},
     model::ItemView,
     paster, platform,
+    settings::{self, Hotkey, HotkeyRegistrar, Settings},
     storage::{RetentionPolicy, Storage},
 };
 use anyhow::{anyhow, Result};
@@ -27,9 +28,61 @@ use windows::{
     },
 };
 
-// 主窗口快捷键在这里配置，不需要额外快捷键插件。
-pub const MAIN_HOTKEY_MODIFIERS: HOT_KEY_MODIFIERS = HOT_KEY_MODIFIERS(MOD_ALT.0 | MOD_NOREPEAT.0);
-pub const MAIN_HOTKEY_VK: u32 = 0x56;
+const SETTINGS_MESSAGE: u32 = WM_APP + 81;
+struct BrokerRequest {
+    hotkey: Hotkey,
+    reply: Sender<Result<(), String>>,
+    cancelled: Arc<AtomicBool>,
+}
+static HOTKEY_REQUESTS: OnceLock<Sender<BrokerRequest>> = OnceLock::new();
+struct NativeRegistrar(HWND);
+impl HotkeyRegistrar for NativeRegistrar {
+    fn unregister(&mut self) -> Result<()> {
+        unsafe {
+            UnregisterHotKey(Some(self.0), 1).map_err(|e| anyhow!("旧快捷键注销失败：{e}"))
+        }
+    }
+    fn register(&mut self, hotkey: Hotkey) -> Result<()> {
+        let shortcut = hotkey.shortcut();
+        let mut flags = MOD_NOREPEAT.0;
+        for (bit, flag) in [(1, MOD_CONTROL), (2, MOD_SHIFT), (4, MOD_ALT), (8, MOD_WIN)] {
+            if shortcut.modifiers & bit != 0 {
+                flags |= flag.0;
+            }
+        }
+        unsafe {
+            RegisterHotKey(Some(self.0), 1, HOT_KEY_MODIFIERS(flags), shortcut.key)?;
+        }
+        Ok(())
+    }
+}
+fn change_main_hotkey(hotkey: Hotkey) -> Result<()> {
+    let (reply, wait) = mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    HOTKEY_REQUESTS
+        .get()
+        .ok_or_else(|| anyhow!("热键线程未启动"))?
+        .send(BrokerRequest {
+            hotkey,
+            reply,
+            cancelled: cancelled.clone(),
+        })
+        .map_err(|_| anyhow!("热键线程已退出"))?;
+    if let Err(error) = unsafe {
+        PostThreadMessageW(
+            BROKER.load(Ordering::Acquire),
+            SETTINGS_MESSAGE,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    } {
+        cancelled.store(true, Ordering::Release);
+        return Err(error.into());
+    }
+    wait.recv()
+        .map_err(|_| anyhow!("热键线程已退出"))?
+        .map_err(anyhow::Error::msg)
+}
 static BROKER: AtomicU32 = AtomicU32::new(0);
 static LISTENER: AtomicIsize = AtomicIsize::new(0);
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
@@ -63,6 +116,7 @@ pub enum Control {
     Report(String),
     PasteReport(String, u64),
     HistoryChanged,
+    UpdateSettings(Settings, Sender<Result<Settings, String>>),
 }
 #[derive(Clone, Serialize, Default)]
 pub struct Panel {
@@ -77,6 +131,8 @@ pub struct State {
     // 删除、保存与清理统一先锁此上下文，再锁 storage。
     pub capture_context: Mutex<Option<crate::owner_flush::CaptureContext>>,
     pub retention_policy: Mutex<RetentionPolicy>,
+    pub settings: Mutex<Settings>,
+    pub startup_error: Mutex<Option<String>>,
     pub jobs: SyncSender<Job>,
     pub control: Sender<Control>,
     pub target: AtomicIsize,
@@ -152,7 +208,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         _ => DefWindowProcW(h, msg, w, l),
     }
 }
-fn start_broker() -> Result<u32> {
+fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
+    let (requests, pending) = mpsc::channel::<BrokerRequest>();
+    HOTKEY_REQUESTS
+        .set(requests)
+        .map_err(|_| anyhow!("热键控制通道已启动"))?;
     let (tx, rx) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("clipboard-listener".into())
@@ -183,8 +243,7 @@ fn start_broker() -> Result<u32> {
                     None,
                 )?;
                 AddClipboardFormatListener(h)?;
-                RegisterHotKey(Some(h), 1, MAIN_HOTKEY_MODIFIERS, MAIN_HOTKEY_VK)
-                    .map_err(|_| anyhow!("Alt+V 注册失败，可能已被其他程序占用"))?;
+
                 SetTimer(Some(h), 1, 250, None);
                 LISTENER.store(h.0 as isize, Ordering::Release);
                 let id = GetCurrentThreadId();
@@ -193,10 +252,32 @@ fn start_broker() -> Result<u32> {
             })();
             match init {
                 Ok((h, id)) => {
-                    let _ = tx.send(Ok(id));
+                    let mut registrar = NativeRegistrar(h);
+                    let mut registered = None;
+                    let startup_error =
+                        settings::replace_hotkey(&mut registrar, &mut registered, initial)
+                            .err()
+                            .map(|e| format!("{}：{e}。请在设置中更换快捷键。", initial.label()));
+                    if let Some(error) = &startup_error {
+                        diag::write(format!("startup hotkey: {error}"));
+                    }
+                    let _ = tx.send(Ok((id, startup_error)));
                     let mut msg = MSG::default();
                     while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-                        if msg.message == hook::ACTION_MESSAGE {
+                        if msg.message == SETTINGS_MESSAGE {
+                            while let Ok(request) = pending.try_recv() {
+                                if request.cancelled.load(Ordering::Acquire) {
+                                    continue;
+                                }
+                                let result = settings::replace_hotkey(
+                                    &mut registrar,
+                                    &mut registered,
+                                    request.hotkey,
+                                )
+                                .map_err(|e| e.to_string());
+                                let _ = request.reply.send(result);
+                            }
+                        } else if msg.message == hook::ACTION_MESSAGE {
                             if let Some(action) = Action::from_raw(msg.wParam.0) {
                                 let generation = msg.lParam.0 as u64;
                                 if generation != paste_generation() {
@@ -258,6 +339,7 @@ fn refresh_panel_snapshot(
 }
 
 fn hide_panel(app: &AppHandle, state: &State, panel: &mut Panel) {
+    hook::cancel_panel();
     panel.visible = false;
     diag::panel(true, false);
     publish(app, state, panel);
@@ -330,7 +412,9 @@ pub(crate) fn save_capture(
 }
 
 pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<State>> {
-    let policy = RetentionPolicy::default();
+    let settings = storage.load_settings()?;
+    let policy = settings.retention_policy();
+    hook::configure(settings.quick_hotkey.shortcut());
     let vacuumed = match storage.cleanup(&policy, crate::storage::unix_millis()) {
         Ok(report) => report.vacuumed,
         Err(e) => {
@@ -355,6 +439,8 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         storage: Mutex::new(storage),
         capture_context: Mutex::new(None),
         retention_policy: Mutex::new(policy),
+        settings: Mutex::new(settings.clone()),
+        startup_error: Mutex::new(None),
         jobs: jobs.clone(),
         control: control.clone(),
         target: AtomicIsize::new(0),
@@ -400,11 +486,8 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                                     last_cleanup.elapsed(),
                                                     inserted_since_cleanup,
                                                 ) {
-                                                    let policy = worker
-                                                        .retention_policy
-                                                        .lock()
-                                                        .unwrap()
-                                                        .clone();
+                                                    let policy =
+                                                        worker.retention_policy.lock().unwrap();
                                                     // 与保存/手动删除一致：先上下文锁，后存储锁；禁止反向嵌套。
                                                     let mut context =
                                                         worker.capture_context.lock().unwrap();
@@ -548,6 +631,10 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 match event {
+                    Control::UpdateSettings(settings, reply) => {
+                        let result = apply_settings(&a, &s, settings, panel.visible).map_err(|e| e.to_string());
+                        let _ = reply.send(result);
+                    }
                     Control::Report(_) | Control::PasteReport(_, _) => {
                         let (message, generation) = match event {
                             Control::Report(message) => (message, None),
@@ -580,6 +667,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                         notice.cancel();
                         panel.error = None;
                         let _ = a.emit("operation-error", "");
+                        hook::cancel_panel();
                         panel.visible = false;
                         diag::panel(true, false);
                         publish(&a, &s, &panel);
@@ -644,7 +732,6 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                 publish(&a, &s, &panel);
                             } else {
                                 // 查询失败或选中项被删除都取消；后续 Commit 无可粘贴的记录。
-                                hook::cancel_panel();
                                 panel.items.clear();
                                 panel.selected = 0;
                                 panel.error = None;
@@ -665,6 +752,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                             *s.error.lock().unwrap() = None;
                             target = platform::foreground();
                             if !platform::valid_external(target) {
+                                hook::cancel_panel();
                                 diag::panel(true, false);
                                 continue;
                             }
@@ -675,6 +763,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                 error: None,
                             };
                             if panel.items.is_empty() {
+                                hook::cancel_panel();
                                 panel.visible = false;
                                 diag::panel(true, false);
                                 continue;
@@ -734,10 +823,92 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         .map_err(|_| anyhow!("控制线程已启动"))?;
     if !smoke {
         clipboard::initialize()?;
-        let receiver = start_broker()?;
+        let (receiver, error) = start_broker(settings.main_hotkey)?;
+        *state.startup_error.lock().unwrap() = error;
         hook::start(receiver)?;
     }
     Ok(state)
+}
+// 控制通道串行化设置与面板动作；数据库等待不会占用 broker 或 hook 线程。
+fn apply_settings(
+    app: &AppHandle,
+    state: &State,
+    next: Settings,
+    panel_visible: bool,
+) -> Result<Settings> {
+    let next = next.normalized()?;
+    let mut current = state.settings.lock().unwrap();
+    let hotkeys_changed =
+        current.main_hotkey != next.main_hotkey || current.quick_hotkey != next.quick_hotkey;
+    let retry_hotkey = state.startup_error.lock().unwrap().is_some();
+    let reservation = if hotkeys_changed || retry_hotkey {
+        if panel_visible {
+            return Err(anyhow!("快速面板正在激活，请关闭面板后重试"));
+        }
+        Some(hook::reserve_configuration_when_hidden()?)
+    } else {
+        None
+    };
+    let change_main = current.main_hotkey != next.main_hotkey || retry_hotkey;
+    if change_main {
+        if let Err(error) = change_main_hotkey(next.main_hotkey) {
+            if error.to_string().contains("旧快捷键恢复失败") {
+                *state.startup_error.lock().unwrap() = Some(error.to_string());
+                diag::write(error.to_string());
+                let _ = app.emit("startup-error", error.to_string());
+            }
+            return Err(error);
+        }
+    }
+    // 持有策略锁直到清理完成，避免 worker 用已失效的旧策略再清一次。
+    let mut policy = state.retention_policy.lock().unwrap();
+    let mut context = state.capture_context.lock().unwrap();
+    let mut storage = state.storage.lock().unwrap();
+    if let Err(error) = storage.save_settings(&next) {
+        if change_main {
+            if let Err(rollback) = change_main_hotkey(current.main_hotkey) {
+                let message = format!("设置未保存：{error}；热键恢复失败：{rollback}");
+                diag::write(message.clone());
+                *state.startup_error.lock().unwrap() = Some(message.clone());
+                let _ = app.emit("startup-error", &message);
+                return Err(anyhow!(message));
+            }
+        }
+        return Err(anyhow!("设置未保存：{error}"));
+    }
+    *policy = next.retention_policy();
+    hook::configure(next.quick_hotkey.shortcut());
+    *current = next.clone();
+    drop(current);
+    drop(reservation);
+    if change_main {
+        *state.startup_error.lock().unwrap() = None;
+        let _ = app.emit("startup-error", "");
+    }
+    match storage.cleanup(&policy, crate::storage::unix_millis()) {
+        Ok(report) => {
+            crate::owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
+            if !report.failed_blobs.is_empty() || !report.maintenance_errors.is_empty() {
+                let message =
+                    "设置已保存，记录已清理，但部分文件回收或数据库整理失败，将在后续维护重试";
+                diag::write(message.into());
+                let _ = app.emit("operation-error", message);
+            }
+        }
+        Err(error) => {
+            let message = format!("设置已保存，但立即清理失败：{error}");
+            diag::write(message.clone());
+            let _ = app.emit("operation-error", message);
+        }
+    }
+    drop(storage);
+    drop(context);
+    drop(policy);
+    let _ = app.emit("settings-changed", &next);
+    if let Err(error) = refresh(app, state) {
+        diag::write(format!("settings refresh failed: {error}"));
+    }
+    Ok(next)
 }
 fn validate_sources(clip: &crate::model::Clip, mut exists: impl FnMut(&str) -> bool) -> Result<()> {
     if let Some(data) = clip.get("CF_HDROP") {
@@ -942,5 +1113,249 @@ mod source_tests {
         };
         assert!(validate_sources(&clip, |_| panic!("无效格式不应访问路径")).is_err());
         assert!(validate_sources(&Clip::default(), |_| panic!("非文件记录无需检查路径")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    // Rust 单元测试宿主没有 Tauri 应用的清单；Wry 引用的 TaskDialogIndirect
+    // 需要 Common Controls v6，否则测试进程会在进入测试框架前加载失败。
+    macro_rules! test_manifest_dependency {
+        ($directive:literal) => {
+            #[used]
+            #[link_section = ".drectve"]
+            static TEST_MANIFEST_DEPENDENCY: [u8; $directive.len()] = *$directive;
+        };
+    }
+    test_manifest_dependency!(b" /MANIFESTDEPENDENCY:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\" ");
+
+    #[derive(Default)]
+    struct FakeRegistrar {
+        current: Option<Hotkey>,
+        calls: Vec<Option<Hotkey>>,
+        fail: Vec<Hotkey>,
+        unregister_fails: bool,
+    }
+    impl HotkeyRegistrar for FakeRegistrar {
+        fn unregister(&mut self) -> Result<()> {
+            self.calls.push(None);
+            if self.unregister_fails {
+                return Err(anyhow!("synthetic unregister failure"));
+            }
+            Ok(())
+        }
+        fn register(&mut self, hotkey: Hotkey) -> Result<()> {
+            self.calls.push(Some(hotkey));
+            if self.fail.contains(&hotkey) {
+                return Err(anyhow!("synthetic registration failure"));
+            }
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        root: std::path::PathBuf,
+        fake: Arc<Mutex<FakeRegistrar>>,
+        quit: Arc<AtomicBool>,
+        broker: Option<thread::JoinHandle<()>>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../.test-data")
+                .join(format!("t3-runtime-settings-{}", std::process::id()));
+            assert!(!root.exists(), "不能覆盖已有测试数据：{}", root.display());
+            Self {
+                root,
+                fake: Arc::new(Mutex::new(FakeRegistrar {
+                    current: Some(Hotkey::AltV),
+                    ..Default::default()
+                })),
+                quit: Arc::new(AtomicBool::new(false)),
+                broker: None,
+            }
+        }
+        fn start_fake_broker(&mut self) {
+            let (requests, pending) = mpsc::channel::<BrokerRequest>();
+            assert!(HOTKEY_REQUESTS.set(requests).is_ok());
+            let fake = self.fake.clone();
+            let quit = self.quit.clone();
+            let (ready, wait) = mpsc::sync_channel(1);
+            self.broker = Some(thread::spawn(move || {
+                // 只建立本测试线程的消息队列，保证真实 PostThreadMessageW 路径可用。
+                // 不创建窗口、不注册热键、不安装钩子，也不发送任何键盘事件。
+                unsafe {
+                    let mut msg = MSG::default();
+                    let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                    BROKER.store(GetCurrentThreadId(), Ordering::Release);
+                }
+                ready.send(()).unwrap();
+                while !quit.load(Ordering::Acquire) {
+                    match pending.recv_timeout(Duration::from_millis(20)) {
+                        Ok(request) => {
+                            if request.cancelled.load(Ordering::Acquire) {
+                                continue;
+                            }
+                            let mut registrar = fake.lock().unwrap();
+                            let mut current = registrar.current;
+                            let result = settings::replace_hotkey(
+                                &mut *registrar,
+                                &mut current,
+                                request.hotkey,
+                            )
+                            .map_err(|e| e.to_string());
+                            registrar.current = current;
+                            let _ = request.reply.send(result);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            }));
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        fn state(&self) -> State {
+            let old = Settings::default();
+            let mut storage = Storage::open(&self.root, &[72; 32]).unwrap();
+            storage.save_settings(&old).unwrap();
+            State {
+                items: Mutex::new(Vec::new()),
+                storage: Mutex::new(storage),
+                capture_context: Mutex::new(None),
+                retention_policy: Mutex::new(old.retention_policy()),
+                settings: Mutex::new(old),
+                startup_error: Mutex::new(None),
+                jobs: mpsc::sync_channel(1).0,
+                control: mpsc::channel().0,
+                target: AtomicIsize::new(0),
+                main: AtomicIsize::new(0),
+                quick: AtomicIsize::new(0),
+                ready: AtomicBool::new(false),
+                panel: Mutex::new(Panel::default()),
+                error: Mutex::new(None),
+                smoke: true,
+                main_ready: AtomicBool::new(false),
+                quick_ready: AtomicBool::new(false),
+                thumbnail_ready: AtomicBool::new(false),
+                preview_ready: AtomicBool::new(false),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.quit.store(true, Ordering::Release);
+            if let Some(broker) = self.broker.take() {
+                broker.join().unwrap();
+            }
+            BROKER.store(0, Ordering::Release);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    // T3-2/3：调用真实 apply_settings 与 change_main_hotkey；仅替换系统注册结果。
+    // 单个测试持有唯一的 Tauri 事件循环及 OnceLock 通道，防止测试间竞争。
+    #[test]
+    fn settings_update_failures_preserve_database_and_old_registration() {
+        let _hook_lock = hook::CONFIG_TEST_LOCK.lock().unwrap();
+        // .drectve 由链接器消费；这里只保留符号引用，不读取该节。
+        std::hint::black_box(std::ptr::addr_of!(TEST_MANIFEST_DEPENDENCY));
+        let mut fixture = Fixture::new();
+        fixture.start_fake_broker();
+        let app = tauri::Builder::default()
+            .any_thread()
+            .build(tauri::generate_context!())
+            .unwrap();
+        let state = fixture.state();
+        let old = Settings::default();
+        let before = state.storage.lock().unwrap().test_settings_rows();
+        let next = Settings {
+            main_hotkey: Hotkey::CtrlAltV,
+            autostart: true,
+            quick_visible_count: 9,
+            ..old.clone()
+        };
+        let assert_unchanged = || {
+            let storage = state.storage.lock().unwrap();
+            assert_eq!(storage.test_settings_rows(), before);
+            assert_eq!(storage.load_settings().unwrap(), old);
+            assert_eq!(*state.settings.lock().unwrap(), old);
+            assert_eq!(
+                *state.retention_policy.lock().unwrap(),
+                old.retention_policy()
+            );
+            assert!(
+                hook::reserve_configuration().is_ok(),
+                "错误路径必须释放配置门"
+            );
+        };
+
+        assert!(apply_settings(app.handle(), &state, next.clone(), true)
+            .unwrap_err()
+            .to_string()
+            .contains("快速面板正在激活"));
+        assert!(fixture.fake.lock().unwrap().calls.is_empty());
+        assert_unchanged();
+
+        // 即使 UI 尚未显示，配置门被占用也必须在注册和落库之前拒绝。
+        let reservation = hook::reserve_configuration().unwrap();
+        assert!(apply_settings(app.handle(), &state, next.clone(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("快速面板正在激活或处理按键"));
+        assert!(fixture.fake.lock().unwrap().calls.is_empty());
+        drop(reservation);
+        assert_unchanged();
+
+        fixture.fake.lock().unwrap().fail = vec![Hotkey::CtrlAltV];
+        assert!(apply_settings(app.handle(), &state, next.clone(), false).is_err());
+        {
+            let mut fake = fixture.fake.lock().unwrap();
+            assert_eq!(
+                fake.calls,
+                [None, Some(Hotkey::CtrlAltV), Some(Hotkey::AltV)]
+            );
+            assert_eq!(fake.current, Some(Hotkey::AltV));
+            fake.calls.clear();
+            fake.fail.clear();
+            fake.unregister_fails = true;
+        }
+        assert_unchanged();
+
+        assert!(apply_settings(app.handle(), &state, next.clone(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("synthetic unregister failure"));
+        {
+            let mut fake = fixture.fake.lock().unwrap();
+            assert_eq!(fake.calls, [None]);
+            assert_eq!(fake.current, Some(Hotkey::AltV));
+            fake.calls.clear();
+            fake.unregister_fails = false;
+        }
+        assert_unchanged();
+
+        state.storage.lock().unwrap().test_reject_settings_update();
+        assert!(apply_settings(app.handle(), &state, next, false)
+            .unwrap_err()
+            .to_string()
+            .contains("设置未保存"));
+        {
+            let fake = fixture.fake.lock().unwrap();
+            assert_eq!(
+                fake.calls,
+                [None, Some(Hotkey::CtrlAltV), None, Some(Hotkey::AltV)]
+            );
+            assert_eq!(fake.current, Some(Hotkey::AltV));
+        }
+        assert_unchanged();
+        drop(state);
+        assert_eq!(
+            Storage::open(&fixture.root, &[72; 32])
+                .unwrap()
+                .test_settings_rows(),
+            before
+        );
     }
 }

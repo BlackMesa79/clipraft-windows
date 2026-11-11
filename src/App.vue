@@ -4,11 +4,22 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import PreviewImage from './PreviewImage.vue';
 import HistoryList from './HistoryList.vue';
+import SettingsView from './SettingsView.vue';
+import type { Settings, SettingOptions } from './settings';
 import ContextMenu from './ContextMenu.vue';
 import { kindLabel, type Item } from './history';
 interface Panel { items: Item[]; selected: number; visible: boolean; error: string | null }
 const quick = new URLSearchParams(location.search).get('panel') === 'quick';
 const items = ref<Item[]>([]), selected = ref(0), error = ref(''), busy = ref(false);
+const settingsOpen = ref(false), settingsBusy = ref(false), startupError = ref('');
+const settings = ref<Settings>(), settingOptions = ref<SettingOptions>();
+const mainLabel = computed(() => settingOptions.value?.main_hotkeys.find(k => k.id === settings.value?.main_hotkey)?.label ?? '');
+const quickKey = computed(() => settingOptions.value?.quick_hotkeys.find(k => k.id === settings.value?.quick_hotkey));
+function toggleSettings() {
+  if (settingsBusy.value || deleting.value || busy.value) return;
+  settingsOpen.value = !settingsOpen.value; contextMenu.value = null; pendingDelete.value = null;
+  if (!settingsOpen.value) void nextTick(checkLoadMore);
+}
 const PAGE_SIZE = 100;
 const historyList = ref<InstanceType<typeof HistoryList> | null>(null);
 const listRoot = computed(() => historyList.value?.element ?? null);
@@ -189,6 +200,11 @@ async function paste(plain = false) {
 }
 async function keydown(event: KeyboardEvent) {
   if (quick || event.isComposing) return;
+  if (settingsOpen.value) {
+    if (event.key === 'Escape') { event.preventDefault(); if (!settingsBusy.value) toggleSettings(); }
+    return;
+  }
+  if ((event.target as Element | null)?.closest?.('.settings-toggle') && (event.key === 'Enter' || event.key === ' ')) return;
   if (pendingDelete.value) {
     if (event.key === 'Escape') { event.preventDefault(); pendingDelete.value = null; }
     // 确认条按钮仍可通过 Tab / Enter 操作，但不触发列表粘贴。
@@ -219,6 +235,10 @@ onMounted(async () => {
     stops.push(await listen<Panel>('panel-state', ({ payload }) => { if (quick) applyPanel(payload); }));
     stops.push(await listen('history-changed', () => { if (!quick) historyChanged(); }));
     stops.push(await listen<string>('operation-error', ({ payload }) => { if (!quick) error.value = payload; }));
+    stops.push(await listen<Settings>('settings-changed', ({ payload }) => { settings.value = payload; }));
+    stops.push(await listen<string>('startup-error', ({ payload }) => { startupError.value = payload; }));
+    [settings.value, settingOptions.value] = await Promise.all([invoke<Settings>('get_settings'), invoke<SettingOptions>('get_setting_options')]);
+    if (!quick) startupError.value = (await invoke<string | null>('startup_error')) ?? '';
     await load(); if (!quick) error.value = (await invoke<string | null>('last_error')) ?? '';
     await invoke('frontend_ready');
   } catch (e) { error.value = '初始化失败：' + String(e); }
@@ -232,18 +252,21 @@ onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); 
 <template>
   <main ref="panelRoot" :class="['app', { quick, 'notice-only': noticeOnly }]">
     <header>
-      <div class="brand"><span class="brand-mark">▤</span><div><h1>{{ noticeOnly ? '操作失败' : quick ? '快速粘贴' : '剪贴板' }} <small v-if="!quick">M1</small></h1><p>{{ noticeOnly ? '提示将在约 2 秒后自动关闭' : quick ? '保持 Ctrl + Shift · ↑ ↓ / V 选择' : '本地加密历史 · Alt + V 随时呼出' }}</p></div></div>
-      <span v-if="!noticeOnly" class="count">{{ quick ? '' : '已加载 ' }}{{ items.length }} 条</span>
+      <div class="brand"><span class="brand-mark">▤</span><div><h1>{{ noticeOnly ? '操作失败' : quick ? '快速粘贴' : '剪贴板' }} <small v-if="!quick">M1</small></h1><p>{{ noticeOnly ? '提示将在约 2 秒后自动关闭' : quick ? `保持 ${quickKey?.hold_label ?? ''} · ↑ ↓ / V 选择` : `本地加密历史 · ${mainLabel} 随时呼出` }}</p></div></div>
+      <button v-if="!quick" type="button" class="settings-toggle" :aria-label="settingsOpen ? '返回列表' : '设置'" :disabled="settingsBusy || deleting || busy" @click="toggleSettings">{{ settingsOpen ? '返回列表' : '⚙ 设置' }}</button>
+      <span v-if="!noticeOnly && !settingsOpen" class="count">{{ quick ? '' : '已加载 ' }}{{ items.length }} 条</span>
     </header>
+    <div v-if="!quick && startupError" class="error" role="alert">{{ startupError }}</div>
+    <SettingsView v-if="settingsOpen && !quick" @saved="settings = $event" @busy="settingsBusy = $event" />
     <div v-if="error" class="error" role="alert">{{ error }}</div>
-    <div v-if="!quick && pageError" class="error" role="alert">{{ pageError }} <button type="button" @click="retryPage">重试</button></div>
-    <div v-if="!quick && pendingDelete" class="delete-confirm" role="alertdialog" aria-label="确认删除" aria-describedby="delete-description">
+    <div v-if="!quick && !settingsOpen && pageError" class="error" role="alert">{{ pageError }} <button type="button" @click="retryPage">重试</button></div>
+    <div v-if="!quick && !settingsOpen && pendingDelete" class="delete-confirm" role="alertdialog" aria-label="确认删除" aria-describedby="delete-description">
       <span id="delete-description">将删除 {{ pendingDelete.length }} 条</span>
       <button type="button" @click="confirmDelete">确认</button><button type="button" @click="pendingDelete = null">取消</button>
     </div>
-    <ContextMenu v-if="!quick && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
-    <section v-if="!noticeOnly && !items.length" class="empty"><span>▤</span><h2>从一次复制开始</h2><p>复制文本、图片或文件后，会显示在这里。</p><p v-if="!quick">Ctrl + Shift + V 打开快速面板</p></section>
-    <div v-else-if="!noticeOnly" class="workspace">
+    <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
+    <section v-if="!settingsOpen && !noticeOnly && !items.length" class="empty"><span>▤</span><h2>从一次复制开始</h2><p>复制文本、图片或文件后，会显示在这里。</p><p v-if="!quick">{{ quickKey?.label }} 打开快速面板</p></section>
+    <div v-else-if="!settingsOpen && !noticeOnly" class="workspace">
     <HistoryList ref="historyList" :items="items" :selected="selected" :selected-ids="selectedIds" :quick="quick" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
     <aside v-if="!quick && active" class="detail" aria-label="选中项预览">
       <div class="detail-header"><h2>{{ kindLabel(active) }}预览</h2><button type="button" @click="loadDetail">刷新状态</button></div>
@@ -263,6 +286,6 @@ onUnmounted(() => { panelObserver?.disconnect(); stops.forEach(stop => stop()); 
     </aside>
     </div>
     <footer v-if="quick && !noticeOnly"><span>松开修饰键即可粘贴</span><span>Esc 取消</span></footer>
-    <footer v-else-if="!quick"><span>Enter 粘贴 · Shift + Enter 纯文本</span><button :disabled="!active || busy || deleting || !!pendingDelete" @click="paste(false)">粘贴选中项 ↵</button></footer>
+    <footer v-else-if="!quick && !settingsOpen"><span>Enter 粘贴 · Shift + Enter 纯文本</span><button :disabled="!active || busy || deleting || !!pendingDelete" @click="paste(false)">粘贴选中项 ↵</button></footer>
   </main>
 </template>

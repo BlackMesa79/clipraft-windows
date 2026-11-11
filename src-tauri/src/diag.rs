@@ -205,6 +205,16 @@ pub fn modifier_snapshot(context: &str, stage: &str) {
         keys.join(" ")
     ));
 }
+/// 进程即将退出，直接写入并刷盘，避免异步日志队列尚未消费就 exit。
+pub fn startup_failure(message: &str) {
+    if let Ok(root) = crate::platform::data_root() {
+        if let Ok(mut file) = open_log(&root) {
+            let _ = writeln!(file, "startup failure: {message}");
+            let _ = file.sync_data();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

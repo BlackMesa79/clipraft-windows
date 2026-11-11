@@ -10,6 +10,7 @@ mod owner_flush;
 pub mod paster;
 pub mod platform;
 mod runtime;
+pub mod settings;
 pub mod storage;
 pub mod thumbnail;
 
@@ -89,6 +90,58 @@ async fn delete_items(
     })
     .await
     .map_err(|_| "删除任务失败")?
+}
+#[tauri::command]
+fn get_settings(state: tauri::State<'_, Arc<State>>) -> settings::Settings {
+    state.settings.lock().unwrap().clone()
+}
+#[tauri::command]
+fn get_setting_options() -> settings::SettingOptions {
+    settings::options()
+}
+#[tauri::command]
+fn startup_error(state: tauri::State<'_, Arc<State>>) -> Option<String> {
+    state.startup_error.lock().unwrap().clone()
+}
+#[tauri::command]
+async fn update_settings(
+    settings: serde_json::Value,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<settings::Settings, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("此窗口不能修改设置".into());
+    }
+    let settings: settings::Settings = serde_json::from_value(settings)
+        .map_err(|_| "设置格式无效，请检查字段类型、数值及快捷键候选项".to_string())?;
+    settings.validate().map_err(|e| e.to_string())?;
+    let control = state.control.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reply, wait) = std::sync::mpsc::channel();
+        control
+            .send(Control::UpdateSettings(settings, reply))
+            .map_err(|_| "设置控制线程已退出")?;
+        wait.recv().map_err(|_| "设置控制线程已退出")?
+    })
+    .await
+    .map_err(|_| "设置任务失败")?
+}
+#[tauri::command]
+async fn preview_cleanup(
+    policy: storage::RetentionPolicy,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .preview_cleanup(&policy, storage::unix_millis())
+            .map_err(|e| format!("清理预估失败：{e}"))
+    })
+    .await
+    .map_err(|_| "清理预估任务失败")?
 }
 #[derive(serde::Serialize)]
 struct FileDetail {
@@ -233,7 +286,10 @@ fn paste_item(
     let generation = runtime::paste_generation();
     let target = state.target.load(Ordering::Acquire);
     if !platform::valid_external(target) {
-        return Err("没有可用的目标窗口，请先激活目标程序，再按 Alt+V".into());
+        return Err(format!(
+            "没有可用的目标窗口，请先激活目标程序，再按 {}",
+            state.settings.lock().unwrap().main_hotkey.label()
+        ));
     }
     window.hide().map_err(|_| "主窗口隐藏失败")?;
     diag::panel(false, false);
@@ -283,8 +339,12 @@ fn smoke_enabled(value: Option<&str>) -> bool {
 fn startup_failed(error: &dyn std::fmt::Display, smoke: bool) -> ! {
     let message = format!("剪贴板 M0 启动失败：{error}");
     eprintln!("{message}");
-    // 冒烟检查只写日志，正常启动失败时也让无控制台的构建显示原因。
-    if !smoke {
+    diag::startup_failure(&message);
+    if !platform::unattended_startup(
+        smoke,
+        std::env::var_os("CLIPBOARD_M0_DATA_DIR").is_some(),
+        std::env::var_os("CLIPBOARD_M0_DIAG").is_some(),
+    ) {
         platform::show_startup_error(&message);
     }
     std::process::exit(1);
@@ -309,6 +369,11 @@ pub fn run() {
     };
     let result = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            get_settings,
+            get_setting_options,
+            update_settings,
+            preview_cleanup,
+            startup_error,
             list_items,
             delete_items,
             item_detail,
@@ -384,6 +449,10 @@ pub fn run() {
             state.quick.store(quick_hwnd, Ordering::Release);
             platform::prepare_quick(quick_hwnd)?;
             platform::prepare_main(main_hwnd)?;
+            if state.startup_error.lock().unwrap().is_some() {
+                // 注册失败仍启动主界面，错误持久显示，允许用户修复设置。
+                main.show()?;
+            }
             use tauri::{
                 menu::{Menu, MenuItem},
                 tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -394,7 +463,7 @@ pub fn run() {
                 let menu = Menu::with_items(app, &[&show, &quit])?;
                 TrayIconBuilder::new()
                     .icon(icon())
-                    .tooltip("剪贴板 M0 · Alt+V")
+                    .tooltip("剪贴板 M1 · 点击显示主窗口")
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
