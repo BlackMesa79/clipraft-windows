@@ -314,15 +314,20 @@ fn cleanup_protected_records_neither_deleted_nor_counted() {
     }
 }
 #[test]
-fn cleanup_newest_survives_age_size_and_expiration() {
+fn cleanup_newest_survives_age_size_but_not_expiration() {
     let f = Fixture::new();
     let mut s = f.open();
     seed(&s, 1);
     s.conn
-        .execute_batch("UPDATE items SET used_at=0,expires_at=1,size=999999")
+        .execute_batch("UPDATE items SET used_at=0,expires_at=NULL,size=999999")
         .unwrap();
     assert_eq!(s.cleanup(&policy(1, 1, 1), NOW).unwrap().deleted_items, 0);
     assert_eq!(ids(&s), vec!["item-0"]);
+    s.conn
+        .execute_batch("UPDATE items SET expires_at=1")
+        .unwrap();
+    assert_eq!(s.cleanup(&policy(1, 1, 1), NOW).unwrap().deleted_items, 1);
+    assert!(ids(&s).is_empty());
 }
 #[test]
 fn cleanup_space_removes_old_prefix_not_small_new_items() {
@@ -568,7 +573,7 @@ fn cleanup_tied_touched_keeps_exactly_one_deterministic_newest() {
     let mut s = f.open();
     seed(&s, 3);
     s.conn
-        .execute_batch("UPDATE items SET touched=1,expires_at=1")
+        .execute_batch("UPDATE items SET touched=1,expires_at=NULL")
         .unwrap();
     assert_eq!(s.cleanup(&policy(1, 1, 1), NOW).unwrap().deleted_items, 2);
     assert_eq!(ids(&s), vec!["item-0"]);
@@ -616,7 +621,7 @@ fn cleanup_all_protected_records_survive_each_protection_type() {
 }
 
 #[test]
-fn cleanup_expired_protected_newest_survives_each_protection_type() {
+fn cleanup_expired_protected_newest_deleted_for_each_protection_type() {
     for protection in ["pinned=1", "favorite=1", "group_id=1"] {
         let f = Fixture::new();
         let mut s = f.open();
@@ -631,9 +636,9 @@ fn cleanup_expired_protected_newest_survives_each_protection_type() {
             )
             .unwrap();
         let report = s.cleanup(&policy(1, 1, 1), NOW).unwrap();
-        assert_eq!(report.deleted_items, 2, "{protection}");
-        assert_eq!(ids(&s), vec!["item-2"]);
-        assert!(s.load("item-2").is_ok());
+        assert_eq!(report.deleted_items, 3, "{protection}");
+        assert_eq!(ids(&s), Vec::<String>::new());
+        assert!(s.load("item-2").is_err());
     }
 }
 
@@ -1163,7 +1168,7 @@ fn preview_preserves_each_protection_and_does_not_count_it_toward_limits() {
 }
 
 #[test]
-fn preview_expiration_overrides_each_protection_but_preserves_newest() {
+fn preview_expiration_overrides_each_protection_and_newest() {
     for protection in ["pinned=1", "favorite=1", "group_id=1"] {
         let f = Fixture::new();
         let mut s = f.open();
@@ -1177,8 +1182,13 @@ fn preview_expiration_overrides_each_protection_but_preserves_newest() {
                 [NOW],
             )
             .unwrap();
-        assert_readonly_preview_then_cleanup(&mut s, &policy(1, 1, 1), NOW, &["item-0", "item-1"]);
-        assert_eq!(ids(&s), ["item-2"]);
+        assert_readonly_preview_then_cleanup(
+            &mut s,
+            &policy(1, 1, 1),
+            NOW,
+            &["item-0", "item-1", "item-2"],
+        );
+        assert_eq!(ids(&s), Vec::<String>::new());
     }
 }
 
@@ -1215,9 +1225,9 @@ fn preview_tied_newest_and_overlapping_limits_count_victims_once() {
         &mut s,
         &policy(1, 1, 1),
         NOW,
-        &["item-3", "item-2", "item-1"],
+        &["item-3", "item-2", "item-1", "item-0"],
     );
-    assert_eq!(ids(&s), ["item-0"]);
+    assert_eq!(ids(&s), Vec::<String>::new());
 }
 
 #[test]

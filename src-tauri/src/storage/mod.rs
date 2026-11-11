@@ -17,6 +17,9 @@ mod prediction_tests;
 mod search;
 #[cfg(test)]
 mod search_tests;
+#[cfg(test)]
+mod sensitive_tests;
+mod sensitivity;
 mod settings;
 #[cfg(test)]
 mod source_tests;
@@ -85,6 +88,7 @@ struct StoredFormat {
     blob: Option<String>,
 }
 struct PreparedSave {
+    detection: Option<sensitivity::Detection>,
     source: Option<crate::capture_source::CaptureSource>,
     identity: SaveIdentity,
     view: ItemView,
@@ -161,6 +165,7 @@ impl PreparedSave {
         let search_pinyin = search::pinyin_text(&search);
         let is_link = search::is_link(&view.kind, &clip.text().unwrap_or_default());
         Ok(Self {
+            detection: None,
             source: None,
             identity,
             view,
@@ -240,7 +245,7 @@ impl Storage {
         }
         // 协议只访问登记过的缩略图或预览，不能通过猜测哈希读取其他对象。
         let allowed: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE thumbnail=?1 OR preview=?1)",
+            "SELECT EXISTS(SELECT 1 FROM items WHERE (thumbnail=?1 OR preview=?1) AND sensitive<>1) AND NOT EXISTS(SELECT 1 FROM items WHERE (thumbnail=?1 OR preview=?1) AND sensitive=1)",
             [id],
             |r| r.get(0),
         )?;
@@ -317,31 +322,7 @@ impl Storage {
         values.push((limit.min(PAGE_LIMIT) as i64).into());
         values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
-            let json: String = r.get(0)?;
-            let mut view: ItemView = serde_json::from_str(&json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?;
-            view.id = r.get(1)?;
-            view.kind = r.get(2)?;
-            view.created = r.get(3)?;
-            view.used_at = r.get(4)?;
-            view.size = r.get(5)?;
-            view.pinned = r.get(6)?;
-            view.favorite = r.get(7)?;
-            view.group_id = r.get(8)?;
-            view.source_exe = r.get(9)?;
-            view.source_title = r.get(10)?;
-            view.sensitive = r.get(11)?;
-            view.expires_at = r.get(12)?;
-            view.thumbnail = r.get(13)?;
-            view.preview = r.get(14)?;
-            Ok(view)
-        })?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values), item_view)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -351,10 +332,15 @@ impl Storage {
     /// 无共享锁的调用者保留原接口；runtime 必须使用 save_shared。
     pub fn save_with_outcome(&mut self, clip: &Clip) -> Result<bool> {
         let identity = SaveIdentity::new(clip);
-        if self.update_duplicate(&identity, None)?.is_some() {
+        let detection = sensitivity::Detection::for_clip(clip, &self.load_settings()?);
+        if self
+            .update_duplicate(&identity, None, detection.as_ref())?
+            .is_some()
+        {
             return Ok(false);
         }
-        let prepared = PreparedSave::new(clip, identity, &self.key)?;
+        let mut prepared = PreparedSave::new(clip, identity, &self.key)?;
+        prepared.detection = detection;
         self.commit_prepared(prepared)
             .map(|outcome| outcome.inserted)
     }
@@ -368,21 +354,23 @@ impl Storage {
         source: Option<&crate::capture_source::CaptureSource>,
     ) -> Result<SaveOutcome> {
         let identity = SaveIdentity::new(clip);
-        let key = {
+        let (key, detection) = {
             let store = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("存储锁不可用"))?;
-            if let Some(id) = store.update_duplicate(&identity, source)? {
+            let detection = sensitivity::Detection::for_clip(clip, &store.load_settings()?);
+            if let Some(id) = store.update_duplicate(&identity, source, detection.as_ref())? {
                 return Ok(SaveOutcome {
                     id,
                     inserted: false,
                 });
             }
-            store.key.clone()
+            (store.key.clone(), detection)
         };
         // 只准备内存对象；尚未登记的文件不能提前暴露给孤儿扫描。
         let mut prepared = PreparedSave::new(clip, identity, &key)?;
         prepared.source = source.cloned();
+        prepared.detection = detection;
         storage
             .lock()
             .map_err(|_| anyhow::anyhow!("存储锁不可用"))?
@@ -392,15 +380,22 @@ impl Storage {
         &self,
         identity: &SaveIdentity,
         source: Option<&crate::capture_source::CaptureSource>,
+        detection: Option<&sensitivity::Detection>,
     ) -> Result<Option<String>> {
         let now = unix_millis();
         let order = self.next_order()?;
         // RETURNING 返回实际命中的旧 id；文件去重命中时它可能不同于本次 clip.hash()。
-        Ok(self.conn.query_row(
+        let tx = self.conn.unchecked_transaction()?;
+        let result: Option<String> = tx.query_row(
             "UPDATE items SET touched=?1,used_at=?3,dedup_key=?2,source_exe=CASE WHEN ?5 THEN ?6 ELSE source_exe END,source_title=CASE WHEN ?5 THEN ?7 ELSE source_title END WHERE id=(SELECT id FROM items WHERE dedup_key=?2 OR id=?4 ORDER BY touched DESC,id ASC LIMIT 1) RETURNING id",
             params![order, identity.dedup_key, now, identity.id, source.is_some(), source.and_then(|s| s.exe.as_deref()), source.and_then(|s| s.title.as_deref())],
             |row| row.get(0),
-        ).optional()?)
+        ).optional()?;
+        if let (Some(id), Some(detection)) = (&result, detection) {
+            sensitivity::apply_detection(&tx, id, detection, now)?;
+        }
+        tx.commit()?;
+        Ok(result)
     }
     fn next_order(&self) -> Result<i64> {
         Ok(self
@@ -411,7 +406,11 @@ impl Storage {
     }
     fn commit_prepared(&mut self, mut prepared: PreparedSave) -> Result<SaveOutcome> {
         // 锁外准备期间可能有另一条相同记录完成保存；仍保留首次保存内容。
-        if let Some(id) = self.update_duplicate(&prepared.identity, prepared.source.as_ref())? {
+        if let Some(id) = self.update_duplicate(
+            &prepared.identity,
+            prepared.source.as_ref(),
+            prepared.detection.as_ref(),
+        )? {
             return Ok(SaveOutcome {
                 id,
                 inserted: false,
@@ -424,6 +423,11 @@ impl Storage {
         let now = unix_millis();
         prepared.view.created = now;
         prepared.view.used_at = now;
+        if let Some(detection) = &prepared.detection {
+            prepared.search.clear();
+            prepared.search_pinyin.clear();
+            prepared.view.summary = detection.summary.clone();
+        }
         let view = &prepared.view;
         let id = &prepared.identity.id;
         let tx = self.conn.transaction()?;
@@ -431,6 +435,9 @@ impl Storage {
             "INSERT INTO items(id,view,touched,kind,created,used_at,size,search_text,thumbnail,preview,dedup_key,search_pinyin,is_link,source_exe,source_title) VALUES(?1,?2,?3,?4,?5,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
             params![id, display_json(view)?, order, view.kind, now, view.size, prepared.search, view.thumbnail, view.preview, prepared.identity.dedup_key, prepared.search_pinyin, prepared.is_link, prepared.source.as_ref().and_then(|s| s.exe.as_deref()), prepared.source.as_ref().and_then(|s| s.title.as_deref())],
         )?;
+        if let Some(detection) = &prepared.detection {
+            sensitivity::apply_detection(&tx, id, detection, now)?;
+        }
         for format in prepared.formats {
             tx.execute(
                 "INSERT INTO formats(item,name,inline,blob) VALUES(?1,?2,?3,?4)",
@@ -901,4 +908,39 @@ mod touch_tests {
         drop(storage);
         fs::remove_dir_all(root).unwrap();
     }
+}
+
+fn item_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemView> {
+    let json: String = r.get(0)?;
+    let mut view: ItemView = serde_json::from_str(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    view.id = r.get(1)?;
+    view.kind = r.get(2)?;
+    view.created = r.get(3)?;
+    view.used_at = r.get(4)?;
+    view.size = r.get(5)?;
+    view.pinned = r.get(6)?;
+    view.favorite = r.get(7)?;
+    view.group_id = r.get(8)?;
+    view.source_exe = r.get(9)?;
+    view.source_title = r.get(10)?;
+    view.sensitive = r.get::<_, i64>(11)? == 1;
+    view.expires_at = r.get(12)?;
+    view.thumbnail = r.get(13)?;
+    view.preview = r.get(14)?;
+    if view.sensitive {
+        if !serde_json::from_str::<serde_json::Value>(&json)
+            .ok()
+            .is_some_and(|v| v.get("sensitive_hits").is_some())
+        {
+            view.summary = "••••••••".into();
+        }
+        view.thumbnail = None;
+        view.preview = None;
+        view.placeholder = None;
+        view.files.clear();
+        view.source_title = None;
+    }
+    Ok(view)
 }

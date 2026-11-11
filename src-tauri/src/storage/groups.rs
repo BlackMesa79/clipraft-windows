@@ -121,7 +121,7 @@ impl Storage {
         let mut changed = 0;
         {
             let mut stmt =
-                tx.prepare("UPDATE items SET group_id=?2 WHERE id=?1 AND group_id IS NOT ?2")?;
+                tx.prepare("UPDATE items SET group_id=?2,expires_at=CASE WHEN ?2 IS NOT NULL AND sensitive=1 THEN NULL ELSE expires_at END WHERE id=?1 AND (group_id IS NOT ?2 OR (?2 IS NOT NULL AND sensitive=1 AND expires_at IS NOT NULL))")?;
             for id in ids {
                 changed += stmt.execute(params![id, group_id])?;
             }
@@ -134,14 +134,14 @@ impl Storage {
         self.set_flag(
             ids,
             value,
-            "UPDATE items SET pinned=?2 WHERE id=?1 AND pinned<>?2",
+            "UPDATE items SET pinned=?2,expires_at=CASE WHEN ?2 AND sensitive=1 THEN NULL ELSE expires_at END WHERE id=?1 AND (pinned<>?2 OR (?2 AND sensitive=1 AND expires_at IS NOT NULL))",
         )
     }
     pub fn set_favorite(&mut self, ids: &[String], value: bool) -> Result<usize> {
         self.set_flag(
             ids,
             value,
-            "UPDATE items SET favorite=?2 WHERE id=?1 AND favorite<>?2",
+            "UPDATE items SET favorite=?2,expires_at=CASE WHEN ?2 AND sensitive=1 THEN NULL ELSE expires_at END WHERE id=?1 AND (favorite<>?2 OR (?2 AND sensitive=1 AND expires_at IS NOT NULL))",
         )
     }
     fn set_flag(&mut self, ids: &[String], value: bool, sql: &str) -> Result<usize> {

@@ -70,6 +70,8 @@ pub struct Settings {
     pub max_days: u32,
     pub ignored_apps: Vec<String>,
     pub sensitive_detection: bool,
+    #[serde(default)]
+    pub sensitive_high_entropy: bool,
     pub sensitive_ttl_minutes: u32,
     pub main_hotkey: Hotkey,
     pub quick_hotkey: Hotkey,
@@ -93,6 +95,7 @@ impl Default for Settings {
             .map(String::from)
             .to_vec(),
             sensitive_detection: true,
+            sensitive_high_entropy: false,
             sensitive_ttl_minutes: 10,
             main_hotkey: Hotkey::AltV,
             quick_hotkey: Hotkey::CtrlShiftV,
@@ -335,6 +338,7 @@ mod tests {
             max_days: 17,
             ignored_apps: vec!["custom.exe".into()],
             sensitive_detection: false,
+            sensitive_high_entropy: false,
             sensitive_ttl_minutes: 21,
             main_hotkey: Hotkey::CtrlBacktick,
             quick_hotkey: Hotkey::AltShiftV,

@@ -9,7 +9,6 @@ use crate::{
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use std::{
-    collections::HashSet,
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Sender, SyncSender},
@@ -314,21 +313,22 @@ fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
 fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
     let _ = app.run_on_main_thread(f);
 }
+// 快照来自已脱敏的内存条目；发布路径不能等待存储锁或执行 SQL。
 fn publish(app: &AppHandle, state: &State, panel: &Panel) {
     *state.panel.lock().unwrap() = panel.clone();
     let _ = app.emit_to("quick", "panel-state", panel);
 }
+// 按快照顺序替换为最新的完整展示对象，不新增条目。
 // 选中记录消失时取消，绝不把原下标解释为另一条记录。
 fn refresh_panel_snapshot(
     snapshot: &[ItemView],
-    existing_ids: &HashSet<String>,
+    current: &[ItemView],
     selected_id: Option<&str>,
 ) -> Option<(Vec<ItemView>, usize)> {
     let selected_id = selected_id?;
     let items: Vec<_> = snapshot
         .iter()
-        .filter(|item| existing_ids.contains(&item.id))
-        .cloned()
+        .filter_map(|old| current.iter().find(|item| item.id == old.id).cloned())
         .collect();
     let selected = items.iter().position(|item| item.id == selected_id)?;
     Some((items, selected))
@@ -448,6 +448,46 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         thumbnail_ready: AtomicBool::new(false),
         preview_ready: AtomicBool::new(false),
     });
+    let expiry_state = Arc::downgrade(&state);
+    let expiry_app = app.clone();
+    thread::Builder::new()
+        .name("clipboard-expiry".into())
+        .spawn(move || loop {
+            let Some(state) = expiry_state.upgrade() else {
+                break;
+            };
+            let result = (|| -> Result<Duration> {
+                let mut context = state
+                    .capture_context
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("采集上下文不可用"))?;
+                let mut store = state
+                    .storage
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("存储不可用"))?;
+                let now = crate::storage::unix_millis();
+                let delay = crate::sensitive::expiry_delay(now, store.next_expiry()?);
+                if delay == Some(Duration::ZERO) {
+                    let report = store.delete_expired(now)?;
+                    crate::owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
+                    drop(store);
+                    drop(context);
+                    if report.deleted_items > 0 {
+                        refresh(&expiry_app, &state)?;
+                    }
+                    return Ok(Duration::from_millis(100));
+                }
+                Ok(delay
+                    .unwrap_or(Duration::from_secs(1))
+                    .min(Duration::from_secs(1)))
+            })();
+            drop(state);
+            let delay = result.unwrap_or_else(|_| {
+                diag::write("sensitive expiry maintenance failed".into());
+                Duration::from_secs(1)
+            });
+            thread::sleep(delay);
+        })?;
     let worker = state.clone();
     let a = app.clone();
     thread::Builder::new()
@@ -683,6 +723,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                 let hide = toggle_decision(visible, minimized, foreground) == ToggleDecision::Hide;
                                 if hide {
                                     let result = window.hide();
+                                    let _ = window.emit("main-hidden", ());
                                     diag::panel(false, result.is_err());
                                     diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=hide before={before:?} hide_ok={} after={}", result.is_ok(), diag::foreground()));
                                 } else {
@@ -708,25 +749,17 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                     }
                     Control::HistoryChanged => {
                         if panel.visible {
-                            let ids: Vec<_> = panel.items.iter().map(|item| item.id.as_str()).collect();
-                            let existing = s.storage.lock().unwrap().existing_panel_ids(&ids);
-                            let refreshed = match existing {
-                                Ok(existing) => refresh_panel_snapshot(
-                                    &panel.items,
-                                    &existing,
-                                    panel.items.get(panel.selected).map(|item| item.id.as_str()),
-                                ),
-                                Err(error) => {
-                                    diag::write(format!("panel snapshot lookup failed: {error}"));
-                                    None
-                                }
-                            };
+                            let refreshed = refresh_panel_snapshot(
+                                &panel.items,
+                                &s.items.lock().unwrap(),
+                                panel.items.get(panel.selected).map(|item| item.id.as_str()),
+                            );
                             if let Some((items, selected)) = refreshed {
                                 panel.items = items;
                                 panel.selected = selected;
                                 publish(&a, &s, &panel);
                             } else {
-                                // 查询失败或选中项被删除都取消；后续 Commit 无可粘贴的记录。
+                                // 选中项被移除时取消；后续 Commit 无可粘贴的记录。
                                 panel.items.clear();
                                 panel.selected = 0;
                                 panel.error = None;
@@ -737,6 +770,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                     }
                     Control::Hide => {
                         let main = s.main.load(Ordering::Acquire);
+                        let _ = a.emit_to("main", "main-hidden", ());
                         on_main(&a, move || { platform::hide(main); diag::panel(false, false); });
                     }
                     Control::Hook(action, generation) => {
@@ -950,8 +984,14 @@ mod tests {
             })
             .collect()
     }
-    fn existing(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|id| (*id).into()).collect()
+    fn existing(ids: &[&str]) -> Vec<ItemView> {
+        ids.iter()
+            .map(|id| ItemView {
+                id: (*id).into(),
+                summary: format!("快照内容 {id}"),
+                ..Default::default()
+            })
+            .collect()
     }
     #[test]
     fn snapshot_cancels_when_selected_item_is_deleted() {
@@ -988,12 +1028,87 @@ mod tests {
     }
     #[test]
     fn snapshot_cancels_when_all_items_are_deleted() {
-        assert!(refresh_panel_snapshot(&snapshot(), &HashSet::new(), Some("b")).is_none());
+        assert!(refresh_panel_snapshot(&snapshot(), &[], Some("b")).is_none());
     }
     #[test]
     fn snapshot_cancels_when_selection_is_missing() {
         assert!(refresh_panel_snapshot(&snapshot(), &existing(&["a", "b", "c"]), None).is_none());
         assert!(refresh_panel_snapshot(&[], &existing(&["b"]), Some("b")).is_none());
+    }
+    #[test]
+    fn snapshot_replaces_views_without_changing_order_or_selected_id() {
+        let mut current = existing(&["new", "c", "b", "a"]);
+        for item in &mut current {
+            item.summary = format!("最新内容 {}", item.id);
+            item.favorite = true;
+        }
+        let (items, selected) = refresh_panel_snapshot(&snapshot(), &current, Some("b")).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(selected, 1);
+        assert_eq!(items[selected].id, "b");
+        for item in &items {
+            let latest = current.iter().find(|latest| latest.id == item.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(item).unwrap(),
+                serde_json::to_value(latest).unwrap()
+            );
+        }
+    }
+    #[test]
+    fn snapshot_replaces_sensitive_view_without_plaintext_token() {
+        let token = "sk-SyntheticOnly0123456789abcdef";
+        let mut old = snapshot();
+        old[1].summary = token.into();
+        old[1].source_title = Some(token.into());
+        old[1].files = vec![token.into()];
+        old[1].thumbnail = Some(token.into());
+        old[1].preview = Some(token.into());
+        let mut current = existing(&["c", "b", "a"]);
+        current[1] = ItemView {
+            id: "b".into(),
+            summary: "sk-S••••••••ef".into(),
+            sensitive: true,
+            expires_at: Some(600_000),
+            ..Default::default()
+        };
+        let (items, selected) = refresh_panel_snapshot(&old, &current, Some("b")).unwrap();
+        assert_eq!(selected, 1);
+        assert_eq!(items[selected].id, "b");
+        assert!(items[selected].sensitive);
+        assert_eq!(items[selected].expires_at, Some(600_000));
+        assert_eq!(
+            serde_json::to_value(&items[selected]).unwrap(),
+            serde_json::to_value(&current[1]).unwrap()
+        );
+        assert!(!serde_json::to_string(&items).unwrap().contains(token));
+    }
+    #[test]
+    fn snapshot_replaces_unmarked_view_and_removes_deleted_item() {
+        let mut old = snapshot();
+        old[1].summary = "••••••••".into();
+        old[1].sensitive = true;
+        old[1].expires_at = Some(600_000);
+        let current = existing(&["c", "b"]);
+        let (items, selected) = refresh_panel_snapshot(&old, &current, Some("b")).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "c"]
+        );
+        assert!(!items.iter().any(|item| item.id == "a"));
+        assert_eq!(selected, 0);
+        assert_eq!(items[selected].id, "b");
+        assert_eq!(items[selected].summary, "快照内容 b");
+        assert!(!items[selected].sensitive);
+        assert_eq!(items[selected].expires_at, None);
     }
     #[test]
     fn cleanup_throttle_boundaries() {
@@ -1345,7 +1460,56 @@ mod settings_tests {
             assert_eq!(fake.current, Some(Hotkey::AltV));
         }
         assert_unchanged();
-        drop(state);
+        // AC-6/7：复用本进程唯一的 Tauri 测试应用；不新建窗口或启动监听。
+        // 持有存储及采集上下文时，真实 publish / panel_state 仍须完成。
+        let fake = "sk-TESTONLY7777777777777777abcd";
+        let clip = crate::model::Clip {
+            formats: vec![crate::model::FormatData {
+                name: "CF_UNICODETEXT".into(),
+                bytes: fake
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            }],
+        };
+        let items = {
+            let mut storage = state.storage.lock().unwrap();
+            storage.save(&clip).unwrap();
+            storage.list().unwrap()
+        };
+        assert!(items[0].sensitive);
+        let panel = Panel {
+            items,
+            selected: 0,
+            visible: true,
+            error: None,
+        };
+        let expected = serde_json::to_value(&panel).unwrap();
+        let shared = Arc::new(state);
+        assert!(app.manage(shared.clone()));
+        let context_guard = shared.capture_context.lock().unwrap();
+        let storage_guard = shared.storage.lock().unwrap();
+        let handle = app.handle().clone();
+        let worker_state = shared.clone();
+        let (finished, result) = mpsc::sync_channel(1);
+        let publisher = thread::spawn(move || {
+            publish(&handle, &worker_state, &panel);
+            let payload = crate::panel_state(handle.state::<Arc<State>>());
+            finished
+                .send(serde_json::to_value(payload).unwrap())
+                .unwrap();
+        });
+        let response = result.recv_timeout(Duration::from_secs(3));
+        // 超时也先释放两把锁，使失败路径能结束后台测试线程。
+        drop(storage_guard);
+        drop(context_guard);
+        publisher.join().unwrap();
+        let payload = response.expect("快速面板发布或读取不应等待存储/采集锁");
+        assert_eq!(payload, expected);
+        assert!(!payload.to_string().contains(fake));
+        drop(app);
+        drop(shared);
         assert_eq!(
             Storage::open(&fixture.root, &[72; 32])
                 .unwrap()

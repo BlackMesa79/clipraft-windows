@@ -61,6 +61,7 @@ mod tests {
             max_days: 17,
             ignored_apps: vec!["custom.exe".into()],
             sensitive_detection: false,
+            sensitive_high_entropy: false,
             sensitive_ttl_minutes: 21,
             main_hotkey: crate::settings::Hotkey::CtrlBacktick,
             quick_hotkey: crate::settings::Hotkey::AltShiftV,

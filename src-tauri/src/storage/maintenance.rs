@@ -165,14 +165,13 @@ impl Storage {
         validate_retention_policy(policy)?;
         let cutoff = now.saturating_sub(i64::from(policy.max_days) * 86_400_000);
         let ids = {
-            // newest 是全局最新一条（并列时 id 升序兜底），优先于到期与容量限制。
+            // newest 只豁免普通天数与容量策略；显式到期始终删除。
             // 先剔除必删项，再从新到旧累计保留容量，得到应从旧到新删除的前缀。
             let mut stmt = self.conn.prepare("WITH
                 newest AS (SELECT id FROM items ORDER BY touched DESC,id ASC LIMIT 1),
                 mandatory AS (
-                    SELECT id FROM items WHERE id NOT IN newest AND (
-                        expires_at <= ?1 OR (?2 > 0 AND used_at < ?3
-                            AND pinned=0 AND favorite=0 AND group_id IS NULL))),
+                    SELECT id FROM items WHERE expires_at <= ?1 OR (id NOT IN newest AND ?2 > 0 AND used_at < ?3
+                            AND pinned=0 AND favorite=0 AND group_id IS NULL)),
                 ranked AS (
                     SELECT id,touched,
                         ROW_NUMBER() OVER (ORDER BY touched DESC,id ASC) AS item_count,

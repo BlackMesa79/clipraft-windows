@@ -18,7 +18,7 @@ const mainLabel = computed(() => settingOptions.value?.main_hotkeys.find(k => k.
 const quickKey = computed(() => settingOptions.value?.quick_hotkeys.find(k => k.id === settings.value?.quick_hotkey));
 function toggleSettings() {
   if (settingsBusy.value || deleting.value || busy.value || organizing.value) return;
-  settingsOpen.value = !settingsOpen.value; contextMenu.value = null; pendingDelete.value = null;
+  conceal(); settingsOpen.value = !settingsOpen.value; contextMenu.value = null; pendingDelete.value = null;
   if (!settingsOpen.value) { void nextTick(checkLoadMore); void focusSearch(); }
 }
 const searchInput = ref<HTMLInputElement | null>(null);
@@ -32,6 +32,7 @@ const mutationBusy = ref(false), groupInteracting = ref(false), groupMenuOpen = 
 const organizing = computed(() => mutationBusy.value || groupInteracting.value);
 const selectedItems = computed(() => items.value.filter(item => selectedIds.value.has(item.id)));
 const allPinned = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.pinned));
+const allSensitive = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.sensitive));
 const allFavorite = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.favorite));
 const protectedDeleteCount = computed(() => items.value.filter(item => pendingDelete.value?.includes(item.id) && (item.pinned || item.favorite)).length);
 const listFilter = computed<HistoryFilter>(() => ({ query: query.value, kind: kind.value,
@@ -49,10 +50,10 @@ async function loadGroups() {
   } catch (e) { if (generation === groupGeneration) groupError.value = '分组读取失败：' + String(e); }
 }
 function groupsChanged() { void loadGroups(); void load(); }
-async function changeItems(command: 'set_pinned' | 'set_favorite' | 'move_to_group', groupId?: number | null) {
+async function changeItems(command: 'set_pinned' | 'set_favorite' | 'move_to_group' | 'set_sensitive', groupId?: number | null) {
   if (quick || organizing.value || deleting.value || busy.value || pendingDelete.value || !selectedItems.value.length) return;
   const ids = selectedItems.value.map(item => item.id);
-  const args = command === 'move_to_group' ? { ids, groupId } : { ids, value: command === 'set_pinned' ? !allPinned.value : !allFavorite.value };
+  const args = command === 'move_to_group' ? { ids, groupId } : { ids, value: command === 'set_pinned' ? !allPinned.value : command === 'set_sensitive' ? !allSensitive.value : !allFavorite.value };
   mutationBusy.value = true; contextMenu.value = null; error.value = '';
   ++listGeneration; ++detailGeneration;
   try { await invoke(command, args); }
@@ -184,11 +185,25 @@ async function loadMore() {
 function retryPage() { pageError.value = ''; void (retryRefresh ? load() : loadMore()); }
 interface Detail { text: string; truncated: boolean; files: { path: string; exists: boolean | null }[] }
 const detail = ref<Detail | null>(null), detailError = ref(''), detailLoading = ref(false);
+const revealed = ref(false);
 let detailGeneration = 0;
+function conceal() { ++detailGeneration; revealed.value = false; detail.value = null; detailLoading.value = false; }
+async function revealDetail() {
+  if (quick || !active.value?.sensitive || detailLoading.value) return;
+  const id = active.value.id, generation = ++detailGeneration;
+  detailLoading.value = true; detailError.value = '';
+  try {
+    const result = await invoke<Detail>('reveal_item', { id });
+    if (generation === detailGeneration && active.value?.id === id) { detail.value = result; revealed.value = true; }
+  } catch { if (generation === detailGeneration) detailError.value = '显示原文失败'; }
+  finally { if (generation === detailGeneration) detailLoading.value = false; }
+}
+function visibilityChanged() { if (document.hidden) conceal(); else void loadDetail(); }
+
 async function loadDetail() {
   if (quick) return;
   const id = active.value?.id, generation = ++detailGeneration;
-  detail.value = null; detailError.value = ''; detailLoading.value = !!id;
+  revealed.value = false; detail.value = null; detailError.value = ''; detailLoading.value = !!id;
   if (!id || active.value?.kind === 'image') { detailLoading.value = false; return; }
   try {
     const result = await invoke<Detail>('item_detail', { id });
@@ -215,9 +230,10 @@ watch([noticeOnly, error, panelVisible], resizeQuick, { flush: 'post' });
 function applyPanel(p: Panel) { items.value = p.items; selected.value = p.selected; panelVisible.value = p.visible; error.value = p.error ?? ''; }
 const stops: UnlistenFn[] = [];
 const active = computed(() => items.value[selected.value]);
-watch(() => active.value?.id, () => { void loadDetail(); });
+watch(() => active.value?.id, () => { void loadDetail(); }, { flush: 'sync' });
 async function load() {
   if (quick) { const p = await invoke<Panel>('panel_state'); applyPanel(p); return; }
+  conceal();
   const generation = ++listGeneration, targetCount = Math.max(PAGE_SIZE, afterDelete?.count ?? items.value.length);
   const deletion = afterDelete;
   const scrollTop = listRoot.value?.scrollTop ?? 0;
@@ -325,14 +341,15 @@ async function keydown(event: KeyboardEvent) {
     void nextTick(() => document.querySelector('.item.selected')?.scrollIntoView({ block: 'nearest' }));
   } else if (event.key === 'Escape') {
     event.preventDefault();
-    if (query.value.length) { query.value = ''; void focusSearch(); } else void invoke('hide_main');
+    if (query.value.length) { query.value = ''; void focusSearch(); } else { conceal(); void invoke('hide_main'); }
   }
 }
 onMounted(async () => {
   if (quick && panelRoot.value) { panelObserver = new ResizeObserver(resizeQuick); panelObserver.observe(panelRoot.value); }
   try {
     stops.push(await listen<Panel>('panel-state', ({ payload }) => { if (quick) applyPanel(payload); }));
-    stops.push(await listen('main-shown', () => { void focusSearch(); }));
+    stops.push(await listen('main-shown', () => { void loadDetail(); void focusSearch(); }));
+    stops.push(await listen('main-hidden', conceal));
     stops.push(await listen('history-changed', () => { if (!quick) historyChanged(); }));
     stops.push(await listen<string>('operation-error', ({ payload }) => { if (!quick) error.value = payload; }));
     stops.push(await listen<Settings>('settings-changed', ({ payload }) => { settings.value = payload; }));
@@ -346,9 +363,11 @@ onMounted(async () => {
   } catch (e) { error.value = '初始化失败：' + String(e); }
   window.addEventListener('keydown', keydown);
   window.addEventListener('focus', loadDetail);
+  window.addEventListener('blur', conceal);
+  document.addEventListener('visibilitychange', visibilityChanged);
   window.addEventListener('resize', checkLoadMore);
 });
-onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
+onUnmounted(() => { conceal(); window.removeEventListener('blur', conceal); document.removeEventListener('visibilitychange', visibilityChanged); clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
 </script>
 
 <template>
@@ -374,12 +393,13 @@ onUnmounted(() => { clearTimeout(searchTimer); panelObserver?.disconnect(); stop
       <span id="delete-description">将删除 {{ pendingDelete.length }} 条，其中 {{ protectedDeleteCount }} 条是置顶或收藏记录</span>
       <button type="button" @click="confirmDelete">确认</button><button type="button" @click="pendingDelete = null">取消</button>
     </div>
-    <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" :groups="groups" :all-pinned="allPinned" :all-favorite="allFavorite" @pin="changeItems('set_pinned')" @favorite="changeItems('set_favorite')" @move="changeItems('move_to_group', $event)" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
+    <ContextMenu v-if="!quick && !settingsOpen && contextMenu" :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y" :x="contextMenu.x" :y="contextMenu.y" :groups="groups" :all-pinned="allPinned" :all-favorite="allFavorite" :all-sensitive="allSensitive" @sensitive="changeItems('set_sensitive')" @pin="changeItems('set_pinned')" @favorite="changeItems('set_favorite')" @move="changeItems('move_to_group', $event)" @delete="requestDelete" @paste="contextPaste" @close="contextMenu = null" />
     <section v-if="!settingsOpen && !noticeOnly && !items.length" class="empty"><span>▤</span><h2>{{ !quick && pageLoading ? '正在搜索…' : !quick && filtered ? '没有匹配的记录' : '从一次复制开始' }}</h2><p>{{ !quick && filtered ? '试试其他关键词或类型。' : '复制文本、图片或文件后，会显示在这里。' }}</p><p v-if="!quick && !filtered">{{ quickKey?.label }} 打开快速面板</p></section>
     <div v-else-if="!settingsOpen && !noticeOnly" class="workspace">
     <HistoryList ref="historyList" :items="items" :groups="groups" :selected="selected" :selected-ids="selectedIds" :quick="quick" :filtered="filtered" :loading="pageLoading" :has-more="hasMore" :disabled="deleting || organizing || !!pendingDelete" @choose="choose" @context="openContext" @paste="paste(false)" @scroll="contextMenu = null; checkLoadMore()" @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})" />
     <aside v-if="!quick && active" class="detail" aria-label="选中项预览">
       <p v-if="active.source_exe" class="source-name" :title="active.source_exe">来源：{{ active.source_exe }}</p>
+      <div v-if="active.sensitive" class="sensitive-actions"><span>敏感内容</span><button v-if="!revealed" type="button" :disabled="detailLoading" @click="revealDetail">显示原文</button><button v-else type="button" @click="loadDetail">隐藏原文</button></div>
       <div class="detail-header"><h2>{{ kindLabel(active) }}预览</h2><button type="button" @click="loadDetail">刷新状态</button></div>
       <PreviewImage v-if="active.kind === 'image' || active.thumbnail || active.preview || active.placeholder" :hash="active.preview || active.thumbnail" :placeholder="active.placeholder" large @loaded="invoke('preview_loaded').catch(() => {})" />
       <p v-if="active.kind === 'image' && !active.preview && active.thumbnail" class="detail-note">旧记录：显示缩略图</p>

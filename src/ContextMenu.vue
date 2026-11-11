@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { Group } from './history';
-const props = defineProps<{ x: number; y: number; groups?: Group[]; allPinned?: boolean; allFavorite?: boolean; label?: string }>();
+const props = defineProps<{ x: number; y: number; groups?: Group[]; allPinned?: boolean; allFavorite?: boolean; allSensitive?: boolean; label?: string }>();
 const expanded = ref(false);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 const moveButton = ref<HTMLButtonElement | null>(null);
 let restoreOnClose = false;
-const emit = defineEmits<{ delete: []; paste: []; close: []; pin: []; favorite: []; move: [groupId: number | null] }>();
+const emit = defineEmits<{ delete: []; paste: []; close: []; pin: []; favorite: []; sensitive: []; move: [groupId: number | null] }>();
 const root = ref<HTMLElement | null>(null), left = ref(props.x), top = ref(props.y);
 function outside(event: PointerEvent) { if (!root.value?.contains(event.target as Node)) emit('close'); }
 function close() { emit('close'); }
@@ -80,6 +80,7 @@ onUnmounted(() => { window.removeEventListener('pointerdown', outside); window.r
       <button type="button" role="menuitem" @click="emit('move', null)">移出分组</button>
       <button v-for="group in groups" :key="group.id" type="button" role="menuitem" @click="emit('move', group.id)">{{ group.name }}</button>
     </div>
+    <button type="button" role="menuitem" @click="emit('sensitive')">{{ allSensitive ? '取消敏感标记' : '标记为敏感' }}</button>
     <button type="button" role="menuitem" @click="emit('delete')">删除</button>
     <button type="button" role="menuitem" @click="emit('paste')">粘贴</button>
     </slot>

@@ -1,7 +1,7 @@
 export interface Settings {
   autostart: boolean; pause_on_start: boolean;
   max_items: number; max_bytes: number; max_days: number;
-  ignored_apps: string[]; sensitive_detection: boolean; sensitive_ttl_minutes: number;
+  ignored_apps: string[]; sensitive_detection: boolean; sensitive_high_entropy: boolean; sensitive_ttl_minutes: number;
   main_hotkey: string; quick_hotkey: string; quick_visible_count: number;
 }
 export interface HotkeyOption { id: string; label: string; hold_label: string }

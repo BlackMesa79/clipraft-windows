@@ -99,6 +99,7 @@ onMounted(load);
         <legend>隐私</legend>
         <p class="detail-note">忽略列表保存后对后续复制立即生效，不删除已有历史；敏感内容识别及保留时间将在后续版本生效。</p>
         <label class="check"><input v-model="draft.sensitive_detection" type="checkbox">识别敏感内容</label>
+      <label class="check"><input v-model="draft.sensitive_high_entropy" type="checkbox" :disabled="busy">高熵字符串识别（可能误报，默认关闭）</label>
         <label class="number-field"><span>敏感内容保留分钟数</span><input v-model.number="draft.sensitive_ttl_minutes" type="number" v-bind="range('sensitive_ttl_minutes')" required><small>范围 {{ range('sensitive_ttl_minutes').min }}–{{ range('sensitive_ttl_minutes').max }}</small></label>
         <p>忽略程序（每行一个 exe 名）</p>
         <ul class="ignored-apps"><li v-for="(name, index) in draft.ignored_apps" :key="index"><span>{{ name }}</span><button type="button" :aria-label="'删除 ' + name" @click="draft.ignored_apps.splice(index, 1)">删除</button></li></ul>

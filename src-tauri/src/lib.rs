@@ -11,6 +11,7 @@ mod owner_flush;
 pub mod paster;
 pub mod platform;
 mod runtime;
+pub mod sensitive;
 pub mod settings;
 pub mod storage;
 pub mod thumbnail;
@@ -20,7 +21,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // 仅接收已经过 read_thumbnail 白名单校验的内容。
 fn thumbnail_response(data: Option<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
@@ -289,16 +290,53 @@ async fn item_detail(
 ) -> Result<ItemDetail, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let clip = shared
+        shared
             .storage
             .lock()
             .map_err(|_| "存储不可用")?
-            .load(&id)
-            .map_err(|_| "记录读取失败")?;
-        Ok(detail(&clip))
+            .display_detail(&id, false)
+            .map_err(|_| "记录读取失败".into())
     })
     .await
     .map_err(|_| "预览任务失败")?
+}
+#[tauri::command]
+async fn reveal_item(
+    id: String,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<ItemDetail, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("此窗口不能显示原文".into());
+    }
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .display_detail(&id, true)
+            .map_err(|_| "记录读取失败".into())
+    })
+    .await
+    .map_err(|_| "显示原文任务失败")?
+}
+#[tauri::command]
+async fn set_sensitive(
+    ids: Vec<String>,
+    value: bool,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    let ttl = state
+        .settings
+        .lock()
+        .map_err(|_| "设置不可用")?
+        .sensitive_ttl_minutes;
+    update_history(window, state.inner().clone(), move |s| {
+        s.set_sensitive(&ids, value, ttl)
+    })
+    .await
 }
 #[tauri::command]
 async fn image_failure_reason(
@@ -399,6 +437,7 @@ fn paste_item(
         ));
     }
     window.hide().map_err(|_| "主窗口隐藏失败")?;
+    let _ = window.emit("main-hidden", ());
     diag::panel(false, false);
     state
         .jobs
@@ -491,6 +530,8 @@ pub fn run() {
             delete_group,
             move_to_group,
             item_detail,
+            reveal_item,
+            set_sensitive,
             image_failure_reason,
             panel_state,
             resize_quick,
@@ -642,6 +683,7 @@ pub fn run() {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                    let _ = window.emit("main-hidden", ());
                     diag::panel(false, false);
                 }
             }
