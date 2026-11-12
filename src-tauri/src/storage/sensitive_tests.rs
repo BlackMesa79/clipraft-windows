@@ -29,6 +29,74 @@ impl Drop for Fixture {
 fn token() -> String {
     format!("sk-{}", "SyntheticOnly0123456789abcdef")
 }
+
+/// AC-T9-2/4/5/7：分组、收藏、三态、分页搜索、清理和重启组合。
+#[test]
+fn t9_negative_state_search_survives_group_delete_cleanup_vacuum_and_reopen() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    let clip = text(&format!("组合你好 {}", token()));
+    let id = clip.hash();
+    s.save(&clip).unwrap();
+    let group = s.create_group("T9组合").unwrap().id;
+    s.move_to_group(std::slice::from_ref(&id), Some(group))
+        .unwrap();
+    s.set_favorite(std::slice::from_ref(&id), true).unwrap();
+    assert_eq!(state(&s, &id), (1, None));
+    let filter = ListFilter {
+        query: Some("zuhe nihao".into()),
+        favorite_only: true,
+        group_id: Some(group),
+        ..Default::default()
+    };
+    assert!(s.list_page(&filter, 0, 1).unwrap().is_empty());
+    s.set_sensitive(std::slice::from_ref(&id), false, 1)
+        .unwrap();
+    assert_eq!(s.list_page(&filter, 0, 1).unwrap()[0].id, id);
+    assert!(s.list_page(&filter, 1, 1).unwrap().is_empty());
+    s.delete_group(group).unwrap();
+    assert!(s.list_page(&filter, 0, 1).unwrap().is_empty());
+    let victim = text("T9待清理 ordinary victim");
+    let newest = text("T9最新 ordinary newest");
+    s.save(&victim).unwrap();
+    s.save(&newest).unwrap();
+    // 固定时间，确保收藏项不是 newest，且普通旧项由天数策略删除。
+    s.conn.execute("UPDATE items SET used_at=0", []).unwrap();
+    let policy = RetentionPolicy {
+        max_items: 1,
+        max_bytes: 1,
+        max_days: 1,
+    };
+    let report = s.cleanup(&policy, i64::MAX).unwrap();
+    assert_eq!(report.deleted_ids, [victim.hash()]);
+    assert!(s.load(&newest.hash()).is_ok());
+    assert!(s
+        .list_page(
+            &ListFilter {
+                query: Some("victim".into()),
+                ..Default::default()
+            },
+            0,
+            100
+        )
+        .unwrap()
+        .is_empty());
+    s.conn.execute_batch("VACUUM").unwrap();
+    drop(s);
+    let mut s = f.open();
+    s.save(&clip).unwrap();
+    assert_eq!(state(&s, &id), (-1, None));
+    let filter = ListFilter {
+        group_id: None,
+        ..filter
+    };
+    let rows = s.list_page(&filter, 0, 1).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].group_id, None);
+    let restored = indexed(&s, &id);
+    assert_t7_indexes(&s, &id, (&restored.0, &restored.1));
+}
 fn text(s: &str) -> Clip {
     Clip {
         formats: vec![model::FormatData {

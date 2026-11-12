@@ -4,6 +4,71 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 const MASTER: [u8; 32] = [73; 32];
+
+/// AC-T9-1：后段迁移失败也应遵守 T1 的整次升级回滚承诺。
+#[test]
+fn t9_late_migration_failure_restores_original_v0_schema() {
+    let root = Fixture::new();
+    legacy(&root.0);
+    let error = Storage::open_with_hook(&root.0, &MASTER, |tx| {
+        if version(tx) == 4 {
+            bail!("T9 注入 v4 提交前失败");
+        }
+        Ok(())
+    })
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("已回滚"));
+    let conn = connect(&root.0.join("history.db"));
+    assert_eq!(version(&conn), 0, "整次升级失败后应保持原始版本");
+    assert_eq!(columns(&conn), ["id", "view", "touched"]);
+}
+
+/// AC-T9-1：即使后段失败，原载荷、加密备份和重试仍须完整。
+#[test]
+fn t9_late_migration_failure_preserves_payload_and_retry_search() {
+    let root = Fixture::new();
+    let (clips, thumb, preview) = legacy(&root.0);
+    assert!(Storage::open_with_hook(&root.0, &MASTER, |tx| {
+        if version(tx) == 4 {
+            bail!("T9 注入 v4 提交前失败");
+        }
+        Ok(())
+    })
+    .is_err());
+    let backup = backups(&root.0);
+    assert_eq!(backup.len(), 1);
+    let conn = connect(&backup[0]);
+    assert_eq!(version(&conn), 0);
+    drop(conn);
+    let s = Storage::open(&root.0, &MASTER).unwrap();
+    assert_eq!(version(&s.conn), 4);
+    for clip in &clips {
+        assert_eq!(s.load(&clip.hash()).unwrap().formats, clip.formats);
+    }
+    assert!(!s.read_thumbnail(&thumb).unwrap().is_empty());
+    assert!(!s.read_thumbnail(&preview).unwrap().is_empty());
+    for query in ["旧库", "jiuku", "报告", "baogao"] {
+        assert!(
+            !s.list_page(
+                &ListFilter {
+                    query: Some(query.into()),
+                    ..Default::default()
+                },
+                0,
+                100
+            )
+            .unwrap()
+            .is_empty(),
+            "{query}"
+        );
+    }
+    drop(s);
+    let backup_count = backups(&root.0).len();
+    let s = Storage::open(&root.0, &MASTER).unwrap();
+    assert_eq!(s.list().unwrap().len(), clips.len());
+    assert_eq!(backups(&root.0).len(), backup_count);
+}
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -1236,18 +1301,13 @@ fn save_copy_and_cut_remain_separate_records() {
     );
 }
 
-/// 通过逐版事务提交 v1，主动中断 v2，构造真实的 v1 中间库。
+/// 直接构造 v1 历史库，不依赖升级失败后保留部分提交的旧行为。
 fn stage_v1(root: &Path) {
-    let error = Storage::open_with_hook(root, &MASTER, |tx| {
-        if version(tx) == 2 {
-            bail!("测试停在 v1");
-        }
-        Ok(())
-    })
-    .err()
-    .unwrap();
-    assert!(error.to_string().contains("已回滚"));
-    let conn = connect(&root.join("history.db"));
+    let mut conn = connect(&root.join("history.db"));
+    let tx = conn.transaction().unwrap();
+    migrations::migrate_v1(&tx, &root.join("data/blobs"), &crypto::derive(&MASTER)).unwrap();
+    tx.pragma_update(None, "user_version", 1).unwrap();
+    tx.commit().unwrap();
     assert_eq!(version(&conn), 1);
     assert!(!columns(&conn).contains(&"dedup_key".into()));
 }

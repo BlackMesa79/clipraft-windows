@@ -104,12 +104,13 @@ pub(super) fn upgrade(
     } else {
         None
     };
-    while version < VERSION {
-        let tx = storage
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("数据库升级未开始：无法取得写锁，原数据未改动")?;
-        let result = (|| -> Result<()> {
+    // 整次升级共用一个事务，后段失败时连同前段 DDL、回填和版本号一起回滚。
+    let tx = storage
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("数据库升级未开始：无法取得写锁，原数据未改动")?;
+    let result = (|| -> Result<()> {
+        while version < VERSION {
             match version {
                 0 => {
                     if !has_items {
@@ -127,22 +128,23 @@ pub(super) fn upgrade(
             }
             tx.pragma_update(None, "user_version", version + 1)?;
             before_commit(&tx)?;
-            // 显式 COMMIT，使提交错误也走下面显式回滚和中文错误路径。
-            tx.execute_batch("COMMIT")?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let location = backup
-                .as_ref()
-                .map(|p| format!("备份位于 {}", p.display()))
-                .unwrap_or_else(|| "这是新数据库，没有旧数据需要备份".into());
-            match tx.rollback() {
-                Ok(()) => bail!("数据库升级失败，已回滚，原数据未改动，{location}。原因：{error}"),
-                Err(rollback) => bail!("数据库升级失败，回滚状态无法确认，请保留原库及备份，{location}。原因：{error}；回滚错误：{rollback}"),
-            }
+            version += 1;
         }
-        version += 1;
+        // 显式 COMMIT，使提交错误也走下面显式回滚和中文错误路径。
+        tx.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let location = backup
+            .as_ref()
+            .map(|p| format!("备份位于 {}", p.display()))
+            .unwrap_or_else(|| "这是新数据库，没有旧数据需要备份".into());
+        match tx.rollback() {
+            Ok(()) => bail!("数据库升级失败，已回滚，原数据未改动，{location}。原因：{error}"),
+            Err(rollback) => bail!("数据库升级失败，回滚状态无法确认，请保留原库及备份，{location}。原因：{error}；回滚错误：{rollback}"),
+        }
     }
+    drop(tx);
     if has_items {
         storage.conn.execute_batch(
             "PRAGMA locking_mode=NORMAL; BEGIN; SELECT count(*) FROM sqlite_master; COMMIT;",
@@ -151,7 +153,7 @@ pub(super) fn upgrade(
     Ok(())
 }
 
-fn migrate_v1(tx: &Transaction<'_>, blobs: &Path, key: &[u8; 32]) -> Result<()> {
+pub(super) fn migrate_v1(tx: &Transaction<'_>, blobs: &Path, key: &[u8; 32]) -> Result<()> {
     tx.execute_batch(V1)?;
     let now = unix_millis();
     let rows = {
