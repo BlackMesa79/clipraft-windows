@@ -1,9 +1,11 @@
+mod autostart;
 mod capture_policy;
 mod capture_source;
 mod clipboard;
 mod clipboard_diag;
 mod clipboard_owner;
 mod diag;
+mod file_status;
 pub mod hook;
 mod image_normalize;
 pub mod model;
@@ -48,12 +50,14 @@ async fn list_items(
 ) -> Result<Vec<model::ItemView>, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        shared
+        let mut items = shared
             .storage
             .lock()
             .map_err(|_| "存储不可用")?
             .list_page(&filter, offset, limit)
-            .map_err(|e| format!("历史列表读取失败：{e}"))
+            .map_err(|e| format!("历史列表读取失败：{e}"))?;
+        shared.files.annotate(&mut items);
+        Ok(items)
     })
     .await
     .map_err(|_| "历史列表任务失败")?
@@ -404,6 +408,9 @@ fn frontend_ready(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<Stat
         );
     } else {
         state.main_ready.store(true, Ordering::Release);
+        if state.settings_requested.swap(false, Ordering::AcqRel) {
+            let _ = window.emit("open-settings", ());
+        }
     }
 }
 #[tauri::command]
@@ -615,15 +622,41 @@ pub fn run() {
             if !smoke {
                 let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&show, &quit])?;
-                TrayIconBuilder::new()
-                    .icon(icon())
-                    .tooltip("剪贴板 M1 · 点击显示主窗口")
+                let pause = MenuItem::with_id(
+                    app,
+                    "pause",
+                    if runtime::paused() {
+                        "恢复监听"
+                    } else {
+                        "暂停监听"
+                    },
+                    true,
+                    None::<&str>,
+                )?;
+                app.manage(PauseMenu(pause.clone()));
+                let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show, &pause, &settings, &quit])?;
+                TrayIconBuilder::with_id("main-tray")
+                    .icon(tray_icon(runtime::paused()))
+                    .tooltip(if runtime::paused() {
+                        "剪贴板 M1 · 已暂停监听"
+                    } else {
+                        "剪贴板 M1 · 正在监听"
+                    })
                     .menu(&menu)
                     .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => {
                             let _ = app.state::<Arc<State>>().control.send(Control::Toggle);
+                        }
+                        "pause" => {
+                            let _ = app.state::<Arc<State>>().control.send(Control::TogglePause);
+                        }
+                        "settings" => {
+                            let _ = app
+                                .state::<Arc<State>>()
+                                .control
+                                .send(Control::OpenSettings);
                         }
                         "quit" => app.exit(0),
                         _ => {}
@@ -702,6 +735,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AC-T8-2：比较实际图标像素；不创建托盘或操作真实桌面。
+    #[test]
+    fn t8_paused_tray_icon_is_visibly_distinct_and_same_size() {
+        let active = tray_icon(false);
+        let paused = tray_icon(true);
+        assert_eq!((active.width(), active.height()), (32, 32));
+        assert_eq!((paused.width(), paused.height()), (32, 32));
+        assert_ne!(active.rgba(), paused.rgba());
+        assert_eq!(paused.rgba().len(), 32 * 32 * 4);
+    }
     #[test]
     fn file_detail_reports_current_existence_and_full_paths() {
         let existing = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -756,3 +799,35 @@ mod paste_bench;
 
 #[cfg(test)]
 mod test_support;
+
+struct PauseMenu(tauri::menu::MenuItem<tauri::Wry>);
+fn tray_icon(paused: bool) -> tauri::image::Image<'static> {
+    if !paused {
+        return icon();
+    }
+    let mut rgba = icon().rgba().to_vec();
+    for y in 8..25 {
+        for x in [11, 12, 13, 18, 19, 20] {
+            let i = (y * 32 + x) * 4;
+            rgba[i..i + 4].copy_from_slice(&[220, 120, 20, 255]);
+        }
+    }
+    tauri::image::Image::new_owned(rgba, 32, 32)
+}
+fn update_tray(app: &tauri::AppHandle, paused: bool) {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_icon(Some(tray_icon(paused)));
+        let _ = tray.set_tooltip(Some(if paused {
+            "剪贴板 M1 · 已暂停监听"
+        } else {
+            "剪贴板 M1 · 正在监听"
+        }));
+    }
+    if let Some(menu) = app.try_state::<PauseMenu>() {
+        let _ = menu.0.set_text(if paused {
+            "恢复监听"
+        } else {
+            "暂停监听"
+        });
+    }
+}

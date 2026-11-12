@@ -10,7 +10,7 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 ## 二、当前进度
 
 - **M0 技术验证：已完成并通过用户人工验收**（`90d12ff`）。
-- **M1：T1～T7 已完成、通过用户人工验收并提交。下一步：T8 托盘与系统集成**，之后是 T9 回归测试与人工验收。任务说明见 `docs/M1开发计划.md`。
+- **M1：T1～T8 已完成并通过用户人工验收（T8 大量文件/慢网络路径场景缺少环境，未测）。下一步：T9 回归测试与人工验收**。任务说明见 `docs/M1开发计划.md`。
 - M1 完成后：统一打磨界面，并实现垂直 3D 滚轮快速面板（规格见设计文档第三节）。用户明确要求按这个顺序进行。
 
 | 提交 | 内容 | 人工验收备注 |
@@ -24,15 +24,16 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 | `cc61528` | T6 忽略程序与来源记录 | 通过；密码管理器（用户未安装）与无 owner 分支（无工具）未测 |
 | `18aaac3` | T7 敏感内容识别：规则、三态、到期删除、后端打码 | 通过 5 个重点项，其余细项由自动化覆盖 |
 
-**当前测试基线**：`cargo test -- --test-threads=2` 共 **596 passed / 0 failed / 3 ignored**（3 项 ignored 是需要单独运行的性能或大图测试）。离屏 UI 脚本（先 `npm run build`，再 `node scripts/check-m1-tN-ui.mjs`）：T4 17 项、T5 15 项、T6 8 项、T7 20 项。schema 仍为 **v4**。
+**当前测试基线**：`cargo test -- --test-threads=2` 共 **609 passed / 0 failed / 3 ignored**（3 项 ignored 是需要单独运行的性能或大图测试）。离屏 UI 脚本（先 `npm run build`，再 `node scripts/check-m1-tN-ui.mjs`）：T4 17 项、T5 15 项、T6 8 项、T7 20 项、T8 14 项，T1～T8 合计 113 项。schema 仍为 **v4**。
 
-### T8 要点（下一步）
+### T8 验收结论与 T9 交接
 
-按 `docs/M1开发计划.md` 的 T8 一节执行，并注意以下几点：
-- 设置里已有 `autostart`、`pause_on_start`，但只存储，**还没有执行逻辑**。开机自启有两种做法：写 `HKCU\...\Run`（`windows` crate 已有，可能需要加 `Win32_System_Registry` feature），或使用 `tauri-plugin-autostart`。后者是新依赖，**新增依赖前要先问用户**。
+2026-11-12 用户确认 T8 清单前8项通过；最后1项“大量文件记录或慢网络路径”因缺少环境未测试。T9 按 `docs/M1开发计划.md` 执行，并保留该覆盖缺口：
+- 工作区已接通 `autostart`、`pause_on_start`、托盘控制和文件状态缓存；自启使用已有 windows crate 的 Registry feature，无新依赖。Tester 已通过专项与回归测试，详见 `docs/M1-T8测试与审查报告.md`；人工结果已记录在 `docs/M1人工验收清单.md`。
 - 暂停监听：托盘图标和提示文字要有区别，暂停期间完全不采集。注意与采集序列号的配合：恢复后不要补采暂停期间的内容。
 - 文件记录失效标注：在后台检查并缓存结果，不能卡列表。
 - 托盘菜单：显示/隐藏、暂停/恢复监听、设置、退出。
+- 开发模式自启限制：Run 仅保存当前 exe 路径，不启动 Vite，也不继承 `CLIPBOARD_M0_DATA_DIR`。自启应使用 `npm run tauri build` 生成并放在固定位置的独立程序；当前代码尚未禁止开发版勾选自启。
 - 之后的 T9 交 Tester 做全量回归，并整理 M1 人工验收清单。`docs/M1开发计划.md` 第四节列出的 M0 遗留问题（D-7、钩子健康监测、启动失败模态框等）可以在 T9 前后由用户决定是否处理。
 
 ## 三、必读资料
@@ -43,7 +44,7 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 | `docs/M1开发计划.md` | M1 任务拆分（T1～T9）、依赖关系、M0 遗留问题、统一完成标准 |
 | `docs/M1存储层说明.md` | schema v4、迁移、去重、清理、搜索、分组、来源、敏感三态等存储细节 |
 | `docs/M1人工验收清单.md` | 各任务的人工验收步骤和结果记录 |
-| `docs/M1-T4验证报告.md`、`docs/M1-T7测试与审查报告.md` | T4、T7 的专项验证和审查记录 |
+| `docs/M1-T4验证报告.md`、`docs/M1-T7测试与审查报告.md`、`docs/M1-T8测试与审查报告.md` | T4、T7、T8 的专项验证和审查记录 |
 | `README.md` | 构建运行、模块说明、已知限制、每个任务的规则说明和验证记录（最权威的实现说明） |
 | `docs/M0人工验收清单.md` | M0 验收步骤（含各轮修复的复测项） |
 
@@ -82,17 +83,17 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 
 ## 六、协作方式
 
-- 用户要求：**开发委派给 Coder（codeg assistant_id=2），测试委派给 Tester（assistant_id=3）**，通过 `codeg-mcp` 的 `delegate_to_agent` 调用（传 `assistant_id`，不传 `agent_type`），不要用原生子智能体。主对话负责需求、设计、拆分任务、复核和提交。
-- Coder 和 Tester 的固定规则：**不 commit、不安装软件、不新增依赖（需要时先问）、不写项目以外的位置、不碰 `.test-data\manual`、不接管真实键鼠和桌面剪贴板**（需要剪贴板的测试使用私有窗口站，见 `test_support.rs`）。Tester 只补测试、不改产品代码；发现缺陷时写 `#[ignore = "T? 待修：..."]` 测试，由主对话交给 Coder 修复。
-- Coder 遇到需要用户决定的问题时会在 Codeg 里停下来提问，要及时告诉用户。
+- 用户要求：**开发由主对话负责，只有测试委派给 Tester（assistant_id=3）**，通过 `codeg-mcp` 的 `delegate_to_agent` 调用（传 `assistant_id`，不传 `agent_type`），不要用原生子智能体。主对话负责需求、设计、拆分任务、复核和提交。
+- Tester 的固定规则：**不 commit、不安装软件、不新增依赖（需要时先问）、不写项目以外的位置、不碰 `.test-data\manual`、不接管真实键鼠和桌面剪贴板**（需要剪贴板的测试使用私有窗口站，见 `test_support.rs`）。Tester 只补测试、不改产品代码；发现缺陷时写 `#[ignore = "T? 待修：..."]` 测试，由主对话修复。
+- Tester 遇到需要用户决定的问题时会在 Codeg 里停下来提问，要及时告诉用户。
 - 委派任务时，写清楚背景资料、环境约束、当前测试基线、已有基础、需求或规格、完成标准（日志写到 `.tools/tN-*.log`，并更新 README 和人工验收清单），以及需要返回的内容。子智能体看不到本对话，任务描述必须自包含。
 - 每轮流程：
-  1. Coder 完成开发。
+  1. 主对话完成开发。
   2. 主对话复跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`、`npm run build` 和各离屏脚本，并抽查关键代码。
-  3. 交 Tester 审查补测；发现问题时交回 Coder 修复，修完主对话再复跑一遍。
+  3. 交 Tester 审查补测；发现问题时由主对话修复，修完主对话再复跑一遍。
   4. 用户人工验收。
   5. 主对话在 README 和验收清单中记录结果，然后提交。
-- 用户人工测试期间，不要让 Coder 改代码（开发模式会自动重新编译，打断测试）。
+- 用户人工测试期间，不要改代码（开发模式会自动重新编译，打断测试）。
 - 用户反馈问题时，优先读 `.test-data\manual\diag.log`（最后一个 `session` 之后的部分）来定位，不要靠猜。
 - 用户偏好：先把基本功能做扎实，可以为人工验收准备测试数据或脚本；全程使用简体中文。
 
@@ -127,6 +128,7 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 
 | 模块 | 职责 |
 |---|---|
+| `autostart.rs` / `file_status.rs` | HKCU Run 自启同步；后台文件状态检查和有界缓存（T8） |
 | `lib.rs` | Tauri 启动、命令注册、托盘、`thumb://` 协议（拒绝敏感记录） |
 | `runtime.rs` | 监听窗口与 broker 线程、worker（采集、粘贴、节流清理）、面板控制线程、粘贴代号、`clipboard-expiry` 到期线程、设置即时生效 |
 | `hook.rs` | 低级键盘钩子、纯状态机 `Machine`、修饰键校正、可配置触发键 |
@@ -149,4 +151,4 @@ Windows 剪贴板管理器，目标是集 Ditto（功能全）、CopyQ（分组�
 
 `App.vue`（主窗口和快速面板共用的入口与状态）、`HistoryList.vue`（列表、标记、倒计时）、`ContextMenu.vue`（记录和分组的右键菜单，支持键盘操作）、`GroupSidebar.vue`（顶部分组栏）、`SettingsView.vue`、`PreviewImage.vue`、`history.ts`、`settings.ts`、`style.css`。
 
-离屏 UI 检查脚本：`scripts/check-m1-ui.mjs`、`check-m1-t2`～`t7-ui.mjs`（使用独立 Edge 无头 profile 和合成 IPC 数据，`settings-ui-mock.mjs` 是公共的设置模拟）。
+离屏 UI 检查脚本：`scripts/check-m1-ui.mjs`、`check-m1-t2`～`t8-ui.mjs`（使用独立 Edge 无头 profile 和合成 IPC 数据，`settings-ui-mock.mjs` 是公共的设置模拟）。

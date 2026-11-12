@@ -86,6 +86,11 @@ static BROKER: AtomicU32 = AtomicU32::new(0);
 static LISTENER: AtomicIsize = AtomicIsize::new(0);
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
 static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
+static CAPTURE_GATE: Mutex<()> = Mutex::new(());
+static PAUSED: AtomicBool = AtomicBool::new(false);
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::Acquire)
+}
 static CAPTURE_PENDING: AtomicBool = AtomicBool::new(false);
 use clipboard::LAST_SEQUENCE;
 static LAST_EXTERNAL: AtomicIsize = AtomicIsize::new(0);
@@ -111,6 +116,8 @@ pub enum Job {
 pub enum Control {
     Hook(Action, u64),
     Toggle,
+    OpenSettings,
+    TogglePause,
     Hide,
     Report(String),
     PasteReport(String, u64),
@@ -125,6 +132,8 @@ pub struct Panel {
     pub error: Option<String>,
 }
 pub struct State {
+    pub files: crate::file_status::Cache,
+    pub settings_requested: AtomicBool,
     pub items: Mutex<Vec<ItemView>>,
     pub storage: Mutex<Storage>,
     // 删除、保存与清理统一先锁此上下文，再锁 storage。
@@ -152,7 +161,8 @@ pub fn report(_app: &AppHandle, state: &State, message: &str) {
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
     let storage = state.storage.lock().unwrap();
-    let items = storage.list()?;
+    let mut items = storage.list()?;
+    state.files.annotate(&mut items);
     let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
     *state.items.lock().unwrap() = items;
     hook::READY.store(enabled, Ordering::Release);
@@ -162,6 +172,9 @@ pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
     Ok(())
 }
 fn queue_capture() {
+    if paused() {
+        return;
+    }
     if unsafe { GetClipboardSequenceNumber() } == LAST_SEQUENCE.load(Ordering::Acquire) {
         return;
     }
@@ -427,7 +440,13 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
     let (jobs, rx) = mpsc::sync_channel(32);
     let (control, controls) = mpsc::channel();
     let items = storage.list()?;
+    let files_app = app.clone();
+    PAUSED.store(settings.pause_on_start, Ordering::Release);
     let state = Arc::new(State {
+        files: crate::file_status::Cache::new(move || {
+            let _ = files_app.emit("file-status-changed", ());
+        }),
+        settings_requested: AtomicBool::new(false),
         items: Mutex::new(items),
         storage: Mutex::new(storage),
         capture_context: Mutex::new(None),
@@ -498,6 +517,11 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
             while let Ok(job) = rx.recv() {
                 match job {
                     Job::Capture => {
+                        let gate = CAPTURE_GATE.lock().unwrap();
+                        if paused() {
+                            CAPTURE_PENDING.store(false, Ordering::Release);
+                            continue;
+                        }
                         match clipboard::capture_pending_with_settings(
                             platform::hwnd(LISTENER.load(Ordering::Acquire)),
                             || worker.settings.lock().unwrap().ignored_apps.clone(),
@@ -557,6 +581,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                             }
                             Err(error) => report(&a, &worker, &error.to_string()),
                         }
+                        drop(gate);
                         CAPTURE_PENDING.store(false, Ordering::Release);
                         // 等待期间的变化可能被合并，补排尚未处理的新序列。
                         queue_capture();
@@ -693,6 +718,32 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                             let mut error = shared.error.lock().unwrap();
                             if error.as_deref() == Some(&message) {
                                 *error = None;
+                            }
+                        });
+                    }
+                    Control::TogglePause => {
+                        let _gate = CAPTURE_GATE.lock().unwrap();
+                        let next = !paused();
+                        LAST_SEQUENCE.store(unsafe { GetClipboardSequenceNumber() }, Ordering::Release);
+                        PAUSED.store(next, Ordering::Release);
+                        *s.capture_context.lock().unwrap() = None;
+                        crate::update_tray(&a, next);
+                    }
+                    Control::OpenSettings => {
+                        hook::cancel_panel();
+                        notice.cancel();
+                        hide_panel(&a, &s, &mut panel);
+                        s.settings_requested.store(true, Ordering::Release);
+                        let app = a.clone(); let shared = s.clone();
+                        on_main(&a, move || {
+                            if let Some(window) = app.get_webview_window("main") {
+                                new_paste_intent(); platform::arm_main_menu_guard();
+                                let _ = window.unminimize(); let _ = window.show();
+                                unsafe { let _ = SetForegroundWindow(platform::hwnd(shared.main.load(Ordering::Acquire))); }
+                                if shared.main_ready.load(Ordering::Acquire) {
+                                    shared.settings_requested.store(false, Ordering::Release);
+                                    let _ = window.emit("open-settings", ());
+                                }
                             }
                         });
                     }
@@ -851,6 +902,9 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         .set(control)
         .map_err(|_| anyhow!("控制线程已启动"))?;
     if !smoke {
+        if let Err(error) = crate::autostart::set(settings.autostart) {
+            *state.error.lock().unwrap() = Some(error.to_string());
+        }
         clipboard::initialize()?;
         let (receiver, error) = start_broker(settings.main_hotkey)?;
         *state.startup_error.lock().unwrap() = error;
@@ -889,11 +943,25 @@ fn apply_settings(
             return Err(error);
         }
     }
+    let autostart_changed = !state.smoke && current.autostart != next.autostart;
+    if autostart_changed {
+        if let Err(error) = crate::autostart::set(next.autostart) {
+            if change_main {
+                change_main_hotkey(current.main_hotkey)?;
+            }
+            return Err(error);
+        }
+    }
     // 持有策略锁直到清理完成，避免 worker 用已失效的旧策略再清一次。
     let mut policy = state.retention_policy.lock().unwrap();
     let mut context = state.capture_context.lock().unwrap();
     let mut storage = state.storage.lock().unwrap();
     if let Err(error) = storage.save_settings(&next) {
+        let autostart_rollback = if autostart_changed {
+            crate::autostart::set(current.autostart).err()
+        } else {
+            None
+        };
         if change_main {
             if let Err(rollback) = change_main_hotkey(current.main_hotkey) {
                 let message = format!("设置未保存：{error}；热键恢复失败：{rollback}");
@@ -902,6 +970,9 @@ fn apply_settings(
                 let _ = app.emit("startup-error", &message);
                 return Err(anyhow!(message));
             }
+        }
+        if let Some(rollback) = autostart_rollback {
+            return Err(anyhow!("设置未保存：{error}；自启恢复失败：{rollback}"));
         }
         return Err(anyhow!("设置未保存：{error}"));
     }
@@ -974,6 +1045,20 @@ pub fn stop() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AC-T8-2：暂停入口必须在访问系统序列号和入队前返回。
+    // 不启动 broker/worker，不读取剪贴板，不发送键鼠事件。
+    #[test]
+    fn t8_paused_queue_does_not_set_pending_flag() {
+        let _gate = CAPTURE_GATE.lock().unwrap();
+        let old_paused = PAUSED.swap(true, Ordering::AcqRel);
+        let old_pending = CAPTURE_PENDING.swap(false, Ordering::AcqRel);
+        queue_capture();
+        let pending = CAPTURE_PENDING.load(Ordering::Acquire);
+        CAPTURE_PENDING.store(old_pending, Ordering::Release);
+        PAUSED.store(old_paused, Ordering::Release);
+        assert!(!pending, "暂停期间不得排入采集任务");
+    }
     fn snapshot() -> Vec<ItemView> {
         ["a", "b", "c"]
             .into_iter()
@@ -1331,6 +1416,8 @@ mod settings_tests {
             let mut storage = Storage::open(&self.root, &[72; 32]).unwrap();
             storage.save_settings(&old).unwrap();
             State {
+                files: crate::file_status::Cache::new(|| {}),
+                settings_requested: AtomicBool::new(false),
                 items: Mutex::new(Vec::new()),
                 storage: Mutex::new(storage),
                 capture_context: Mutex::new(None),

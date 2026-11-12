@@ -10,6 +10,7 @@ import ContextMenu from './ContextMenu.vue';
 import GroupSidebar from './GroupSidebar.vue';
 import { kindLabel, type Item, type HistoryFilter, type HistoryKind, type Group, type HistoryView } from './history';
 interface Panel { items: Item[]; selected: number; visible: boolean; error: string | null }
+let fileTimer: ReturnType<typeof setInterval> | undefined;
 const quick = new URLSearchParams(location.search).get('panel') === 'quick';
 const items = ref<Item[]>([]), selected = ref(0), error = ref(''), busy = ref(false);
 const settingsOpen = ref(false), settingsBusy = ref(false), startupError = ref('');
@@ -348,8 +349,10 @@ onMounted(async () => {
   if (quick && panelRoot.value) { panelObserver = new ResizeObserver(resizeQuick); panelObserver.observe(panelRoot.value); }
   try {
     stops.push(await listen<Panel>('panel-state', ({ payload }) => { if (quick) applyPanel(payload); }));
-    stops.push(await listen('main-shown', () => { void loadDetail(); void focusSearch(); }));
+    stops.push(await listen('main-shown', () => { void loadDetail(); void focusSearch(); if (!quick && items.value.some(i => i.kind === 'files')) historyChanged(); }));
     stops.push(await listen('main-hidden', conceal));
+    stops.push(await listen('open-settings', () => { if (!quick) { conceal(); settingsOpen.value = true; contextMenu.value = null; pendingDelete.value = null; } }));
+    stops.push(await listen('file-status-changed', () => { if (!quick) historyChanged(); }));
     stops.push(await listen('history-changed', () => { if (!quick) historyChanged(); }));
     stops.push(await listen<string>('operation-error', ({ payload }) => { if (!quick) error.value = payload; }));
     stops.push(await listen<Settings>('settings-changed', ({ payload }) => { settings.value = payload; }));
@@ -361,13 +364,14 @@ onMounted(async () => {
     await invoke('frontend_ready');
     await focusSearch();
   } catch (e) { error.value = '初始化失败：' + String(e); }
+  if (!quick) fileTimer = setInterval(() => { if (!document.hidden && !settingsOpen.value && items.value.some(i => i.kind === 'files')) historyChanged(); }, 30_000);
   window.addEventListener('keydown', keydown);
   window.addEventListener('focus', loadDetail);
   window.addEventListener('blur', conceal);
   document.addEventListener('visibilitychange', visibilityChanged);
   window.addEventListener('resize', checkLoadMore);
 });
-onUnmounted(() => { conceal(); window.removeEventListener('blur', conceal); document.removeEventListener('visibilitychange', visibilityChanged); clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
+onUnmounted(() => { clearInterval(fileTimer); conceal(); window.removeEventListener('blur', conceal); document.removeEventListener('visibilitychange', visibilityChanged); clearTimeout(searchTimer); panelObserver?.disconnect(); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', loadDetail); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
 </script>
 
 <template>

@@ -108,6 +108,37 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    // AC-T8-2：模拟恢复控制已将暂停期当前序列写入 last。
+    // 验证真实采集策略，不触碰系统剪贴板；不代替控制线程门锁集成测试。
+    #[test]
+    fn t8_resume_sequence_discards_queued_capture_but_accepts_next_copy() {
+        let last = AtomicU32::new(71);
+        let reads = Cell::new(0);
+        let sequence = Cell::new(71);
+        let capture = || {
+            run(
+                &last,
+                || Snapshot {
+                    sequence: sequence.get(),
+                    self_write: false,
+                },
+                |_| {
+                    reads.set(reads.get() + 1);
+                    Ok(Some("new-copy"))
+                },
+                |_| panic!("不应等待"),
+                |_| {},
+            )
+        };
+        assert_eq!(capture().unwrap(), None);
+        assert_eq!(capture().unwrap(), None);
+        assert_eq!(reads.get(), 0, "恢复前排队任务不得补采暂停期内容");
+        sequence.set(72);
+        assert_eq!(capture().unwrap(), Some("new-copy"));
+        assert_eq!(capture().unwrap(), None);
+        assert_eq!(reads.get(), 1);
+    }
+
     fn external(sequence: u32) -> Snapshot {
         Snapshot {
             sequence,

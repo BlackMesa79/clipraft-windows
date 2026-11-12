@@ -84,8 +84,8 @@ onMounted(load);
     <form v-if="draft && options" @submit.prevent="save" novalidate>
       <fieldset :disabled="busy">
         <legend>通用</legend>
-        <label class="check"><input v-model="draft.autostart" type="checkbox">开机自启（T8 生效）</label>
-        <label class="check"><input v-model="draft.pause_on_start" type="checkbox">启动时暂停监听（T8 生效）</label>
+        <label class="check"><input v-model="draft.autostart" type="checkbox">开机自启</label>
+        <label class="check"><input v-model="draft.pause_on_start" type="checkbox">启动时暂停监听（下次启动生效）</label>
       </fieldset>
       <fieldset :disabled="busy">
         <legend>历史</legend>
