@@ -1,8 +1,13 @@
+mod capture;
+mod collection;
 use crate::{
     capture_policy::{self, CaptureError, Snapshot},
     model::{encode_hdrop, Clip, FormatData},
 };
 use anyhow::{anyhow, bail, Result};
+use capture::capture_at;
+#[cfg(test)]
+use collection::{collect_formats_with_budget, remove_redundant_dib, FormatBudget, FormatChoice};
 use std::{
     borrow::Cow,
     sync::{
@@ -15,7 +20,7 @@ use std::{
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
+        Foundation::{HANDLE, HGLOBAL, HWND},
         System::{DataExchange::*, Memory::*},
         UI::Shell::{DragQueryFileW, HDROP},
     },
@@ -70,17 +75,18 @@ pub(crate) struct Captured {
 }
 #[cfg(test)]
 pub fn capture_pending(hwnd: HWND) -> std::result::Result<Option<Captured>, CaptureError> {
-    capture_pending_with_settings(hwnd, Vec::new)
+    capture_pending_with_settings(hwnd, || Ok(Vec::new()))
 }
 pub fn capture_pending_with_settings(
     hwnd: HWND,
-    ignored_apps: impl Fn() -> Vec<String>,
+    ignored_apps: impl Fn() -> std::result::Result<Vec<String>, CaptureError>,
 ) -> std::result::Result<Option<Captured>, CaptureError> {
     capture_policy::run(
         &LAST_SEQUENCE,
         snapshot,
         |sequence| {
-            capture_at(hwnd, sequence, &ignored_apps()).map_err(|error| {
+            let ignored = ignored_apps()?;
+            capture_at(hwnd, sequence, &ignored).map_err(|error| {
                 if let Some(limit) = error.downcast_ref::<CaptureLimit>() {
                     CaptureError::Limit {
                         actual: limit.actual,
@@ -116,7 +122,9 @@ struct OpenGuard;
 impl Drop for OpenGuard {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseClipboard();
+            if let Err(error) = CloseClipboard() {
+                crate::diag::write(format!("clipboard close failed: {error}"));
+            }
         }
     }
 }
@@ -172,7 +180,7 @@ unsafe fn read_raw_limited(
         bail!("剪贴板内存不可读");
     }
     let out = std::slice::from_raw_parts(p as *const u8, size).to_vec();
-    let _ = GlobalUnlock(global);
+    memory::unlock(global);
     diagnostics.read(id, out.len());
     Ok(Some(out))
 }
@@ -197,7 +205,7 @@ pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
         && history.is_none_or(|bytes| {
             bytes
                 .get(..4)
-                .is_some_and(|b| u32::from_le_bytes(b.try_into().unwrap()) != 0)
+                .is_some_and(|bytes| bytes.iter().any(|byte| *byte != 0))
         })
 }
 
@@ -205,103 +213,6 @@ pub fn may_record(excluded: bool, history: Option<&[u8]>) -> bool {
 pub fn capture(hwnd: HWND) -> Result<Option<Clip>> {
     capture_at(hwnd, unsafe { GetClipboardSequenceNumber() }, &[])
         .map(|capture| capture.map(|capture| capture.clip))
-}
-fn capture_at(hwnd: HWND, expected: u32, ignored_apps: &[String]) -> Result<Option<Captured>> {
-    let current = snapshot();
-    if current.self_write {
-        LAST_SEQUENCE.store(current.sequence, Ordering::Release);
-        return Ok(None);
-    }
-    if current.sequence != expected {
-        return Ok(None);
-    }
-    // 采集只尝试打开一次；退避在 worker 进行，写回保留原有短重试。
-    unsafe { OpenClipboard(Some(hwnd)) }.map_err(|_| CaptureError::Busy)?;
-    let _guard = OpenGuard;
-    let mut diagnostics = crate::clipboard_diag::CaptureLog::begin();
-    unsafe {
-        // 打开前仍可能换序列，不能把新内容算作旧轮次采集。
-        let current = snapshot();
-        if current.self_write || current.sequence != expected {
-            return Ok(None);
-        }
-        let formats = offered_formats();
-        let owner = crate::clipboard_owner::clipboard_owner();
-        let source = crate::capture_source::capture(&owner);
-        if crate::capture_source::ignored(source.exe.as_deref(), ignored_apps) {
-            crate::diag::write(format!(
-                "capture sequence={expected} result=skipped reason=ignored_app"
-            ));
-            return Ok(None);
-        }
-        let bitmap_offered = formats.as_ref().is_none_or(|ids| {
-            [2, 8, 17, format_id("PNG"), format_id("image/png")]
-                .iter()
-                .any(|id| ids.contains(id))
-        });
-        let excluded =
-            IsClipboardFormatAvailable(format_id("ExcludeClipboardContentFromMonitorProcessing"))
-                .is_ok();
-        if excluded {
-            return Ok(None);
-        }
-        let history = match read_raw(format_id("CanIncludeInClipboardHistory"), &mut diagnostics) {
-            Ok(history) => history,
-            Err(_) => {
-                eprintln!("剪贴板隐私标记不可读，已跳过记录");
-                return Ok(None);
-            }
-        };
-        if !may_record(excluded, history.as_deref()) {
-            return Ok(None);
-        }
-        if let Some(b) = read_raw(format_id(OWNER_MARKER), &mut diagnostics).unwrap_or_else(|_| {
-            eprintln!("剪贴板所有权标记不可读，已跳过该标记");
-            None
-        }) {
-            if TOKEN.get().is_some_and(|t| b.starts_with(t)) {
-                // 延迟渲染等操作可能推进序列，所有权标记也可确认自写回。
-                SELF_SEQUENCE.store(current.sequence, Ordering::Release);
-                return Ok(None);
-            }
-        }
-        collect_formats_with_budget(
-            |name, budget| read_format_limited(name, budget, &mut diagnostics),
-            MAX_BYTES,
-        )
-        .map(|clip| {
-            clip.map(|clip| Captured {
-                clip,
-                source,
-                sequence: expected,
-                context: crate::owner_flush::CaptureContext {
-                    record_id: None,
-                    formats,
-                    owner,
-                    fingerprint: None,
-                    bitmap_offered,
-                },
-            })
-        })
-    }
-}
-/// 调用方持有剪贴板；读取载荷之前保留完整的已提供格式集合。
-fn offered_formats() -> Option<std::collections::BTreeSet<u32>> {
-    use windows::Win32::Foundation::{GetLastError, SetLastError, ERROR_SUCCESS};
-    let mut formats = std::collections::BTreeSet::new();
-    let mut id = 0;
-    loop {
-        unsafe {
-            SetLastError(ERROR_SUCCESS);
-        }
-        id = unsafe { EnumClipboardFormats(id) };
-        if id == 0 {
-            return (unsafe { GetLastError() } == ERROR_SUCCESS).then_some(formats);
-        }
-        if !formats.insert(id) {
-            return None;
-        }
-    }
 }
 #[cfg(test)]
 unsafe fn read_format(name: &str) -> Result<Option<Vec<u8>>> {
@@ -355,31 +266,6 @@ unsafe fn read_format_limited(
     diagnostics.read(id, bytes.len());
     Ok(Some(bytes))
 }
-/// 无 IO 的格式选择；读取前用 size=0 排除冗余 DIB。
-#[derive(Debug, PartialEq, Eq)]
-enum FormatChoice {
-    Keep,
-    Redundant,
-}
-fn select_format(
-    name: &str,
-    size: usize,
-    total: usize,
-    has_v5: bool,
-    limit: usize,
-) -> std::result::Result<FormatChoice, CaptureLimit> {
-    if name == "CF_DIB" && has_v5 {
-        return Ok(FormatChoice::Redundant);
-    }
-    if size > limit || total.saturating_add(size) > limit {
-        return Err(CaptureLimit {
-            actual: total.saturating_add(size),
-            limit,
-            image: matches!(name, "CF_DIBV5" | "CF_DIB" | "PNG"),
-        });
-    }
-    Ok(FormatChoice::Keep)
-}
 #[cfg(test)]
 fn collect_formats(
     mut read: impl FnMut(&str) -> Result<Option<Vec<u8>>>,
@@ -387,126 +273,9 @@ fn collect_formats(
 ) -> Result<Option<Clip>> {
     collect_formats_with_budget(|name, _| read(name), limit)
 }
-fn collect_formats_with_budget(
-    mut read: impl FnMut(&str, usize) -> Result<Option<Vec<u8>>>,
-    limit: usize,
-) -> Result<Option<Clip>> {
-    let mut clip = Clip::default();
-    let mut total = 0usize;
-    let mut invalid = false;
-    let mut exceeded: Option<CaptureLimit> = None;
-    for (name, _) in SUPPORTED {
-        let has_v5 = clip.get("CF_DIBV5").is_some();
-        if matches!(
-            select_format(name, 0, total, has_v5, limit),
-            Ok(FormatChoice::Redundant)
-        ) {
-            crate::diag::write(format!("capture skip format={name} reason=redundant_dib"));
-            continue;
-        }
-        let bytes = match read(name, limit.saturating_sub(total)) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => continue,
-            Err(e) if e.is::<CaptureLimit>() => {
-                let mut skipped = e.downcast::<CaptureLimit>().unwrap();
-                crate::diag::write(format!(
-                    "capture skip format={name} bytes={} total={total} limit={limit} reason=read_limit",
-                    skipped.actual
-                ));
-                skipped.actual = total.saturating_add(skipped.actual);
-                skipped.limit = limit;
-                if exceeded
-                    .as_ref()
-                    .is_none_or(|old| old.actual < skipped.actual)
-                {
-                    exceeded = Some(skipped);
-                }
-                continue;
-            }
-            Err(_) => {
-                invalid |= name != "Preferred DropEffect";
-                // 只记录固定格式名，不输出内容、路径或底层错误文本。
-                eprintln!("剪贴板格式读取失败，已跳过：{name}");
-                continue;
-            }
-        };
-        if let Err(skipped) = select_format(name, bytes.len(), total, has_v5, limit) {
-            crate::diag::write(format!("capture skip format={name} bytes={} total={total} limit={limit} reason=capture_limit", bytes.len()));
-            if exceeded
-                .as_ref()
-                .is_none_or(|old| old.actual < skipped.actual)
-            {
-                exceeded = Some(skipped);
-            }
-            continue;
-        }
-        if bytes.is_empty() || (name == "Preferred DropEffect" && bytes.len() < 4) {
-            invalid |= name != "Preferred DropEffect";
-            eprintln!("剪贴板格式长度无效，已跳过：{name}");
-            continue;
-        }
-        total += bytes.len();
-        clip.formats.push(FormatData {
-            name: name.into(),
-            bytes: normalize(name, bytes),
-        });
-    }
-    if clip.get("CF_HDROP").is_some()
-        && clip.get("Preferred DropEffect").is_none()
-        && total.saturating_add(4) <= limit
-    {
-        clip.formats.push(FormatData {
-            name: "Preferred DropEffect".into(),
-            bytes: 1u32.to_le_bytes().to_vec(),
-        });
-    }
-    if clip
-        .formats
-        .iter()
-        .all(|f| f.name == "Preferred DropEffect")
-    {
-        if let Some(exceeded) = exceeded {
-            return Err(exceeded.into());
-        }
-        if invalid {
-            return Err(CaptureError::Invalid.into());
-        }
-        return Ok(None);
-    }
-    remove_redundant_dib(&mut clip.formats);
-    Ok(Some(clip))
-}
+mod memory;
+use memory::allocate;
 
-/// 采集规范化发生在哈希之前；不改变旧记录的写回格式集合。
-fn remove_redundant_dib(formats: &mut Vec<FormatData>) {
-    if formats.iter().any(|f| f.name == "CF_DIBV5") {
-        formats.retain(|f| f.name != "CF_DIB");
-    }
-}
-
-struct Allocation(HGLOBAL);
-impl Drop for Allocation {
-    fn drop(&mut self) {
-        if !self.0 .0.is_null() {
-            unsafe {
-                let _ = GlobalFree(Some(self.0));
-            }
-        }
-    }
-}
-fn allocate(bytes: &[u8]) -> Result<Allocation> {
-    unsafe {
-        let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))?;
-        let owned = Allocation(h);
-        let p = GlobalLock(h);
-        if p.is_null() {
-            bail!("剪贴板内存分配失败");
-        }
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
-        let _ = GlobalUnlock(h);
-        Ok(owned)
-    }
-}
 fn write_formats(clip: &Clip, plain: bool) -> Result<Vec<&FormatData>> {
     if plain {
         return clip
@@ -608,7 +377,9 @@ mod system_tests {
             unsafe {
                 if OpenClipboard(None).is_ok() {
                     let _ = EmptyClipboard();
-                    let _ = CloseClipboard();
+                    if let Err(error) = CloseClipboard() {
+                        crate::diag::write(format!("clipboard close failed: {error}"));
+                    }
                 }
             }
         }
@@ -705,13 +476,13 @@ mod system_tests {
         });
         let bytes = text_bytes("合成忽略测试");
         set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
-        let owner = crate::clipboard_owner::clipboard_owner();
+        let owner = crate::clipboard_owner::clipboard_owner(crate::diag::write);
         assert!(owner.is_real());
         let apps = std::cell::RefCell::new(vec![owner.exe.to_uppercase()]);
         LAST_SEQUENCE.store(0, Ordering::Release);
         DATA_REQUESTS.with(|count| count.set(0));
         assert!(
-            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+            capture_pending_with_settings(HWND::default(), || Ok(apps.borrow().clone()))
                 .unwrap()
                 .is_none()
         );
@@ -722,12 +493,12 @@ mod system_tests {
         // 已忽略的序列不补采；移除设置后下一次复制立即恢复，无需重启。
         apps.borrow_mut().clear();
         assert!(
-            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+            capture_pending_with_settings(HWND::default(), || Ok(apps.borrow().clone()))
                 .unwrap()
                 .is_none()
         );
         set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
-        let captured = capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+        let captured = capture_pending_with_settings(HWND::default(), || Ok(apps.borrow().clone()))
             .unwrap()
             .unwrap();
         assert!(DATA_REQUESTS.with(|count| count.get()) > 0);
@@ -738,11 +509,23 @@ mod system_tests {
         set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
         DATA_REQUESTS.with(|count| count.set(0));
         assert!(
-            capture_pending_with_settings(HWND::default(), || apps.borrow().clone())
+            capture_pending_with_settings(HWND::default(), || Ok(apps.borrow().clone()))
                 .unwrap()
                 .is_none()
         );
         assert_eq!(DATA_REQUESTS.with(|count| count.get()), 0);
+        set_formats_with_owner(window.0, &[("CF_UNICODETEXT", &bytes)]);
+        assert!(matches!(
+            capture_pending_with_settings(HWND::default(), || Err(
+                CaptureError::SettingsUnavailable
+            )),
+            Err(CaptureError::SettingsUnavailable)
+        ));
+        assert_eq!(
+            DATA_REQUESTS.with(|count| count.get()),
+            0,
+            "隐私设置不可用时不得读取载荷"
+        );
     }
 
     #[test]
@@ -1543,6 +1326,58 @@ mod write_selection_tests {
 #[cfg(test)]
 mod large_capture_tests {
     use super::*;
+    #[test]
+    fn padding_is_charged_before_normalization_and_limits_use_remaining_budget() {
+        let mut calls = Vec::new();
+        let clip = collect_formats_with_budget(
+            |name, budget| {
+                calls.push((name.to_owned(), budget));
+                Ok(match name {
+                    "CF_UNICODETEXT" => Some(vec![65, 0, 0, 0, 0, 0]),
+                    "HTML Format" => Some(vec![66; 5]),
+                    _ => None,
+                })
+            },
+            10,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(clip.get("CF_UNICODETEXT"), Some([65, 0, 0, 0].as_slice()));
+        assert!(clip.get("HTML Format").is_none());
+        assert!(calls.contains(&("HTML Format".into(), 4)));
+        assert!(calls.contains(&("CF_DIBV5".into(), 4)));
+    }
+
+    #[test]
+    fn largest_limit_wins_and_equal_limits_preserve_first_kind_over_invalid() {
+        for (image_actual, expected_image) in [(20, false), (21, true)] {
+            let error = collect_formats_with_budget(
+                |name, _| match name {
+                    "CF_UNICODETEXT" => Err(CaptureLimit {
+                        actual: 20,
+                        limit: 1,
+                        image: false,
+                    }
+                    .into()),
+                    "HTML Format" => Err(anyhow!("TEST_ONLY")),
+                    "CF_DIBV5" => Err(CaptureLimit {
+                        actual: image_actual,
+                        limit: 2,
+                        image: true,
+                    }
+                    .into()),
+                    _ => Ok(None),
+                },
+                10,
+            )
+            .unwrap_err();
+            let limit = error.downcast::<CaptureLimit>().unwrap();
+            assert_eq!(
+                (limit.actual, limit.limit, limit.image),
+                (image_actual.max(20), 10, expected_image)
+            );
+        }
+    }
     fn choose(entries: &[(&str, usize)], limit: usize) -> Vec<String> {
         let mut total = 0;
         let mut v5 = false;
@@ -1550,7 +1385,12 @@ mod large_capture_tests {
             .iter()
             .filter_map(|&(name, size)| {
                 if !matches!(
-                    select_format(name, size, total, v5, limit),
+                    FormatBudget {
+                        total,
+                        limit,
+                        has_v5: v5
+                    }
+                    .select(name, size),
                     Ok(FormatChoice::Keep)
                 ) {
                     return None;
@@ -1586,7 +1426,13 @@ mod large_capture_tests {
     fn all_oversize_reports_actual_size() {
         let mib = 1024 * 1024;
         assert!(choose(&[("CF_DIBV5", 600 * mib), ("CF_DIB", 550 * mib)], MAX_BYTES).is_empty());
-        let pure_error = select_format("CF_DIBV5", 600 * mib, 0, false, MAX_BYTES).unwrap_err();
+        let pure_error = FormatBudget {
+            total: 0,
+            limit: MAX_BYTES,
+            has_v5: false,
+        }
+        .select("CF_DIBV5", 600 * mib)
+        .unwrap_err();
         assert_eq!(
             pure_error.to_string(),
             "图片过大（约 600MB），超过 512MB 上限，未记录"

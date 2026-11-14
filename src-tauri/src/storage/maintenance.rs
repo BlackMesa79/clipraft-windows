@@ -49,6 +49,8 @@ pub struct ScanReport {
     pub failed_files: Vec<String>,
 }
 
+const VACUUM_DELETE_THRESHOLD: usize = 200;
+
 impl Storage {
     fn blob_referenced(&self, id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
@@ -61,56 +63,12 @@ impl Storage {
     }
 
     pub fn delete(&mut self, ids: &[String]) -> Result<DeleteReport> {
-        let mut report = DeleteReport::default();
-        let mut candidates = BTreeSet::new();
         let tx = self.conn.transaction()?;
-        {
-            // 逐 id 参数绑定，不受 SQLite IN 参数个数限制；重复 id 只计一次。
-            let mut blobs = tx.prepare(
-                "SELECT blob FROM formats WHERE item=?1 AND blob IS NOT NULL
-                UNION SELECT thumbnail FROM items WHERE id=?1 AND thumbnail IS NOT NULL
-                UNION SELECT preview FROM items WHERE id=?1 AND preview IS NOT NULL",
-            )?;
-            let mut formats = tx.prepare("DELETE FROM formats WHERE item=?1")?;
-            let mut items = tx.prepare("DELETE FROM items WHERE id=?1")?;
-            for id in ids {
-                for blob in blobs.query_map([id], |r| r.get::<_, String>(0))? {
-                    candidates.insert(blob?);
-                }
-                formats.execute([id])?;
-                if items.execute([id])? > 0 {
-                    report.deleted_items += 1;
-                    report.deleted_ids.push(id.clone());
-                }
-            }
-        }
+        let (mut report, candidates) = delete_rows(&tx, ids)?;
         tx.commit()?;
-        // 提交后的任何维护错误不能伪装成删除失败；文件遗留由下次启动扫描重试。
-        for blob in candidates {
-            if !model::is_hash(&blob) {
-                continue;
-            }
-            match self.blob_referenced(&blob) {
-                Ok(false) => match fs::remove_file(self.blobs.join(&blob)) {
-                    Ok(()) => report.reclaimed_blobs += 1,
-                    Err(e) if e.kind() == ErrorKind::NotFound => (),
-                    Err(_) => report.failed_blobs.push(blob),
-                },
-                Ok(true) => (),
-                Err(e) => {
-                    report.failed_blobs.push(blob);
-                    report
-                        .maintenance_errors
-                        .push(format!("blob 引用检查失败：{e}"));
-                }
-            }
-        }
-        if report.deleted_items > 200 {
-            match self.vacuum() {
-                Ok(()) => report.vacuumed = true,
-                Err(e) => report.maintenance_errors.push(format!("VACUUM 失败：{e}")),
-            }
-        }
+        // 提交后的维护错误只进入报告；文件遗留由下次启动扫描重试。
+        self.reclaim_deleted(candidates, &mut report);
+        self.vacuum_after_delete(&mut report);
         diag::write(format!(
             "delete items={} blobs={} failed_blobs={} vacuumed={} maintenance_errors={:?}",
             report.deleted_items,
@@ -120,6 +78,46 @@ impl Storage {
             report.maintenance_errors
         ));
         Ok(report)
+    }
+
+    fn reclaim_deleted(&self, candidates: BTreeSet<String>, report: &mut DeleteReport) {
+        for blob in candidates {
+            if !model::is_hash(&blob) {
+                continue;
+            }
+            self.reclaim_deleted_blob(blob, report);
+        }
+    }
+
+    fn reclaim_deleted_blob(&self, blob: String, report: &mut DeleteReport) {
+        match self.blob_referenced(&blob) {
+            Ok(true) => return,
+            Ok(false) => (),
+            Err(error) => {
+                report.failed_blobs.push(blob);
+                report
+                    .maintenance_errors
+                    .push(format!("blob 引用检查失败：{error}"));
+                return;
+            }
+        }
+        match fs::remove_file(self.blobs.join(&blob)) {
+            Ok(()) => report.reclaimed_blobs += 1,
+            Err(error) if error.kind() == ErrorKind::NotFound => (),
+            Err(_) => report.failed_blobs.push(blob),
+        }
+    }
+
+    fn vacuum_after_delete(&self, report: &mut DeleteReport) {
+        if report.deleted_items <= VACUUM_DELETE_THRESHOLD {
+            return;
+        }
+        match self.vacuum() {
+            Ok(()) => report.vacuumed = true,
+            Err(error) => report
+                .maintenance_errors
+                .push(format!("VACUUM 失败：{error}")),
+        }
     }
 
     /// 只遍历直接子级普通文件；不跟随符号链接、不递归、不触碰其他命名。
@@ -222,4 +220,31 @@ impl Storage {
         }
         Ok(false)
     }
+}
+
+fn delete_rows(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[String],
+) -> Result<(DeleteReport, BTreeSet<String>)> {
+    let mut report = DeleteReport::default();
+    let mut candidates = BTreeSet::new();
+    // 逐 id 参数绑定，不受 SQLite IN 参数个数限制；重复 id 只计一次。
+    let mut blobs = tx.prepare(
+        "SELECT blob FROM formats WHERE item=?1 AND blob IS NOT NULL
+        UNION SELECT thumbnail FROM items WHERE id=?1 AND thumbnail IS NOT NULL
+        UNION SELECT preview FROM items WHERE id=?1 AND preview IS NOT NULL",
+    )?;
+    let mut formats = tx.prepare("DELETE FROM formats WHERE item=?1")?;
+    let mut items = tx.prepare("DELETE FROM items WHERE id=?1")?;
+    for id in ids {
+        for blob in blobs.query_map([id], |r| r.get::<_, String>(0))? {
+            candidates.insert(blob?);
+        }
+        formats.execute([id])?;
+        if items.execute([id])? > 0 {
+            report.deleted_items += 1;
+            report.deleted_ids.push(id.clone());
+        }
+    }
+    Ok((report, candidates))
 }

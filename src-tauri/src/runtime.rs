@@ -1,30 +1,46 @@
+mod broker;
+mod broker_messages;
+mod main_window;
+mod maintenance;
+mod panel_controller;
+mod paste_job;
+mod settings_update;
+#[cfg(test)]
+mod test_support;
+mod worker;
+use settings_update::apply_settings;
+
+#[cfg(test)]
+use crate::settings::{self, HotkeyRegistrar};
 use crate::{
     clipboard, diag,
     hook::{self, Action},
     model::ItemView,
     paster, platform,
-    settings::{self, Hotkey, HotkeyRegistrar, Settings},
+    settings::{Hotkey, Settings},
     storage::{RetentionPolicy, Storage},
 };
 use anyhow::{anyhow, Result};
 use serde::Serialize;
+#[cfg(test)]
+use std::thread;
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Sender, SyncSender},
         Arc, Mutex, OnceLock,
     },
-    thread,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager};
-use windows::{
-    core::w,
-    Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
-        System::{DataExchange::*, LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
-        UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
-    },
+#[cfg(test)]
+use tauri::Manager;
+use tauri::{AppHandle, Emitter};
+#[cfg(test)]
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    System::DataExchange::*,
+    UI::WindowsAndMessaging::*,
 };
 
 const SETTINGS_MESSAGE: u32 = WM_APP + 81;
@@ -41,27 +57,6 @@ enum BrokerRequest {
     },
 }
 static HOTKEY_REQUESTS: OnceLock<Sender<BrokerRequest>> = OnceLock::new();
-struct NativeRegistrar(HWND);
-impl HotkeyRegistrar for NativeRegistrar {
-    fn unregister(&mut self) -> Result<()> {
-        unsafe {
-            UnregisterHotKey(Some(self.0), 1).map_err(|e| anyhow!("旧快捷键注销失败：{e}"))?;
-            Ok(())
-        }
-    }
-    fn register(&mut self, hotkey: Hotkey) -> Result<()> {
-        let shortcut = hotkey.shortcut();
-        unsafe {
-            RegisterHotKey(
-                Some(self.0),
-                1,
-                crate::hotkey_check::flags(shortcut),
-                shortcut.key,
-            )?;
-        }
-        Ok(())
-    }
-}
 fn change_main_hotkey(hotkey: Hotkey) -> Result<()> {
     let (reply, wait) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -183,19 +178,47 @@ pub struct State {
     pub thumbnail_ready: AtomicBool,
     pub preview_ready: AtomicBool,
 }
+fn update_error(state: &State, error: Option<String>) -> Result<()> {
+    *state
+        .error
+        .lock()
+        .map_err(|_| anyhow!("错误提示状态不可用"))? = error;
+    Ok(())
+}
+fn clear_matching_error(state: &State, message: &str) -> Result<()> {
+    let mut error = state
+        .error
+        .lock()
+        .map_err(|_| anyhow!("错误提示状态不可用"))?;
+    if error.as_deref() == Some(message) {
+        *error = None;
+    }
+    Ok(())
+}
 pub fn report(_app: &AppHandle, state: &State, message: &str) {
-    *state.error.lock().unwrap() = Some(message.into());
-    let _ = state.control.send(Control::Report(message.into()));
+    if let Err(error) = update_error(state, Some(message.into())) {
+        diag::write(format!(
+            "operation error state unavailable: {error}; {message}"
+        ));
+        return;
+    }
+    crate::app_events::record(
+        "operation report send failed",
+        crate::app_events::send_control(&state.control, Control::Report(message.into())),
+    );
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
-    let storage = state.storage.lock().unwrap();
+    let storage = state.storage.lock().map_err(|_| anyhow!("存储不可用"))?;
     let mut items = storage.list()?;
-    state.files.annotate(&mut items);
+    state.files.annotate(&mut items)?;
     let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
-    *state.items.lock().unwrap() = items;
+    *state.items.lock().map_err(|_| anyhow!("历史快照不可用"))? = items;
     hook::READY.store(enabled, Ordering::Release);
     drop(storage);
-    let _ = state.control.send(Control::HistoryChanged);
+    crate::app_events::record(
+        "history control send failed",
+        crate::app_events::send_control(&state.control, Control::HistoryChanged),
+    );
     app.emit("history-changed", ())?;
     Ok(())
 }
@@ -234,7 +257,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             diag::write(format!("hotkey mask_ok={}", masked.is_ok()));
             diag::modifier_snapshot("toggle", "hotkey_after_mask");
             if let Some(tx) = CONTROL.get() {
-                let _ = tx.send(Control::Toggle);
+                crate::app_events::record(
+                    "broker toggle send failed",
+                    crate::app_events::send_control(tx, Control::Toggle),
+                );
             }
             LRESULT(0)
         }
@@ -251,168 +277,19 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
         _ => DefWindowProcW(h, msg, w, l),
     }
 }
-fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
-    let (requests, pending) = mpsc::channel::<BrokerRequest>();
-    HOTKEY_REQUESTS
-        .set(requests)
-        .map_err(|_| anyhow!("热键控制通道已启动"))?;
-    let (tx, rx) = mpsc::sync_channel(1);
-    thread::Builder::new()
-        .name("clipboard-listener".into())
-        .spawn(move || unsafe {
-            let init = (|| -> Result<(HWND, u32)> {
-                let instance = GetModuleHandleW(None)?;
-                let class = WNDCLASSW {
-                    lpfnWndProc: Some(wndproc),
-                    hInstance: instance.into(),
-                    lpszClassName: w!("ClipboardM0Listener"),
-                    ..Default::default()
-                };
-                if RegisterClassW(&class) == 0 {
-                    return Err(anyhow!("监听窗口类注册失败"));
-                }
-                let h = CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
-                    w!("ClipboardM0Listener"),
-                    w!(""),
-                    WINDOW_STYLE(0),
-                    0,
-                    0,
-                    0,
-                    0,
-                    Some(HWND_MESSAGE),
-                    None,
-                    Some(instance.into()),
-                    None,
-                )?;
-                AddClipboardFormatListener(h)?;
-
-                SetTimer(Some(h), 1, 250, None);
-                LISTENER.store(h.0 as isize, Ordering::Release);
-                let id = GetCurrentThreadId();
-                BROKER.store(id, Ordering::Release);
-                Ok((h, id))
-            })();
-            match init {
-                Ok((h, id)) => {
-                    let mut registrar = NativeRegistrar(h);
-                    let mut registered = None;
-                    let startup_error =
-                        settings::replace_hotkey(&mut registrar, &mut registered, initial)
-                            .err()
-                            .map(|e| format!("{}：{e}。请在设置中更换快捷键。", initial.label()));
-                    if let Some(error) = &startup_error {
-                        diag::write(format!("startup hotkey: {error}"));
-                    }
-                    let _ = tx.send(Ok((id, startup_error)));
-                    let mut probe = crate::hotkey_check::native(h);
-                    let mut msg = MSG::default();
-                    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-                        if msg.message == SETTINGS_MESSAGE {
-                            while let Ok(request) = pending.try_recv() {
-                                match request {
-                                    BrokerRequest::Replace {
-                                        hotkey,
-                                        reply,
-                                        cancelled,
-                                    } => {
-                                        if cancelled.load(Ordering::Acquire) {
-                                            continue;
-                                        }
-                                        let result = settings::replace_hotkey(
-                                            &mut registrar,
-                                            &mut registered,
-                                            hotkey,
-                                        )
-                                        .map_err(|e| e.to_string());
-                                        let _ = reply.send(result);
-                                    }
-                                    BrokerRequest::Check { main, quick, reply } => {
-                                        let result = crate::hotkey_check::check_pair(
-                                            main,
-                                            quick,
-                                            registered,
-                                            |key| probe.check(key),
-                                        )
-                                        .map_err(|e| e.to_string());
-                                        let _ = reply.send(result);
-                                    }
-                                }
-                            }
-                        } else if msg.message == hook::RECORD_MESSAGE {
-                            let session = msg.lParam.0 as u64;
-                            if session != hook::RECORD_SESSION.load(Ordering::Acquire)
-                                || !hook::recording()
-                            {
-                                diag::write(format!(
-                                    "hotkey_record stage=discard session={session}"
-                                ));
-                                continue;
-                            }
-                            diag::write(format!("hotkey_record stage=captured session={session}"));
-                            let masked = paster::mask_shortcut();
-                            if let Some(tx) = CONTROL.get() {
-                                let _ = tx.send(Control::RecordedHotkey(
-                                    if masked.is_ok() {
-                                        msg.wParam.0 as u32
-                                    } else {
-                                        0
-                                    },
-                                    session,
-                                ));
-                                if let Err(error) = masked {
-                                    let _ = tx.send(Control::Report(error.to_string()));
-                                }
-                            }
-                        } else if msg.message == hook::ACTION_MESSAGE {
-                            if let Some(action) = Action::from_raw(msg.wParam.0) {
-                                let generation = msg.lParam.0 as u64;
-                                if generation != paste_generation() {
-                                    continue;
-                                }
-                                diag::write(format!(
-                                    "hotkey_action action={action:?} generation={generation}"
-                                ));
-                                // 掩码必须先于 UI 调度，由 broker 尽快注入。
-                                if action == Action::Open {
-                                    if let Err(error) = paster::mask_shortcut() {
-                                        if let Some(tx) = CONTROL.get() {
-                                            let _ =
-                                                tx.send(Control::Hook(Action::Cancel, generation));
-                                            let _ = tx.send(Control::Report(error.to_string()));
-                                        }
-                                        continue;
-                                    }
-                                }
-                                if let Some(tx) = CONTROL.get() {
-                                    let _ = tx.send(Control::Hook(action, generation));
-                                }
-                            }
-                        } else {
-                            let _ = TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
-                        }
-                    }
-                    drop(probe);
-                    let _ = RemoveClipboardFormatListener(h);
-                    let _ = UnregisterHotKey(Some(h), 1);
-                    let _ = KillTimer(Some(h), 1);
-                    let _ = DestroyWindow(h);
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                }
-            }
-        })?;
-    rx.recv().map_err(|_| anyhow!("剪贴板监听线程启动失败"))?
-}
-fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) {
-    let _ = app.run_on_main_thread(f);
+fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) -> Result<()> {
+    app.run_on_main_thread(f)
+        .map_err(|error| anyhow!("主线程任务派发失败：{error}"))
 }
 // 快照来自已脱敏的内存条目；发布路径不能等待存储锁或执行 SQL。
-fn publish(app: &AppHandle, state: &State, panel: &Panel) {
-    *state.panel.lock().unwrap() = panel.clone();
-    let _ = app.emit_to("quick", "panel-state", panel);
+fn store_panel_snapshot(state: &State, panel: &Panel) -> Result<()> {
+    *state.panel.lock().map_err(|_| anyhow!("面板快照不可用"))? = panel.clone();
+    Ok(())
+}
+fn publish(app: &AppHandle, state: &State, panel: &Panel) -> Result<()> {
+    store_panel_snapshot(state, panel)?;
+    app.emit_to("quick", "panel-state", panel)?;
+    Ok(())
 }
 // 按快照顺序替换为最新的完整展示对象，不新增条目。
 // 选中记录消失时取消，绝不把原下标解释为另一条记录。
@@ -430,15 +307,16 @@ fn refresh_panel_snapshot(
     Some((items, selected))
 }
 
-fn hide_panel(app: &AppHandle, state: &State, panel: &mut Panel) {
+fn hide_panel(app: &AppHandle, state: &State, panel: &mut Panel) -> Result<()> {
     hook::cancel_panel();
     panel.visible = false;
     diag::panel(true, false);
-    publish(app, state, panel);
+    let published = publish(app, state, panel);
     if panel.error.is_none() {
         let quick = state.quick.load(Ordering::Acquire);
-        on_main(app, move || platform::hide(quick));
+        on_main(app, move || platform::hide(quick))?;
     }
+    published
 }
 
 // 控制线程独占提示期限；新提示替换旧期限，重新打开面板会取消期限。
@@ -479,7 +357,7 @@ pub(crate) fn save_capture(
     captured.context.fingerprint =
         crate::owner_flush::fingerprint(&captured.clip, captured.context.bitmap_offered);
     // 同时需要两把锁时一律先 capture_context 后 storage，与删除/自动清理一致。
-    let mut previous = context.lock().unwrap();
+    let mut previous = context.lock().map_err(|_| anyhow!("采集上下文不可用"))?;
     if crate::owner_flush::should_skip(previous.as_ref(), &captured.context) {
         diag::write(format!(
             "capture sequence={} result=skipped reason=owner_flush",
@@ -527,8 +405,11 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
     PAUSED.store(settings.pause_on_start, Ordering::Release);
     let state = Arc::new(State {
         files: crate::file_status::Cache::new(move || {
-            let _ = files_app.emit("file-status-changed", ());
-        }),
+            crate::app_events::record(
+                "file status event failed",
+                files_app.emit("file-status-changed", ()),
+            );
+        })?,
         settings_requested: AtomicBool::new(false),
         items: Mutex::new(items),
         storage: Mutex::new(storage),
@@ -551,570 +432,36 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         thumbnail_ready: AtomicBool::new(false),
         preview_ready: AtomicBool::new(false),
     });
-    let expiry_state = Arc::downgrade(&state);
-    let expiry_app = app.clone();
-    thread::Builder::new()
-        .name("clipboard-expiry".into())
-        .spawn(move || loop {
-            let Some(state) = expiry_state.upgrade() else {
-                break;
-            };
-            let result = (|| -> Result<Duration> {
-                let mut context = state
-                    .capture_context
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("采集上下文不可用"))?;
-                let mut store = state
-                    .storage
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("存储不可用"))?;
-                let now = crate::storage::unix_millis();
-                let delay = crate::sensitive::expiry_delay(now, store.next_expiry()?);
-                if delay == Some(Duration::ZERO) {
-                    let report = store.delete_expired(now)?;
-                    crate::owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
-                    drop(store);
-                    drop(context);
-                    if report.deleted_items > 0 {
-                        refresh(&expiry_app, &state)?;
-                    }
-                    return Ok(Duration::from_millis(100));
-                }
-                Ok(delay
-                    .unwrap_or(Duration::from_secs(1))
-                    .min(Duration::from_secs(1)))
-            })();
-            drop(state);
-            let delay = result.unwrap_or_else(|_| {
-                diag::write("sensitive expiry maintenance failed".into());
-                Duration::from_secs(1)
-            });
-            thread::sleep(delay);
-        })?;
-    let worker = state.clone();
-    let a = app.clone();
-    thread::Builder::new()
-        .name("clipboard-storage-worker".into())
-        .spawn(move || {
-            let mut last_cleanup = Instant::now();
-            let mut inserted_since_cleanup = 0u32;
-            while let Ok(job) = rx.recv() {
-                match job {
-                    Job::Capture => {
-                        let gate = CAPTURE_GATE.lock().unwrap();
-                        if paused() {
-                            CAPTURE_PENDING.store(false, Ordering::Release);
-                            continue;
-                        }
-                        match clipboard::capture_pending_with_settings(
-                            platform::hwnd(LISTENER.load(Ordering::Acquire)),
-                            || worker.settings.lock().unwrap().ignored_apps.clone(),
-                        ) {
-                            Ok(clip) => {
-                                if let Some(clip) = clip {
-                                    let result = save_capture(
-                                        &worker.storage,
-                                        &worker.capture_context,
-                                        clip,
-                                    );
-                                    match result {
-                                        Err(_) => report(&a, &worker, "记录保存失败"),
-                                        Ok(None) => {}
-                                        Ok(Some(inserted)) => {
-                                            if inserted {
-                                                inserted_since_cleanup =
-                                                    inserted_since_cleanup.saturating_add(1);
-                                                if cleanup_due(
-                                                    last_cleanup.elapsed(),
-                                                    inserted_since_cleanup,
-                                                ) {
-                                                    let policy =
-                                                        worker.retention_policy.lock().unwrap();
-                                                    // 与保存/手动删除一致：先上下文锁，后存储锁；禁止反向嵌套。
-                                                    let mut context =
-                                                        worker.capture_context.lock().unwrap();
-                                                    let result =
-                                                        worker.storage.lock().unwrap().cleanup(
-                                                            &policy,
-                                                            crate::storage::unix_millis(),
-                                                        );
-                                                    if let Ok(report) = &result {
-                                                        crate::owner_flush::invalidate_deleted(
-                                                            &mut context,
-                                                            &report.deleted_ids,
-                                                        );
-                                                    }
-                                                    drop(context);
-                                                    if let Err(e) = result {
-                                                        diag::write(format!(
-                                                            "capture cleanup failed: {e}"
-                                                        ));
-                                                    }
-                                                    // 失败也节流，避免故障时每次采集重复做昂贵维护。
-                                                    last_cleanup = Instant::now();
-                                                    inserted_since_cleanup = 0;
-                                                }
-                                            }
-                                            // 保存与清理共用一次刷新；去重更新仍需要重排列表。
-                                            if refresh(&a, &worker).is_err() {
-                                                report(&a, &worker, "历史列表刷新失败");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => report(&a, &worker, &error.to_string()),
-                        }
-                        drop(gate);
-                        CAPTURE_PENDING.store(false, Ordering::Release);
-                        // 等待期间的变化可能被合并，补排尚未处理的新序列。
-                        queue_capture();
-                    }
-                    Job::Paste {
-                        id,
-                        target,
-                        restore,
-                        plain,
-                        generation,
-                    } => {
-                        let intent = paster::PasteIntent::new(&PASTE_GENERATION, generation);
-                        let mut clip = None;
-                        let result = paster::run_paste(&intent, |stage| {
-                            match stage {
-                                paster::PasteStage::Load => {
-                                    let loaded = worker.storage.lock().unwrap().load(&id)?;
-                                    for format in &loaded.formats {
-                                        // 仅输出固定支持格式的名称和大小，不记录内容或记录标识。
-                                        if clipboard::SUPPORTED
-                                            .iter()
-                                            .any(|(name, _)| *name == format.name)
-                                        {
-                                            diag::write(format!(
-                                                "paste generation={generation} format={} bytes={}",
-                                                format.name,
-                                                format.bytes.len()
-                                            ));
-                                        }
-                                    }
-                                    clip = Some(loaded);
-                                }
-                                paster::PasteStage::Write => {
-                                    let clip =
-                                        clip.as_ref().ok_or_else(|| anyhow!("粘贴记录尚未加载"))?;
-                                    validate_sources(clip, |p| std::path::Path::new(p).exists())?;
-                                    clipboard::write(
-                                        platform::hwnd(LISTENER.load(Ordering::Acquire)),
-                                        clip,
-                                        plain,
-                                    )?;
-                                }
-                                paster::PasteStage::Wait => {
-                                    diag::snapshot("before_wait");
-                                    return paster::wait_for_release(&intent);
-                                }
-                                paster::PasteStage::Prepare => {
-                                    paster::prepare(
-                                        target,
-                                        worker.main.load(Ordering::Acquire),
-                                        restore,
-                                    )?;
-                                }
-                                paster::PasteStage::Inject => {
-                                    return paster::inject(target, &intent)
-                                }
-                                paster::PasteStage::Touch => {
-                                    worker.storage.lock().unwrap().touch(&id)?
-                                }
-                            }
-                            Ok(paster::PasteStatus::Complete)
-                        });
-                        diag::snapshot(match &result {
-                            Ok(paster::PasteStatus::Complete) => "paste_complete",
-                            Ok(paster::PasteStatus::Superseded) => "paste_superseded",
-                            Err(_) => "paste_cancelled",
-                        });
-                        let result = result.and_then(|status| {
-                            if status == paster::PasteStatus::Complete {
-                                refresh(&a, &worker)?;
-                            }
-                            Ok(())
-                        });
-                        if let Err(e) = result {
-                            if intent.is_current() {
-                                let _ = worker
-                                    .control
-                                    .send(Control::PasteReport(e.to_string(), generation));
-                            }
-                        }
-                    }
-                }
-            }
-        })?;
-    let s = state.clone();
-    let a = app.clone();
-    thread::Builder::new()
-        .name("panel-controller".into())
-        .spawn(move || {
-            let mut panel = Panel::default();
-            let mut target = 0;
-            let mut notice = NoticeDeadline::default();
-            loop {
-                if notice.expire(Instant::now()) {
-                    panel.error = None;
-                    publish(&a, &s, &panel);
-                    let _ = a.emit("operation-error", "");
-                    if !panel.visible {
-                        let quick = s.quick.load(Ordering::Acquire);
-                        on_main(&a, move || platform::hide(quick));
-                    }
-                }
-                let event = match controls.recv_timeout(notice.remaining(Instant::now())) {
-                    Ok(event) => event,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                match event {
-                    Control::RecordedHotkey(packed, session) => {
-                        if session!=hook::RECORD_SESSION.load(Ordering::Acquire){continue;}
-                        if let Some(main)=a.get_webview_window("main") {
-                            let value=if packed==0 {None}else{Some(format!("custom:{}:{}",(packed>>8)&15,packed&255))};
-                            let _=main.emit("hotkey-recorded",serde_json::json!({"session":session,"hotkey":value}));
-                        }
-                    }
-                    Control::UpdateSettings(settings, reply) => {
-                        let result = apply_settings(&a, &s, settings, panel.visible).map_err(|e| e.to_string());
-                        let _ = reply.send(result);
-                    }
-                    Control::Report(_) | Control::PasteReport(_, _) => {
-                        let (message, generation) = match event {
-                            Control::Report(message) => (message, None),
-                            Control::PasteReport(message, generation) => (message, Some(generation)),
-                            _ => unreachable!(),
-                        };
-                        if generation.is_some_and(|g| g != paste_generation()) { continue; }
-                        *s.error.lock().unwrap() = Some(message.clone());
-                        if !panel.visible {
-                            panel.items.clear();
-                            panel.selected = 0;
-                        }
-                        panel.error = Some(message.clone());
-                        publish(&a, &s, &panel);
-                        let _ = a.emit("operation-error", &message);
-                        notice.reset(Instant::now());
-                        let shared = s.clone();
-                        on_main(&a, move || {
-                            if generation.is_some_and(|g| g != paste_generation()) { return; }
-                            // 错误提示跟随当前前台位置，以 NOACTIVATE 显示，不恢复旧目标焦点。
-                            let _ = platform::show_notice(shared.quick.load(Ordering::Acquire));
-                            let mut error = shared.error.lock().unwrap();
-                            if error.as_deref() == Some(&message) {
-                                *error = None;
-                            }
-                        });
-                    }
-                    Control::TogglePause => {
-                        let _gate = CAPTURE_GATE.lock().unwrap();
-                        let next = !paused();
-                        LAST_SEQUENCE.store(unsafe { GetClipboardSequenceNumber() }, Ordering::Release);
-                        PAUSED.store(next, Ordering::Release);
-                        *s.capture_context.lock().unwrap() = None;
-                        crate::update_tray(&a, next);
-                    }
-                    Control::OpenSettings => {
-                        hook::cancel_panel();
-                        notice.cancel();
-                        hide_panel(&a, &s, &mut panel);
-                        s.settings_requested.store(true, Ordering::Release);
-                        let app = a.clone(); let shared = s.clone();
-                        on_main(&a, move || {
-                            if let Some(window) = app.get_webview_window("main") {
-                                new_paste_intent(); platform::arm_main_menu_guard();
-                                let _ = window.unminimize(); let _ = window.show();
-                                unsafe { let _ = SetForegroundWindow(platform::hwnd(shared.main.load(Ordering::Acquire))); }
-                                if shared.main_ready.load(Ordering::Acquire) {
-                                    shared.settings_requested.store(false, Ordering::Release);
-                                    let _ = window.emit("open-settings", ());
-                                }
-                            }
-                        });
-                    }
-                    Control::Toggle => {
-                        *s.error.lock().unwrap() = None;
-                        notice.cancel();
-                        panel.error = None;
-                        let _ = a.emit("operation-error", "");
-                        hook::cancel_panel();
-                        panel.visible = false;
-                        diag::panel(true, false);
-                        publish(&a, &s, &panel);
-                        let current = platform::foreground();
-                        let external = if platform::valid_external(current) {
-                            current
-                        } else {
-                            LAST_EXTERNAL.load(Ordering::Acquire)
-                        };
-                        let mode = s.settings.lock().unwrap().main_position;
-                        let location = if current == s.main.load(Ordering::Acquire) { None } else { crate::main_position::capture(mode, external) };
-                        let app = a.clone();
-                        let shared = s.clone();
-                        on_main(&a, move || {
-                            platform::hide(shared.quick.load(Ordering::Acquire));
-                            if let Some(window) = app.get_webview_window("main") {
-                                let visible = window.is_visible().unwrap_or(false);
-                                let minimized = window.is_minimized().unwrap_or(false);
-                                let foreground = platform::foreground() == shared.main.load(Ordering::Acquire);
-                                let before = diag::enabled().then(diag::foreground);
-                                let hide = toggle_decision(visible, minimized, foreground) == ToggleDecision::Hide;
-                                if hide {
-                                    let result = window.hide();
-                                    let _ = window.emit("main-hidden", ());
-                                    diag::panel(false, result.is_err());
-                                    diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=hide before={before:?} hide_ok={} after={}", result.is_ok(), diag::foreground()));
-                                } else {
-                                    new_paste_intent();
-                                    *shared.error.lock().unwrap() = None;
-                                    shared.target.store(external, Ordering::Release);
-                                    diag::modifier_snapshot("toggle", "before_show");
-                                    platform::arm_main_menu_guard();
-                                    let restored = window.unminimize();
-                                    if let Some(location) = location {
-                                        if let Err(error) = crate::main_position::apply(&window, location) { diag::write(format!("main_position failed={error}")); }
-                                    }
-                                    let shown = window.show();
-                                    let raised = unsafe { SetWindowPos(platform::hwnd(shared.main.load(Ordering::Acquire)), Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
-                                    // tao 的 set_focus 失败回退会注入 Alt，这里只使用原生激活。
-                                    let foreground_ok = unsafe { SetForegroundWindow(platform::hwnd(shared.main.load(Ordering::Acquire))).as_bool() };
-                                    // 显示过程也受保护，完成后再保留完整的 300ms 时窗。
-                                    platform::arm_main_menu_guard();
-                                    diag::modifier_snapshot("toggle", "after_show");
-                                    if shown.is_ok() { let _ = window.emit("main-shown", ()); }
-                                    diag::panel(false, shown.is_ok());
-                                    diag::write(format!("toggle visible={visible} minimized={minimized} foreground={foreground} decision=show before={before:?} restore_ok={} show_ok={} raise_ok={} set_foreground_ok={foreground_ok} after={}", restored.is_ok(), shown.is_ok(), raised.is_ok(), diag::foreground()));
-                                }
-                            }
-                        });
-                    }
-                    Control::HistoryChanged => {
-                        if panel.visible {
-                            let refreshed = refresh_panel_snapshot(
-                                &panel.items,
-                                &s.items.lock().unwrap(),
-                                panel.items.get(panel.selected).map(|item| item.id.as_str()),
-                            );
-                            if let Some((items, selected)) = refreshed {
-                                panel.items = items;
-                                panel.selected = selected;
-                                publish(&a, &s, &panel);
-                            } else {
-                                // 选中项被移除时取消；后续 Commit 无可粘贴的记录。
-                                panel.items.clear();
-                                panel.selected = 0;
-                                panel.error = None;
-                                notice.cancel();
-                                hide_panel(&a, &s, &mut panel);
-                            }
-                        }
-                    }
-                    Control::Hide => {
-                        let main = s.main.load(Ordering::Acquire);
-                        let _ = a.emit_to("main", "main-hidden", ());
-                        on_main(&a, move || { platform::hide(main); diag::panel(false, false); });
-                    }
-                    Control::Hook(action, generation) => {
-                        // 消息携带产生时的代号，旧 Commit 不能借用新 Open 的代号。
-                        if generation != paste_generation() { continue; }
-                        match action {
-                        Action::Open => {
-                            *s.error.lock().unwrap() = None;
-                            target = platform::foreground();
-                            if !platform::valid_external(target) {
-                                hook::cancel_panel();
-                                diag::panel(true, false);
-                                continue;
-                            }
-                            panel = Panel {
-                                items: s.items.lock().unwrap().iter().take(9).cloned().collect(),
-                                selected: 0,
-                                visible: true,
-                                error: None,
-                            };
-                            if panel.items.is_empty() {
-                                hook::cancel_panel();
-                                panel.visible = false;
-                                diag::panel(true, false);
-                                continue;
-                            }
-                            notice.cancel();
-                            let _ = a.emit("operation-error", "");
-                            panel.selected = hook::initial_selection(panel.items.len());
-                            publish(&a, &s, &panel);
-                            let quick = s.quick.load(Ordering::Acquire);
-                            let app = a.clone();
-                            let shared = s.clone();
-                            on_main(&a, move || {
-                                if generation != paste_generation() { return; }
-                                if platform::show_quick(quick, target).is_err() {
-                                    let _ = shared.control.send(Control::Hook(Action::Cancel, generation));
-                                    report(&app, &shared, "前台窗口已变化，面板已取消");
-                                }
-                            });
-                        }
-                        Action::Next | Action::Previous if panel.visible => {
-                            panel.selected = hook::move_selection(
-                                panel.selected,
-                                panel.items.len(),
-                                action == Action::Next,
-                            );
-                            publish(&a, &s, &panel);
-                        }
-                        Action::Commit | Action::Cancel => {
-                            let paste = action == Action::Commit && panel.visible;
-                            hide_panel(&a, &s, &mut panel);
-                            if paste {
-                                if let Some(item) = panel.items.get(panel.selected) {
-                                    if s.jobs
-                                        .try_send(Job::Paste {
-                                            id: item.id.clone(),
-                                            target,
-                                            restore: false,
-                                            plain: false,
-                                            generation,
-                                        })
-                                        .is_err()
-                                    {
-                                        report(&a, &s, "任务队列繁忙，请重试");
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                        }
-                    },
-                }
-            }
-        })?;
+    maintenance::start(app.clone(), &state)?;
+    worker::start(app.clone(), state.clone(), rx)?;
+    panel_controller::start(app.clone(), state.clone(), controls)?;
     WORK.set(jobs).map_err(|_| anyhow!("工作线程已启动"))?;
     CONTROL
         .set(control)
         .map_err(|_| anyhow!("控制线程已启动"))?;
     if !smoke {
-        if let Err(error) = crate::autostart::set(settings.autostart) {
-            *state.error.lock().unwrap() = Some(error.to_string());
-        }
-        clipboard::initialize()?;
-        let (receiver, error) = start_broker(settings.main_hotkey)?;
-        *state.startup_error.lock().unwrap() = error;
-        hook::start(receiver)?;
+        initialize_native(&state, &settings)?;
     }
     Ok(state)
 }
-// 控制通道串行化设置与面板动作；数据库等待不会占用 broker 或 hook 线程。
-fn apply_settings(
-    app: &AppHandle,
-    state: &State,
-    next: Settings,
-    panel_visible: bool,
-) -> Result<Settings> {
-    if hook::recording() {
-        return Err(anyhow!("请先结束快捷键录制"));
+fn initialize_native(state: &State, settings: &Settings) -> Result<()> {
+    if let Err(error) = crate::autostart::set(settings.autostart) {
+        update_error(state, Some(error.to_string()))?;
     }
-    let next = next.normalized()?;
-    let mut current = state.settings.lock().unwrap();
-    let hotkeys_changed =
-        current.main_hotkey != next.main_hotkey || current.quick_hotkey != next.quick_hotkey;
-    let retry_hotkey = state.startup_error.lock().unwrap().is_some();
-    let reservation = if hotkeys_changed || retry_hotkey {
-        if panel_visible {
-            return Err(anyhow!("快速面板正在激活，请关闭面板后重试"));
-        }
-        Some(hook::reserve_configuration_when_hidden()?)
-    } else {
-        None
-    };
-    let change_main = current.main_hotkey != next.main_hotkey || retry_hotkey;
-    if hotkeys_changed || retry_hotkey {
-        check_hotkeys(next.main_hotkey, next.quick_hotkey)?.validate()?;
-    }
-    if change_main {
-        if let Err(error) = change_main_hotkey(next.main_hotkey) {
-            if error.to_string().contains("旧快捷键恢复失败") {
-                *state.startup_error.lock().unwrap() = Some(error.to_string());
-                diag::write(error.to_string());
-                let _ = app.emit("startup-error", error.to_string());
-            }
-            return Err(error);
-        }
-    }
-    let autostart_changed = !state.smoke && current.autostart != next.autostart;
-    if autostart_changed {
-        if let Err(error) = crate::autostart::set(next.autostart) {
-            if change_main {
-                change_main_hotkey(current.main_hotkey)?;
-            }
-            return Err(error);
-        }
-    }
-    // 持有策略锁直到清理完成，避免 worker 用已失效的旧策略再清一次。
-    let mut policy = state.retention_policy.lock().unwrap();
-    let mut context = state.capture_context.lock().unwrap();
-    let mut storage = state.storage.lock().unwrap();
-    if let Err(error) = storage.save_settings(&next) {
-        let autostart_rollback = if autostart_changed {
-            crate::autostart::set(current.autostart).err()
-        } else {
-            None
-        };
-        if change_main {
-            if let Err(rollback) = change_main_hotkey(current.main_hotkey) {
-                let message = format!("设置未保存：{error}；热键恢复失败：{rollback}");
-                diag::write(message.clone());
-                *state.startup_error.lock().unwrap() = Some(message.clone());
-                let _ = app.emit("startup-error", &message);
-                return Err(anyhow!(message));
-            }
-        }
-        if let Some(rollback) = autostart_rollback {
-            return Err(anyhow!("设置未保存：{error}；自启恢复失败：{rollback}"));
-        }
-        return Err(anyhow!("设置未保存：{error}"));
-    }
-    *policy = next.retention_policy();
-    hook::configure_settings(&next);
-    state
-        .hide_on_blur
-        .store(next.hide_on_blur, Ordering::Release);
-    *current = next.clone();
-    drop(current);
-    drop(reservation);
-    if change_main {
-        *state.startup_error.lock().unwrap() = None;
-        let _ = app.emit("startup-error", "");
-    }
-    match storage.cleanup(&policy, crate::storage::unix_millis()) {
-        Ok(report) => {
-            crate::owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
-            if !report.failed_blobs.is_empty() || !report.maintenance_errors.is_empty() {
-                let message =
-                    "设置已保存，记录已清理，但部分文件回收或数据库整理失败，将在后续维护重试";
-                diag::write(message.into());
-                let _ = app.emit("operation-error", message);
-            }
-        }
-        Err(error) => {
-            let message = format!("设置已保存，但立即清理失败：{error}");
-            diag::write(message.clone());
-            let _ = app.emit("operation-error", message);
-        }
-    }
-    drop(storage);
-    drop(context);
-    drop(policy);
-    let _ = app.emit("settings-changed", &next);
-    if let Err(error) = refresh(app, state) {
-        diag::write(format!("settings refresh failed: {error}"));
-    }
-    Ok(next)
+    clipboard::initialize()?;
+    let (receiver, error) = broker::start(settings.main_hotkey)?;
+    update_startup_error(state, error)?;
+    hook::start(receiver)
 }
+
+fn update_startup_error(state: &State, error: Option<String>) -> Result<()> {
+    *state
+        .startup_error
+        .lock()
+        .map_err(|_| anyhow!("启动错误状态不可用"))? = error;
+    Ok(())
+}
+
 fn validate_sources(clip: &crate::model::Clip, mut exists: impl FnMut(&str) -> bool) -> Result<()> {
     if let Some(data) = clip.get("CF_HDROP") {
         for path in crate::model::decode_hdrop(data).ok_or_else(|| anyhow!("文件记录无效"))? {
@@ -1142,14 +489,58 @@ pub fn stop() {
     unsafe {
         let id = BROKER.load(Ordering::Acquire);
         if id != 0 {
-            let _ = PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0));
+            crate::app_events::record(
+                "broker quit post failed",
+                PostThreadMessageW(id, WM_QUIT, WPARAM(0), LPARAM(0)),
+            );
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{poison, Fixture};
     use super::*;
+
+    #[test]
+    fn snapshot_store_reports_poison_without_mutating_input() {
+        let fixture = Fixture::new("panel-snapshot");
+        let state = fixture.state();
+        let snapshot = Panel {
+            items: vec![ItemView {
+                id: "synthetic".into(),
+                ..Default::default()
+            }],
+            visible: true,
+            ..Default::default()
+        };
+        store_panel_snapshot(&state, &snapshot).unwrap();
+        assert_eq!(state.panel.try_lock().unwrap().items[0].id, "synthetic");
+        poison(&state.panel);
+        assert!(store_panel_snapshot(&state, &Panel::default()).is_err());
+        assert!(snapshot.visible);
+        assert_eq!(snapshot.items[0].id, "synthetic");
+    }
+
+    #[test]
+    fn old_notice_cannot_clear_new_error_and_startup_poison_is_returned() {
+        let fixture = Fixture::new("error-status");
+        let state = fixture.state();
+        update_error(&state, Some("old".into())).unwrap();
+        update_error(&state, Some("new".into())).unwrap();
+        clear_matching_error(&state, "old").unwrap();
+        assert_eq!(state.error.lock().unwrap().as_deref(), Some("new"));
+        clear_matching_error(&state, "new").unwrap();
+        assert!(state.error.lock().unwrap().is_none());
+        poison(&state.error);
+        assert!(update_error(&state, None).is_err());
+        assert!(clear_matching_error(&state, "new").is_err());
+        update_startup_error(&state, Some("synthetic".into())).unwrap();
+        update_startup_error(&state, None).unwrap();
+        assert!(state.startup_error.lock().unwrap().is_none());
+        poison(&state.startup_error);
+        assert!(update_startup_error(&state, None).is_err());
+    }
 
     // AC-T8-2：暂停入口必须在访问系统序列号和入队前返回。
     // 不启动 broker/worker，不读取剪贴板，不发送键鼠事件。
@@ -1466,7 +857,14 @@ mod settings_tests {
         fn new() -> Self {
             let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../.test-data")
-                .join(format!("t3-runtime-settings-{}", std::process::id()));
+                .join(format!(
+                    "t3-runtime-settings-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ));
             assert!(!root.exists(), "不能覆盖已有测试数据：{}", root.display());
             Self {
                 root,
@@ -1542,33 +940,10 @@ mod settings_tests {
             wait.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         fn state(&self) -> State {
-            let old = Settings::default();
-            let mut storage = Storage::open(&self.root, &[72; 32]).unwrap();
-            storage.save_settings(&old).unwrap();
-            State {
-                files: crate::file_status::Cache::new(|| {}),
-                settings_requested: AtomicBool::new(false),
-                items: Mutex::new(Vec::new()),
-                storage: Mutex::new(storage),
-                capture_context: Mutex::new(None),
-                retention_policy: Mutex::new(old.retention_policy()),
-                hide_on_blur: AtomicBool::new(old.hide_on_blur),
-                settings: Mutex::new(old),
-                startup_error: Mutex::new(None),
-                jobs: mpsc::sync_channel(1).0,
-                control: mpsc::channel().0,
-                target: AtomicIsize::new(0),
-                main: AtomicIsize::new(0),
-                quick: AtomicIsize::new(0),
-                ready: AtomicBool::new(false),
-                panel: Mutex::new(Panel::default()),
-                error: Mutex::new(None),
-                smoke: true,
-                main_ready: AtomicBool::new(false),
-                quick_ready: AtomicBool::new(false),
-                thumbnail_ready: AtomicBool::new(false),
-                preview_ready: AtomicBool::new(false),
-            }
+            self.state_at(&self.root)
+        }
+        fn state_at(&self, root: &std::path::Path) -> State {
+            super::test_support::state(root)
         }
     }
     impl Drop for Fixture {
@@ -1580,6 +955,154 @@ mod settings_tests {
             BROKER.store(0, Ordering::Release);
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    use super::test_support::poison;
+
+    #[derive(Clone, Copy, Debug)]
+    enum PoisonTarget {
+        Settings,
+        Startup,
+        Policy,
+        Context,
+        Storage,
+    }
+
+    impl PoisonTarget {
+        fn poison(self, state: &State) {
+            match self {
+                Self::Settings => poison(&state.settings),
+                Self::Startup => poison(&state.startup_error),
+                Self::Policy => poison(&state.retention_policy),
+                Self::Context => poison(&state.capture_context),
+                Self::Storage => poison(&state.storage),
+            }
+        }
+    }
+
+    fn assert_poisoned_updates_rollback(app: &AppHandle, fixture: &Fixture) {
+        for target in [
+            PoisonTarget::Settings,
+            PoisonTarget::Startup,
+            PoisonTarget::Policy,
+            PoisonTarget::Context,
+            PoisonTarget::Storage,
+        ] {
+            let root = fixture.root.join(format!("poison-{target:?}"));
+            let state = fixture.state_at(&root);
+            let old = Settings::default();
+            let before = state.storage.lock().unwrap().test_settings_rows();
+            fixture.fake.lock().unwrap().calls.clear();
+            target.poison(&state);
+            let next = Settings {
+                main_hotkey: Hotkey::CtrlAltV,
+                quick_visible_count: 9,
+                ..old.clone()
+            };
+            assert!(
+                apply_settings(app, &state, next, false).is_err(),
+                "{target:?}"
+            );
+            let calls = match target {
+                PoisonTarget::Settings | PoisonTarget::Startup => vec![],
+                PoisonTarget::Policy | PoisonTarget::Context | PoisonTarget::Storage => {
+                    vec![None, Some(Hotkey::CtrlAltV), None, Some(Hotkey::AltV)]
+                }
+            };
+            assert_eq!(fixture.fake.lock().unwrap().calls, calls, "{target:?}");
+            assert_eq!(fixture.fake.lock().unwrap().current, Some(Hotkey::AltV));
+            if !state.settings.is_poisoned() {
+                assert_eq!(*state.settings.try_lock().unwrap(), old);
+            }
+            if !state.retention_policy.is_poisoned() {
+                assert_eq!(
+                    *state.retention_policy.try_lock().unwrap(),
+                    old.retention_policy()
+                );
+            }
+            if !state.capture_context.is_poisoned() {
+                assert!(state.capture_context.try_lock().unwrap().is_none());
+            }
+            if !state.startup_error.is_poisoned() {
+                assert!(state.startup_error.try_lock().unwrap().is_none());
+            }
+            assert!(
+                hook::reserve_configuration().is_ok(),
+                "错误路径必须释放配置门"
+            );
+            drop(state);
+            assert_eq!(
+                Storage::open(&root, &[72; 32])
+                    .unwrap()
+                    .test_settings_rows(),
+                before
+            );
+        }
+    }
+
+    fn assert_failed_rollback_is_reported(app: &AppHandle, fixture: &Fixture) {
+        let root = fixture.root.join("poison-policy-rollback-failure");
+        let state = fixture.state_at(&root);
+        poison(&state.retention_policy);
+        fixture.fake.lock().unwrap().fail = vec![Hotkey::AltV];
+        let next = Settings {
+            main_hotkey: Hotkey::CtrlAltV,
+            ..Settings::default()
+        };
+        let error = apply_settings(app, &state, next, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("保留策略不可用"));
+        assert!(error.contains("热键恢复失败"));
+        assert_eq!(
+            state.startup_error.lock().unwrap().as_deref(),
+            Some(error.as_str())
+        );
+        assert_eq!(*state.settings.lock().unwrap(), Settings::default());
+        assert_eq!(
+            state.storage.lock().unwrap().load_settings().unwrap(),
+            Settings::default()
+        );
+        assert!(hook::reserve_configuration().is_ok());
+        let mut registrar = fixture.fake.lock().unwrap();
+        registrar.fail.clear();
+        registrar.current = Some(Hotkey::AltV);
+        registrar.calls.clear();
+    }
+
+    fn assert_successful_update_commits_and_clears_startup_error(
+        app: &AppHandle,
+        fixture: &Fixture,
+    ) {
+        let root = fixture.root.join("successful-settings-update");
+        let state = fixture.state_at(&root);
+        *state.startup_error.lock().unwrap() = Some("synthetic startup failure".into());
+        let next = Settings {
+            main_hotkey: Hotkey::CtrlAltV,
+            max_items: 50,
+            hide_on_blur: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            apply_settings(app, &state, next.clone(), false).unwrap(),
+            next
+        );
+        assert_eq!(*state.settings.try_lock().unwrap(), next);
+        assert_eq!(
+            state.storage.try_lock().unwrap().load_settings().unwrap(),
+            next
+        );
+        assert_eq!(
+            *state.retention_policy.try_lock().unwrap(),
+            next.retention_policy()
+        );
+        assert!(state.hide_on_blur.load(Ordering::Acquire));
+        assert!(state.startup_error.try_lock().unwrap().is_none());
+        assert!(state.capture_context.try_lock().is_ok());
+        assert!(hook::reserve_configuration().is_ok());
+        assert_eq!(fixture.fake.lock().unwrap().current, Some(Hotkey::CtrlAltV));
+        apply_settings(app, &state, Settings::default(), false).unwrap();
+        assert_eq!(fixture.fake.lock().unwrap().current, Some(Hotkey::AltV));
     }
 
     // T3-2/3：调用真实 apply_settings 与 change_main_hotkey；仅替换系统注册结果。
@@ -1701,6 +1224,10 @@ mod settings_tests {
         .contains("设置未保存"));
         assert!(fixture.fake.lock().unwrap().calls.is_empty());
         assert_unchanged();
+        assert_poisoned_updates_rollback(app.handle(), &fixture);
+        assert_failed_rollback_is_reported(app.handle(), &fixture);
+        assert_successful_update_commits_and_clears_startup_error(app.handle(), &fixture);
+        panel_controller::tests::check_failures(app.handle());
         // AC-6/7：复用本进程唯一的 Tauri 测试应用；不新建窗口或启动监听。
         // 持有存储及采集上下文时，真实 publish / panel_state 仍须完成。
         let fake = "sk-TESTONLY7777777777777777abcd";
@@ -1735,8 +1262,8 @@ mod settings_tests {
         let worker_state = shared.clone();
         let (finished, result) = mpsc::sync_channel(1);
         let publisher = thread::spawn(move || {
-            publish(&handle, &worker_state, &panel);
-            let payload = crate::panel_state(handle.state::<Arc<State>>());
+            publish(&handle, &worker_state, &panel).unwrap();
+            let payload = crate::panel_state(handle.state::<Arc<State>>()).unwrap();
             finished
                 .send(serde_json::to_value(payload).unwrap())
                 .unwrap();
@@ -1749,6 +1276,33 @@ mod settings_tests {
         let payload = response.expect("快速面板发布或读取不应等待存储/采集锁");
         assert_eq!(payload, expected);
         assert!(!payload.to_string().contains(fake));
+        assert!(crate::get_settings(app.state::<Arc<State>>()).is_ok());
+        assert!(crate::startup_error(app.state::<Arc<State>>()).is_ok());
+        *shared.error.lock().unwrap() = Some("入口测试错误".into());
+        assert_eq!(
+            crate::last_error(app.state::<Arc<State>>())
+                .unwrap()
+                .as_deref(),
+            Some("入口测试错误")
+        );
+        assert_eq!(crate::last_error(app.state::<Arc<State>>()).unwrap(), None);
+        super::test_support::poison(&shared.settings);
+        super::test_support::poison(&shared.startup_error);
+        super::test_support::poison(&shared.panel);
+        super::test_support::poison(&shared.error);
+        assert_eq!(
+            crate::get_settings(app.state::<Arc<State>>()).unwrap_err(),
+            "设置不可用"
+        );
+        assert_eq!(
+            crate::startup_error(app.state::<Arc<State>>()).unwrap_err(),
+            "启动错误状态不可用"
+        );
+        assert!(crate::panel_state(app.state::<Arc<State>>()).is_err());
+        assert_eq!(
+            crate::last_error(app.state::<Arc<State>>()).unwrap_err(),
+            "错误状态不可用"
+        );
         drop(app);
         drop(shared);
         assert_eq!(

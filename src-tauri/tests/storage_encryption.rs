@@ -350,15 +350,15 @@ fn file_record_metadata_and_placeholder_are_persisted() {
 #[test]
 fn blob_crypto_nonce_key_and_aad_discipline() {
     let master = [3u8; 32];
-    let key = crypto::derive(&master);
+    let key = crypto::derive(&master).unwrap();
     assert_eq!(
         key.as_slice(),
-        crypto::derive(&master).as_slice(),
+        crypto::derive(&master).unwrap().as_slice(),
         "派生结果应可复现"
     );
     assert_ne!(key.as_slice(), master.as_slice(), "派生密钥不应等于主密钥");
     assert_ne!(
-        crypto::derive(&[4u8; 32]).as_slice(),
+        crypto::derive(&[4u8; 32]).unwrap().as_slice(),
         key.as_slice(),
         "不同主密钥应派生不同密钥"
     );
@@ -381,7 +381,7 @@ fn blob_crypto_nonce_key_and_aad_discipline() {
     // AAD 绑定对象名。
     assert!(crypto::decrypt(&key, "other-id", &c).is_err());
     // 换密钥。
-    assert!(crypto::decrypt(&crypto::derive(&[4u8; 32]), "object-id", &c).is_err());
+    assert!(crypto::decrypt(&crypto::derive(&[4u8; 32]).unwrap(), "object-id", &c).is_err());
     // 截断、错误魔数、空输入。
     assert!(crypto::decrypt(&key, "object-id", &c[..43]).is_err());
     let mut wrong_magic = c.clone();

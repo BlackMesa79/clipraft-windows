@@ -6,13 +6,13 @@ import HistoryList from './HistoryList.vue';
 import UiIcon from './UiIcon.vue';
 import type { Item } from './history';
 import type { PanelState } from './panel';
-import { applyTheme, shortcutLabel, type Settings, type SettingOptions } from './settings';
+import { applyTheme, shortcutLabel, shortcutModifiersLabel, type Settings, type SettingOptions } from './settings';
 import './styles/quick.css';
 
 const items = ref<Item[]>([]), selected = ref(0), error = ref('');
 const settings = ref<Settings>(), settingOptions = ref<SettingOptions>();
 watch(settings, applyTheme);
-const quickKey = computed(() => ({hold_label:shortcutLabel(settings.value?.quick_hotkey,true),trigger:shortcutLabel(settings.value?.quick_hotkey).split(' + ').at(-1)??''}));
+const quickKey = computed(() => ({hold_label:shortcutModifiersLabel(settings.value?.quick_hotkey),trigger:shortcutLabel(settings.value?.quick_hotkey).split(' + ').at(-1)??''}));
 const panelVisible = ref(false);
 const noticeOnly = computed(() => !panelVisible.value && !!error.value);
 const panelRoot = ref<HTMLElement | null>(null);

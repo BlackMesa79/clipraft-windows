@@ -101,8 +101,6 @@ try {
   const checks = [];
   const ready = () => until(() => evaluate('window.ready === true'), '前端未就绪');
   const count = n => until(() => evaluate(`document.querySelectorAll('.item').length === ${n}`), '条目数量不匹配 ' + n);
-  const scroll = () => evaluate(`(() => {const list=document.querySelector('.list');list.scrollTop=list.scrollHeight;list.dispatchEvent(new Event('scroll'));})()`);
-  const text = () => evaluate(`document.querySelector('.text-detail')?.textContent`);
   await send('Page.navigate', {url:origin}); await ready(); await count(100);
   const press = key => evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:${JSON.stringify(key)},bubbles:true,cancelable:true}))`);
   const open = async () => { await evaluate(`document.querySelector('.settings-toggle').click()`); await until(()=>evaluate(`!!document.querySelector('.settings-view form')`),'设置页未加载'); };

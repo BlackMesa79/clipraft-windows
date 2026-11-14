@@ -1,4 +1,6 @@
 //! 采集阶段去除 HGLOBAL 尾部填充；解析不确定时原样保留。
+mod dib;
+use dib::DibPixels;
 pub fn normalize(name: &str, bytes: &mut Vec<u8>) {
     let length = match name {
         "PNG" => png_length(bytes),
@@ -8,16 +10,6 @@ pub fn normalize(name: &str, bytes: &mut Vec<u8>) {
     if let Some(length) = length {
         bytes.truncate(length);
     }
-}
-fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
-    ))
-}
-fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-    ))
 }
 fn png_length(bytes: &[u8]) -> Option<usize> {
     if bytes.get(..8)? != b"\x89PNG\r\n\x1a\n" {
@@ -46,152 +38,13 @@ fn png_length(bytes: &[u8]) -> Option<usize> {
         offset = end;
     }
 }
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DibPixels {
-    pub offset: usize,
-    pub stride: usize,
-    pub rows: usize,
-    pub row_bytes: usize,
-}
-
 fn dib_length(bytes: &[u8]) -> Option<usize> {
-    parse_dib(bytes, false).map(|(length, _)| length)
+    dib::length(bytes)
 }
 
-/// 与规范化复用头部、掩码、调色板及 ICC 校验；仅预测支持 24 位位域。
+/// 预测布局允许 24 位位域，仍复用头部、掩码、调色板及 ICC 校验。
 pub(crate) fn dib_pixels(bytes: &[u8]) -> Option<DibPixels> {
-    parse_dib(bytes, true)?.1
-}
-
-fn parse_dib(bytes: &[u8], predict: bool) -> Option<(usize, Option<DibPixels>)> {
-    let header = u32_at(bytes, 0)? as usize;
-    if !matches!(header, 12 | 40 | 52 | 56 | 108 | 124) || header > bytes.len() {
-        return None;
-    }
-    let (width, height, depth, compression, declared, colors, masks) = if header == 12 {
-        let width = u16_at(bytes, 4)? as usize;
-        let height = u16_at(bytes, 6)? as usize;
-        let depth = u16_at(bytes, 10)? as usize;
-        if u16_at(bytes, 8)? != 1 || !matches!(depth, 1 | 4 | 8 | 24) {
-            return None;
-        }
-        (
-            width,
-            height,
-            depth,
-            0,
-            0,
-            if depth <= 8 { 1usize << depth } else { 0 },
-            0,
-        )
-    } else {
-        let width = u32_at(bytes, 4)? as i32;
-        let height = u32_at(bytes, 8)? as i32;
-        let depth = u16_at(bytes, 14)? as usize;
-        let compression = u32_at(bytes, 16)?;
-        let declared = u32_at(bytes, 20)? as usize;
-        let used = u32_at(bytes, 32)? as usize;
-        if width <= 0 || height == 0 || height == i32::MIN || u16_at(bytes, 12)? != 1 {
-            return None;
-        }
-        let valid = match compression {
-            0 => matches!(depth, 1 | 4 | 8 | 16 | 24 | 32),
-            1 => depth == 8 && height > 0 && declared > 0,
-            2 => depth == 4 && height > 0 && declared > 0,
-            3 => matches!(depth, 16 | 32) || (predict && depth == 24),
-            6 => matches!(depth, 16 | 32),
-            4 | 5 => depth == 0 && height > 0 && declared > 0,
-            _ => false,
-        };
-        if !valid || (depth > 0 && depth <= 8 && used > 1usize << depth) {
-            return None;
-        }
-        let masks = if compression == 3 {
-            3
-        } else if compression == 6 {
-            4
-        } else {
-            0
-        };
-        if masks > 0 {
-            if header != 40 && header < 40 + masks * 4 {
-                return None;
-            }
-            let mut seen = 0u32;
-            for i in 0..masks {
-                let mask = u32_at(bytes, 40 + i * 4)?;
-                let shifted = mask.checked_shr(mask.trailing_zeros()).unwrap_or(0);
-                if mask == 0
-                    || mask & seen != 0
-                    || (depth < 32 && mask >> depth != 0)
-                    || shifted & shifted.wrapping_add(1) != 0
-                {
-                    return None;
-                }
-                seen |= mask;
-            }
-        }
-        let colors = if used != 0 {
-            used
-        } else if depth > 0 && depth <= 8 {
-            1usize << depth
-        } else {
-            0
-        };
-        (
-            width as usize,
-            height.unsigned_abs() as usize,
-            depth,
-            compression,
-            declared,
-            colors,
-            if header == 40 { masks * 4 } else { 0 },
-        )
-    };
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let offset = header
-        .checked_add(masks)?
-        .checked_add(colors.checked_mul(if header == 12 { 3 } else { 4 })?)?;
-    let mut pixels = None;
-    let payload = if matches!(compression, 0 | 3 | 6) {
-        let stride = width
-            .checked_mul(depth)?
-            .checked_add(31)?
-            .checked_div(32)?
-            .checked_mul(4)?;
-        let expected = stride.checked_mul(height)?;
-        if declared != 0 && declared < expected {
-            return None;
-        }
-        if matches!(compression, 0 | 3) && matches!(depth, 24 | 32) {
-            pixels = Some(DibPixels {
-                offset,
-                stride,
-                rows: height,
-                row_bytes: width.checked_mul(depth / 8)?,
-            });
-        }
-        // 非零 sizeImage 可能包含调用者声明的有效数据，保守保留。
-        declared.max(expected)
-    } else {
-        declared
-    };
-    let mut end = offset.checked_add(payload)?;
-    if header == 124 {
-        let profile = u32_at(bytes, 112)? as usize;
-        let size = u32_at(bytes, 116)? as usize;
-        let color_space = u32_at(bytes, 56)?;
-        if profile != 0 || size != 0 || matches!(color_space, 0x4c494e4b | 0x4d424544) {
-            // 剪贴板 packed DIB 的 ICC 数据位于像素之后，不能当成尾部填充丢弃。
-            if profile < end || size == 0 {
-                return None;
-            }
-            end = profile.checked_add(size)?;
-        }
-    }
-    (end <= bytes.len()).then_some((end, pixels))
+    dib::pixels(bytes)
 }
 
 #[cfg(test)]
@@ -381,6 +234,40 @@ mod tests {
         let mut top_down = dib(124, 32, 0, 0, 0);
         top_down[8..12].copy_from_slice(&(-2i32).to_le_bytes());
         equal_after_padding("CF_DIBV5", top_down);
+    }
+    #[test]
+    fn bitfields_24_are_prediction_only_and_still_validate_masks_and_payload() {
+        let bytes = dib(40, 24, 3, 0, 0);
+        preserved("CF_DIB", &bytes, "24 位位域不能扩大规范化接受范围");
+        let layout = dib_pixels(&bytes).expect("预测应接受 24 位位域");
+        assert_eq!(
+            (layout.offset, layout.stride, layout.rows, layout.row_bytes),
+            (52, 12, 2, 9)
+        );
+        assert!(dib_pixels(&bytes[..bytes.len() - 1]).is_none());
+        for mask in [0u32, 0x00ff_00ff, 0xff00_0000] {
+            let mut invalid = bytes.clone();
+            invalid[40..44].copy_from_slice(&mask.to_le_bytes());
+            assert!(dib_pixels(&invalid).is_none(), "mask={mask:#x}");
+        }
+    }
+    #[test]
+    fn prediction_layout_excludes_declared_tail_and_icc_but_validates_both() {
+        let mut bytes = dib(124, 32, 3, 0, 32);
+        let profile = bytes.len();
+        bytes[112..116].copy_from_slice(&(profile as u32).to_le_bytes());
+        bytes[116..120].copy_from_slice(&4u32.to_le_bytes());
+        bytes.extend([1, 2, 3, 4]);
+        equal_after_padding("CF_DIBV5", bytes.clone());
+        let layout = dib_pixels(&bytes).expect("合法的尾部和 ICC 应保留");
+        assert_eq!(
+            (layout.offset, layout.stride, layout.rows, layout.row_bytes),
+            (124, 12, 2, 12)
+        );
+        assert!(dib_pixels(&bytes[..bytes.len() - 1]).is_none());
+        bytes[112..116].copy_from_slice(&((profile - 1) as u32).to_le_bytes());
+        assert!(dib_pixels(&bytes).is_none());
+        preserved("CF_DIBV5", &bytes, "ICC 不得侵入声明载荷");
     }
     #[test]
     fn core_header_and_v5_profile_are_preserved() {

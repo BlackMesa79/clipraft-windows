@@ -99,7 +99,7 @@ impl Clip {
         let cut = self
             .get("Preferred DropEffect")
             .and_then(|bytes| bytes.get(..4))
-            .is_some_and(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) & 2 != 0);
+            .is_some_and(|bytes| bytes[0] & 2 != 0);
         // HDROP 路径不能包含 NUL，以它分隔集合成员，避免路径拼接歧义。
         Some(digest(
             format!("files:{}:{}", u8::from(cut), paths.join("\0")).as_bytes(),

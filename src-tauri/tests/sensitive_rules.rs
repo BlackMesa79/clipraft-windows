@@ -307,3 +307,50 @@ fn non_jwt_candidates_do_not_hide_following_tokens() {
         assert_eq!(hits[0].range, prefix.len()..sample.len());
     }
 }
+
+#[test]
+fn invalid_long_prefix_never_falls_back_to_generic_sk() {
+    for prefix in ["sk-proj-", "sk-ant-"] {
+        for length in 14..20 {
+            let invalid = format!("{prefix}{}", "T".repeat(length));
+            let text = format!("{invalid} {FAKE}");
+            let hits = detect(&text, false);
+            assert_eq!(hits.len(), 1, "{prefix}/{length}");
+            assert_eq!(hits[0].rule, "sk_token");
+            assert_eq!(hits[0].range, invalid.len() + 1..text.len());
+        }
+    }
+}
+
+#[test]
+fn pem_wins_over_embedded_tokens_and_entropy_only_adds_disjoint_hits() {
+    let entropy = "aB3!cD4@eF5#gH6$jK7%Lm8&";
+    let pem = format!("-----BEGIN PRIVATE KEY-----\n{FAKE}\n{entropy}\n-----END PRIVATE KEY-----");
+    let text = format!("{entropy} {pem} {FAKE}");
+    let hits = detect(&text, true);
+    assert_eq!(
+        hits.iter().map(|hit| hit.rule.as_str()).collect::<Vec<_>>(),
+        ["high_entropy", "pem_private_key", "sk_token"]
+    );
+    assert_eq!(
+        hits[1].range,
+        entropy.len() + 1..entropy.len() + 1 + pem.len()
+    );
+    assert!(hits
+        .windows(2)
+        .all(|pair| pair[0].range.end <= pair[1].range.start));
+}
+
+#[test]
+fn pem_footer_beyond_multibyte_scan_boundary_is_not_consumed() {
+    let header = "-----BEGIN PRIVATE KEY-----\n";
+    let text = format!(
+        "{header}{}中\n-----END PRIVATE KEY-----",
+        " ".repeat(SCAN_LIMIT - header.len() - 1)
+    );
+    let hits = detect(&text, true);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].rule, "pem_private_key");
+    assert_eq!(hits[0].range, 0..SCAN_LIMIT - 1);
+    assert!(text.is_char_boundary(hits[0].range.end));
+}

@@ -72,7 +72,7 @@ pub fn clipboard_update() {
         return;
     }
     let sequence = unsafe { GetClipboardSequenceNumber() };
-    let owner = clipboard_owner();
+    let owner = clipboard_owner(crate::diag::write);
     diag::write(format!(
         "clipboard_update sequence={sequence} owner_exe={}",
         log_name(&owner.exe)
@@ -91,7 +91,7 @@ impl CaptureLog {
             return Self::default();
         }
         let sequence = unsafe { GetClipboardSequenceNumber() };
-        let owner = clipboard_owner();
+        let owner = clipboard_owner(crate::diag::write);
         let mut formats = Vec::new();
         let mut id = 0;
         loop {

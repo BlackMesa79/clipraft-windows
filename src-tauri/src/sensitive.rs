@@ -1,4 +1,7 @@
 //! 有界的本地敏感规则；不校验凭据有效性，不记录载荷。
+mod rules;
+#[cfg(test)]
+use rules::decode64;
 use serde::{Deserialize, Serialize};
 use std::{ops::Range, time::Duration};
 pub const SCAN_LIMIT: usize = 64 * 1024;
@@ -6,53 +9,6 @@ pub const SCAN_LIMIT: usize = 64 * 1024;
 pub struct Hit {
     pub rule: String,
     pub range: Range<usize>,
-}
-fn word(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '_' | '-')
-}
-fn boundary(text: &str, start: usize, end: usize) -> bool {
-    !text[..start].chars().next_back().is_some_and(word)
-        && !text[end..].chars().next().is_some_and(word)
-}
-fn b64(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')
-}
-fn decode64(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    for b in s.bytes() {
-        let v = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            _ => return None,
-        };
-        acc = (acc << 6) | u32::from(v);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    if acc != 0 {
-        return None;
-    }
-    Some(out)
-}
-fn json_object(s: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
-    let decoded = decode64(s)?;
-    let start = decoded.iter().position(|b| !b.is_ascii_whitespace())?;
-    if decoded[start] != b'{' {
-        return None;
-    }
-    serde_json::from_slice(&decoded).ok()
 }
 fn entropy_candidate(s: &str) -> bool {
     if s.len() < 20
@@ -67,15 +23,7 @@ fn entropy_candidate(s: &str) -> bool {
     let mut classes = [false; 4];
     let mut counts = [0usize; 128];
     for b in s.bytes() {
-        classes[if b.is_ascii_uppercase() {
-            0
-        } else if b.is_ascii_lowercase() {
-            1
-        } else if b.is_ascii_digit() {
-            2
-        } else {
-            3
-        }] = true;
+        classes[character_class(b)] = true;
         counts[b as usize] += 1;
     }
     if classes.into_iter().filter(|b| *b).count() < 3 {
@@ -91,6 +39,15 @@ fn entropy_candidate(s: &str) -> bool {
         .sum();
     entropy > 4.0
 }
+fn character_class(byte: u8) -> usize {
+    match byte {
+        b'A'..=b'Z' => 0,
+        b'a'..=b'z' => 1,
+        b'0'..=b'9' => 2,
+        _ => 3,
+    }
+}
+
 /// 范围是原始 UTF-8 字节偏移，永远落在字符边界上。
 pub fn detect(text: &str, high_entropy: bool) -> Vec<Hit> {
     let mut limit = text.len().min(SCAN_LIMIT);
@@ -98,148 +55,60 @@ pub fn detect(text: &str, high_entropy: bool) -> Vec<Hit> {
         limit -= 1;
     }
     let scan = &text[..limit];
-    let bytes = scan.as_bytes();
-    let mut hits = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !scan.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        if scan[..i].chars().next_back().is_some_and(word) {
-            i += 1;
-            continue;
-        }
-        let rest = &scan[i..];
-        if rest.starts_with("-----BEGIN ") {
-            if let Some(n) = rest
-                .strip_prefix("-----BEGIN ")
-                .and_then(|s| s.find("-----").map(|n| n + 11))
-            {
-                let header_end = i + n + 5;
-                let label = &scan[i + 11..i + n];
-                if (label == "PRIVATE KEY" || label.ends_with(" PRIVATE KEY"))
-                    && label.bytes().all(|b| b.is_ascii_uppercase() || b == b' ')
-                    && boundary(text, i, header_end)
-                {
-                    let footer = format!("-----END {label}-----");
-                    let end = scan[header_end..]
-                        .find(&footer)
-                        .map_or(limit, |p| header_end + p + footer.len());
-                    hits.push(Hit {
-                        rule: "pem_private_key".into(),
-                        range: i..end,
-                    });
-                    i = end;
-                    continue;
-                }
-            }
-        }
-        let mut matched = None;
-        for (prefix, min, exact, charset, rule) in [
-            ("sk-proj-", 20, false, 0, "openai_token"),
-            ("sk-ant-", 20, false, 0, "anthropic_token"),
-            ("sk-", 20, false, 0, "sk_token"),
-            ("ghp_", 36, true, 1, "github_token"),
-            ("gho_", 36, true, 1, "github_token"),
-            ("ghu_", 36, true, 1, "github_token"),
-            ("ghs_", 36, true, 1, "github_token"),
-            ("ghr_", 36, true, 1, "github_token"),
-            ("github_pat_", 22, false, 2, "github_pat"),
-            ("xoxb-", 10, false, 3, "slack_token"),
-            ("xoxp-", 10, false, 3, "slack_token"),
-            ("xoxa-", 10, false, 3, "slack_token"),
-            ("xoxe-", 10, false, 3, "slack_token"),
-            ("AKIA", 16, true, 4, "aws_access_key"),
-            ("ASIA", 16, true, 4, "aws_access_key"),
-            ("AIza", 35, true, 0, "google_api_key"),
-        ] {
-            if !rest.starts_with(prefix) {
-                continue;
-            }
-            let start = i + prefix.len();
-            let mut end = start;
-            while end < limit
-                && match charset {
-                    1 => bytes[end].is_ascii_alphanumeric(),
-                    2 => bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_',
-                    3 => bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-',
-                    4 => bytes[end].is_ascii_uppercase() || bytes[end].is_ascii_digit(),
-                    _ => b64(bytes[end]),
-                }
-            {
-                end += 1;
-            }
-            if end - start >= min && (!exact || end - start == min) && boundary(text, i, end) {
-                matched = Some((end, rule));
-                break;
-            }
-            // 已识别长前缀但长度不够时不退回较短 sk- 规则。
-            break;
-        }
-        // JSON 对象只能以 { 或 JSON 空白开始，对应 base64url 首字符 e/I/C/D。
-        if matched.is_none() && matches!(bytes[i], b'e' | b'I' | b'C' | b'D') {
-            let mut end = i;
-            let mut dots = 0;
-            while end < limit && (b64(bytes[end]) || bytes[end] == b'.') {
-                if bytes[end] == b'.' {
-                    dots += 1;
-                    if dots == 3 {
-                        break;
-                    }
-                }
-                end += 1;
-            }
-            // 第三个点直接排除多段候选，并限制失败候选的扫描成本。
-            if dots == 2 && boundary(text, i, end) {
-                let parts: Vec<_> = scan[i..end].split('.').collect();
-                if parts.iter().all(|p| !p.is_empty() && p.len() % 4 != 1)
-                    && json_object(parts[0]).is_some_and(|h| h.contains_key("alg"))
-                    && json_object(parts[1]).is_some()
-                    && decode64(parts[2]).is_some()
-                {
-                    matched = Some((end, "jwt"));
-                }
-            }
-        }
-        if let Some((end, rule)) = matched {
-            hits.push(Hit {
-                rule: rule.into(),
-                range: i..end,
-            });
-            i = end;
-        } else {
-            i += 1;
-        }
-    }
+    let mut hits = scan_rules(text, scan);
     if high_entropy {
-        let mut start = 0;
-        for part in scan.split_inclusive(char::is_whitespace) {
-            let s = part.trim_end_matches(char::is_whitespace);
-            let end = start + s.len();
-            if entropy_candidate(s)
-                && boundary(text, start, end)
-                && !hits
-                    .iter()
-                    .any(|h| h.range.start < end && start < h.range.end)
-            {
-                hits.push(Hit {
-                    rule: "high_entropy".into(),
-                    range: start..end,
-                });
-            }
-            start += part.len();
-        }
-        hits.sort_by_key(|h| h.range.start);
+        append_entropy(text, scan, &mut hits);
+        hits.sort_by_key(|hit| hit.range.start);
     }
     hits
 }
+
+fn scan_rules(text: &str, scan: &str) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    let mut cursor = 0;
+    while cursor < scan.len() {
+        if !rules::can_start(scan, cursor) {
+            cursor += 1;
+            continue;
+        }
+        match rules::at(text, scan, cursor) {
+            Some(hit) => {
+                cursor = hit.range.end;
+                hits.push(hit);
+            }
+            None => cursor += 1,
+        }
+    }
+    hits
+}
+
+fn append_entropy(text: &str, scan: &str, hits: &mut Vec<Hit>) {
+    let mut start = 0;
+    for part in scan.split_inclusive(char::is_whitespace) {
+        let candidate = part.trim_end_matches(char::is_whitespace);
+        let end = start + candidate.len();
+        if entropy_candidate(candidate)
+            && rules::boundary(text, start, end)
+            && !hits
+                .iter()
+                .any(|hit| hit.range.start < end && start < hit.range.end)
+        {
+            hits.push(Hit {
+                rule: "high_entropy".into(),
+                range: start..end,
+            });
+        }
+        start += part.len();
+    }
+}
+
 pub fn redact(text: &str, hits: &[Hit]) -> String {
     let mut out = String::new();
     let mut cursor = 0;
     for hit in hits {
         let r = &hit.range;
         if r.start < cursor
+            || r.start > r.end
             || r.end > text.len()
             || !text.is_char_boundary(r.start)
             || !text.is_char_boundary(r.end)
@@ -248,34 +117,40 @@ pub fn redact(text: &str, hits: &[Hit]) -> String {
         }
         out.push_str(&text[cursor..r.start]);
         let secret = &text[r.clone()];
-        if hit.rule == "unscanned_tail" {
-            out.push_str("••••");
-        } else if hit.rule == "pem_private_key" {
-            let header = secret
-                .find("-----")
-                .and_then(|_| secret[5..].find("-----").map(|p| p + 10))
-                .unwrap_or(0);
-            out.push_str(&secret[..header]);
-            out.push_str("\n••••\n");
-            if let Some(end) = secret.rfind("-----END ") {
-                out.push_str(&secret[end..]);
-            }
-        } else {
-            let long = secret.chars().take(9).count() > 8;
-            if long {
-                out.extend(secret.chars().take(4));
-            }
-            out.push_str("••••••••");
-            if long {
-                let tail: Vec<_> = secret.chars().rev().take(2).collect();
-                out.extend(tail.iter().rev());
-            }
+        match hit.rule.as_str() {
+            "unscanned_tail" => out.push_str("••••"),
+            "pem_private_key" => redact_pem(&mut out, secret),
+            _ => redact_token(&mut out, secret),
         }
         cursor = r.end;
     }
     out.push_str(&text[cursor..]);
     out
 }
+fn redact_pem(out: &mut String, secret: &str) {
+    let header = secret
+        .find("-----")
+        .and_then(|_| secret.get(5..)?.find("-----").map(|position| position + 10))
+        .unwrap_or(0);
+    out.push_str(&secret[..header]);
+    out.push_str("\n••••\n");
+    if let Some(end) = secret.rfind("-----END ") {
+        out.push_str(&secret[end..]);
+    }
+}
+
+fn redact_token(out: &mut String, secret: &str) {
+    let long = secret.chars().take(9).count() > 8;
+    if long {
+        out.extend(secret.chars().take(4));
+    }
+    out.push_str("••••••••");
+    if long {
+        let tail: Vec<_> = secret.chars().rev().take(2).collect();
+        out.extend(tail.iter().rev());
+    }
+}
+
 pub fn expiry_delay(now: i64, deadlines: impl IntoIterator<Item = i64>) -> Option<Duration> {
     deadlines
         .into_iter()
@@ -285,6 +160,28 @@ pub fn expiry_delay(now: i64, deadlines: impl IntoIterator<Item = i64>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reversed_hit_range_is_skipped_like_other_invalid_ranges() {
+        let text = "prefix synthetic suffix";
+        let start = 12;
+        let end = 3;
+        let hit = Hit {
+            rule: "manual".into(),
+            range: start..end,
+        };
+        assert_eq!(redact(text, &[hit]), text);
+    }
+
+    #[test]
+    fn malformed_pem_metadata_does_not_slice_inside_utf8() {
+        let text = "甲乙-----END PRIVATE KEY-----";
+        let hit = Hit {
+            rule: "pem_private_key".into(),
+            range: 0..text.len(),
+        };
+        assert_eq!(redact(text, &[hit]), "\n••••\n-----END PRIVATE KEY-----");
+    }
+
     fn check(prefix: &str, suffix: &str, rule: &str) {
         let token = format!("{prefix}{suffix}");
         let text = format!("前文：({token}) 后文");

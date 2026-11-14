@@ -332,7 +332,7 @@ try {
   for(const theme of ['light','dark'])for(const mode of ['list','compact','cards'])await test('R10 '+theme+'/'+mode+' 统一类型图标与左侧图片缩略图',async()=>{
     await metrics(mode==='compact'?390:1000);await nav();
     await evaluate("window.rows[4]={...window.rows[4],kind:'image',thumbnail:'synthetic-thumb',summary:'合成图片长摘要'.repeat(30)};window.rows[0].pinned=true;window.emitEvent('history-changed')");await pause(80);
-    await appearance({theme,layout:mode==='cards'?'cards':'list',compact:mode==='compact'});await click('[data-id=\"row-4\"]');
+    await appearance({theme,layout:mode==='cards'?'cards':'list',compact:mode==='compact'});await click('[data-id="row-4"]');
     await until(()=>evaluate("document.querySelector('[data-id=\"row-4\"] .record-thumbnail img')?.naturalWidth===160"),'右侧合成图片未加载');
     const boxes=await evaluate("(()=>{const n=document.querySelector('[data-id=\"row-4\"]'),r=n.getBoundingClientRect(),i=n.querySelector('.type-icon')?.getBoundingClientRect(),p=n.querySelector('.record-thumbnail').getBoundingClientRect(),c=n.querySelector('.content').getBoundingClientRect();return {row:r.toJSON(),icon:i?.toJSON(),preview:p.toJSON(),content:c.toJSON(),fit:getComputedStyle(n.querySelector('img')).objectFit,icons:[...document.querySelectorAll('.item>.type-icon')].slice(0,6).map(n=>({w:n.getBoundingClientRect().width,h:n.getBoundingClientRect().height}))};})()");
     assert.equal(boxes.fit,'contain');
@@ -362,11 +362,11 @@ try {
   await test('R10 紧凑浮窗请求跟随选择、设置、隐藏与重新显示',async()=>{
     await metrics(390);await nav();
     assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1)?.args.id"),null);
-    await appearance({compact:true});await click('[data-id=\"row-2\"]');await pause(70);
+    await appearance({compact:true});await click('[data-id="row-2"]');await pause(70);
     assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),'row-2');
     await click('.settings-toggle');await pause(70);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),null);
     await click('.settings-cancel');await pause(70);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),'row-2');
-    await evaluate("window.emitEvent('main-hidden')");await click('[data-id=\"row-4\"]');await pause(70);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),null);
+    await evaluate("window.emitEvent('main-hidden')");await click('[data-id="row-4"]');await pause(70);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),null);
     await evaluate("window.emitEvent('main-shown')");await pause(70);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),'row-4');
     await appearance({compact:false});assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),null);
   });
@@ -376,7 +376,7 @@ try {
     assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview'&&c.args.id).length"),1);
     await evaluate("for(let i=0;i<20;i++){window.dispatchEvent(new Event('focus'));window.emitEvent('main-activated')}");await pause(70);
     assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview'&&c.args.id).length"),1);
-    await click('[data-id=\"row-2\"]');await pause(80);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview'&&c.args.id).length"),2);assert.equal(await evaluate('window.previewFocusEchoes'),2);
+    await click('[data-id="row-2"]');await pause(80);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview'&&c.args.id).length"),2);assert.equal(await evaluate('window.previewFocusEchoes'),2);
     await evaluate("window.emitEvent('main-deactivated')");await pause(60);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),null);
     await evaluate("window.emitEvent('main-activated')");await pause(60);assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='sync_compact_preview').at(-1).args.id"),'row-2');
   });

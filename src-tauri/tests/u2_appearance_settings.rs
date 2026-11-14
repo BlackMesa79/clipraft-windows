@@ -85,7 +85,7 @@ fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
         .collect();
         rows.insert(key.into(), invalid.into());
         let mut warnings = vec![];
-        let actual = Settings::from_rows(&rows, |w| warnings.push(w));
+        let actual = Settings::from_rows(&rows, |w| warnings.push(w)).unwrap();
         let json = serde_json::to_value(actual).unwrap();
         let defaults = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(json[key], defaults[key]);

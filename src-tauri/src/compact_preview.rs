@@ -1,4 +1,4 @@
-use crate::{model::ItemView, runtime::State, ItemDetail};
+use crate::{item_detail::ItemDetail, model::ItemView, runtime::State};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -20,48 +20,66 @@ pub struct PreviewState {
     height: Mutex<Option<f64>>,
 }
 impl PreviewState {
-    pub fn has_content(&self) -> bool {
-        self.content.lock().unwrap().is_some()
+    pub fn has_content(&self) -> tauri::Result<bool> {
+        Ok(self
+            .content
+            .lock()
+            .map_err(|_| state_error("内容"))?
+            .is_some())
     }
-    fn clear(&self) -> u64 {
-        let mut content = self.content.lock().unwrap();
+    fn clear(&self) -> tauri::Result<u64> {
+        let mut content = self.content.lock().map_err(|_| state_error("内容"))?;
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         *content = None;
         // 保留最后有效高度作为下一条内容的初始尺寸，避免先跳回固定高度。
-        generation
+        Ok(generation)
     }
-    fn report_height(&self, generation: u64, height: f64) -> bool {
+    fn report_height(&self, generation: u64, height: f64) -> tauri::Result<bool> {
         if !height.is_finite() {
-            return false;
+            return Ok(false);
         }
         let height = height.clamp(120.0, 640.0);
-        let content = self.content.lock().unwrap();
+        let content = self.content.lock().map_err(|_| state_error("内容"))?;
         if self.generation.load(Ordering::Acquire) != generation
             || content.as_ref().is_none_or(|c| c.generation != generation)
         {
-            return false;
+            return Ok(false);
         }
-        let mut current = self.height.lock().unwrap();
+        let mut current = self.height.lock().map_err(|_| state_error("高度"))?;
         if current.is_some_and(|old| (old - height).abs() < 1.0) {
-            return false;
+            return Ok(false);
         }
         *current = Some(height);
-        true
+        Ok(true)
     }
-    fn publish(&self, generation: u64, value: Content, show: impl FnOnce(Content)) -> bool {
+    fn publish(
+        &self,
+        generation: u64,
+        value: Content,
+        show: impl FnOnce(Content),
+    ) -> tauri::Result<bool> {
         {
-            let mut content = self.content.lock().unwrap();
+            let mut content = self.content.lock().map_err(|_| state_error("内容"))?;
             if self.generation.load(Ordering::Acquire) != generation {
-                return false;
+                return Ok(false);
             }
             *content = Some(value.clone());
         }
         // Win32 窗口 API 可同步重入事件处理；外部回调绝不能占用快照锁。
         if self.generation.load(Ordering::Acquire) != generation {
-            return false;
+            return Ok(false);
         }
         show(value);
-        self.generation.load(Ordering::Acquire) == generation
+        Ok(self.generation.load(Ordering::Acquire) == generation)
+    }
+
+    fn update_geometry(&self, geometry: Geometry) -> tauri::Result<bool> {
+        let mut current = self.geometry.lock().map_err(|_| state_error("几何"))?;
+        if *current == Some(geometry) {
+            return Ok(false);
+        }
+        *current = Some(geometry);
+        Ok(true)
     }
 }
 
@@ -92,10 +110,10 @@ pub fn position_compact_preview(
     }
     let anchor = anchor
         .filter(|a| a.top.is_finite() && a.bottom.is_finite() && a.bottom > a.top && a.top >= 0.0);
-    *state.anchor.lock().unwrap() = anchor;
+    *state.anchor.lock().map_err(|_| "浮窗锚点状态不可用")? = anchor;
     reposition(&window)
         .map(|_| ())
-        .map_err(|_| "浮窗定位失败".into())
+        .map_err(|error| format!("浮窗定位失败：{error}"))
 }
 #[tauri::command]
 pub fn resize_compact_preview(
@@ -110,11 +128,14 @@ pub fn resize_compact_preview(
     if !height.is_finite() {
         return Err("预览高度无效".into());
     }
-    if !state.report_height(generation, height) {
+    if !state
+        .report_height(generation, height)
+        .map_err(|e| e.to_string())?
+    {
         return Ok(());
     }
     if let Some(main) = window.app_handle().get_webview_window("main") {
-        reposition(&main).map_err(|_| "预览高度调整失败")?;
+        reposition(&main).map_err(|error| format!("预览高度调整失败：{error}"))?;
     }
     Ok(())
 }
@@ -126,7 +147,7 @@ pub fn compact_preview_geometry(
     if window.label() != "preview" {
         return Err("仅浮窗可读取几何".into());
     }
-    Ok(*state.geometry.lock().unwrap())
+    Ok(*state.geometry.lock().map_err(|_| "浮窗几何状态不可用")?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,17 +200,74 @@ pub fn placement(main: Rect, work: Rect, scale: f64, height: f64) -> Option<Rect
 pub fn hide(app: &tauri::AppHandle) -> u64 {
     let mut generation = 0;
     if let Some(state) = app.try_state::<PreviewState>() {
-        generation = state.clear();
-    }
-    if let Some(window) = app.get_webview_window("preview") {
-        if window.is_visible().unwrap_or(false) {
-            if let Ok(handle) = window.hwnd() {
-                crate::platform::hide(handle.0 as isize);
-            }
+        match state.clear() {
+            Ok(next) => generation = next,
+            Err(error) => crate::diag::write(format!("preview clear failed: {error}")),
         }
-        let _ = window.emit("compact-preview-changed", Option::<Content>::None);
     }
+    let Some(window) = app.get_webview_window("preview") else {
+        return generation;
+    };
+    if window.is_visible().unwrap_or(false) {
+        if let Ok(handle) = window.hwnd() {
+            crate::platform::hide(handle.0 as isize);
+        }
+    }
+    let _ = window.emit("compact-preview-changed", Option::<Content>::None);
     generation
+}
+
+struct Layout {
+    main: Rect,
+    work: Rect,
+    scale: f64,
+    inner_y: i32,
+}
+
+fn preview_layout(main: &WebviewWindow) -> tauri::Result<Option<Layout>> {
+    let Some(monitor) = main.current_monitor()? else {
+        return Ok(None);
+    };
+    let pos = main.outer_position()?;
+    let size = main.outer_size()?;
+    let area = monitor.work_area();
+    Ok(Some(Layout {
+        main: Rect {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+        },
+        work: Rect {
+            x: area.position.x,
+            y: area.position.y,
+            width: area.size.width,
+            height: area.size.height,
+        },
+        scale: main.scale_factor()?,
+        inner_y: main.inner_position()?.y,
+    }))
+}
+
+impl Layout {
+    fn anchored(&self, anchor: &Anchor, height: f64) -> Option<(Rect, Geometry)> {
+        let mut bounds = placement(self.main, self.work, self.scale, height)?;
+        let center = f64::from(self.inner_y) + (anchor.top + anchor.bottom) * self.scale / 2.0;
+        // 移动浮窗使箭头接近目标；工作区边缘仍保留圆角安全距离。
+        bounds.y = (center - 60.0 * self.scale).round().clamp(
+            f64::from(self.work.y),
+            f64::from(self.work.y) + f64::from(self.work.height) - f64::from(bounds.height),
+        ) as i32;
+        let geometry = Geometry {
+            right: bounds.x > self.main.x,
+            arrow: ((center - f64::from(bounds.y)) / self.scale)
+                .clamp(26.0, f64::from(bounds.height) / self.scale - 26.0),
+            width: bounds.width,
+            height: bounds.height,
+            scale: self.scale,
+        };
+        Some((bounds, geometry))
+    }
 }
 
 pub fn reposition(main: &WebviewWindow) -> tauri::Result<bool> {
@@ -197,11 +275,15 @@ pub fn reposition(main: &WebviewWindow) -> tauri::Result<bool> {
         return Ok(false);
     };
     let state = main.state::<PreviewState>();
-    let anchor = state.anchor.lock().unwrap().clone();
+    let anchor = state
+        .anchor
+        .lock()
+        .map_err(|_| state_error("锚点"))?
+        .clone();
     let content_id = state
         .content
         .lock()
-        .unwrap()
+        .map_err(|_| state_error("内容"))?
         .as_ref()
         .map(|c| c.item.id.clone());
     // 内容切换期间保持原生显隐，避免选中一次就 hide/show；迟到几何不指向旧记录。
@@ -221,52 +303,28 @@ pub fn reposition(main: &WebviewWindow) -> tauri::Result<bool> {
     {
         return Ok(false);
     }
-    let Some(monitor) = main.current_monitor()? else {
+    apply_layout(main, &panel, &state, &anchor)
+}
+
+fn apply_layout(
+    main: &WebviewWindow,
+    panel: &WebviewWindow,
+    state: &PreviewState,
+    anchor: &Anchor,
+) -> tauri::Result<bool> {
+    let Some(layout) = preview_layout(main)? else {
         return Ok(false);
     };
-    let pos = main.outer_position()?;
-    let size = main.outer_size()?;
-    let area = monitor.work_area();
-    let bounds = placement(
-        Rect {
-            x: pos.x,
-            y: pos.y,
-            width: size.width,
-            height: size.height,
-        },
-        Rect {
-            x: area.position.x,
-            y: area.position.y,
-            width: area.size.width,
-            height: area.size.height,
-        },
-        main.scale_factor()?,
-        state.height.lock().unwrap().unwrap_or(180.0),
-    );
-    let Some(bounds) = bounds else {
+    let height = state
+        .height
+        .lock()
+        .map_err(|_| state_error("高度"))?
+        .unwrap_or(180.0);
+    let Some((bounds, geometry)) = layout.anchored(anchor, height) else {
         crate::platform::hide(panel.hwnd()?.0 as isize);
         return Ok(false);
     };
-    let scale = main.scale_factor()?;
-    let inner = main.inner_position()?;
-    let center = f64::from(inner.y) + (anchor.top + anchor.bottom) * scale / 2.0;
-    // 移动浮窗使箭头接近目标；工作区边缘仍保留圆角安全距离。
-    let mut bounds = bounds;
-    bounds.y = (center - 60.0 * scale).round().clamp(
-        f64::from(area.position.y),
-        f64::from(area.position.y) + f64::from(area.size.height) - f64::from(bounds.height),
-    ) as i32;
-    let geometry = Geometry {
-        right: bounds.x > pos.x,
-        arrow: ((center - f64::from(bounds.y)) / scale)
-            .clamp(26.0, f64::from(bounds.height) / scale - 26.0),
-        width: bounds.width,
-        height: bounds.height,
-        scale,
-    };
-    let changed = *state.geometry.lock().unwrap() != Some(geometry);
-    if changed {
-        *state.geometry.lock().unwrap() = Some(geometry);
+    if state.update_geometry(geometry)? {
         let _ = panel.emit("compact-preview-geometry", geometry);
     }
     crate::platform::position_preview(
@@ -288,7 +346,11 @@ pub fn compact_preview_state(
     if window.label() != "preview" {
         return Err("仅预览窗口可读取浮窗快照".into());
     }
-    Ok(state.content.lock().unwrap().clone())
+    Ok(state
+        .content
+        .lock()
+        .map_err(|_| "浮窗内容状态不可用")?
+        .clone())
 }
 
 #[tauri::command]
@@ -306,63 +368,156 @@ pub async fn sync_compact_preview(
         return Ok(());
     };
     // 内容切换只清空快照，不对原生窗口做 hide/show，避免焦点反馈环。
-    let generation = _preview.clear();
+    let generation = _preview.clear().map_err(|e| e.to_string())?;
     if let Some(panel) = window.app_handle().get_webview_window("preview") {
         let _ = panel.emit("compact-preview-changed", Option::<Content>::None);
     }
-    if !state.settings.lock().unwrap().compact {
+    if !state.settings.lock().map_err(|_| "设置状态不可用")?.compact {
         return Ok(());
     }
     let shared = state.inner().clone();
-    let content = tauri::async_runtime::spawn_blocking(move || {
-        let storage = shared
-            .storage
-            .lock()
-            .map_err(|_| "存储不可用".to_string())?;
-        let item = storage
-            .preview_item(&id)
-            .map_err(|_| "预览记录读取失败".to_string())?;
-        let detail = storage
-            .display_detail(&id, false)
-            .map_err(|_| "预览内容读取失败".to_string())?;
-        Ok::<_, String>(Content {
-            generation,
-            item,
-            detail,
-        })
-    })
-    .await
-    .map_err(|_| "预览任务失败".to_string())??;
+    let content =
+        tauri::async_runtime::spawn_blocking(move || load_content(&shared, &id, generation))
+            .await
+            .map_err(|_| "预览任务失败".to_string())??;
     let main = window.clone();
     window
         .run_on_main_thread(move || {
-            let preview = main.state::<PreviewState>();
-            let state = main.state::<Arc<State>>();
-            if preview.generation.load(Ordering::Acquire) != generation
-                || !state.settings.lock().unwrap().compact
-                || !main.is_visible().unwrap_or(false)
-                || main.is_minimized().unwrap_or(true)
-                || !crate::platform::main_has_foreground(state.main.load(Ordering::Acquire))
-            {
-                return;
-            }
-            if let Some(panel) = main.app_handle().get_webview_window("preview") {
-                preview.publish(generation, content, |content| {
-                    let _ = panel.emit("compact-preview-changed", Some(content));
-                    let _ = reposition(&main);
-                });
+            if let Err(error) = present(&main, generation, content) {
+                crate::diag::write(format!("preview presentation failed: {error}"));
             }
         })
         .map_err(|_| "预览窗口更新失败".to_string())
 }
 
+fn load_content(shared: &State, id: &str, generation: u64) -> Result<Content, String> {
+    let storage = shared
+        .storage
+        .lock()
+        .map_err(|_| "存储不可用".to_string())?;
+    let item = storage
+        .preview_item(id)
+        .map_err(|_| "预览记录读取失败".to_string())?;
+    let detail = storage
+        .display_detail(id)
+        .map_err(|_| "预览内容读取失败".to_string())?;
+    Ok::<_, String>(Content {
+        generation,
+        item,
+        detail,
+    })
+}
+
+fn state_error(name: &str) -> tauri::Error {
+    tauri::Error::Anyhow(anyhow::anyhow!("浮窗{name}状态不可用"))
+}
+
+fn present(main: &WebviewWindow, generation: u64, content: Content) -> tauri::Result<()> {
+    let preview = main.state::<PreviewState>();
+    if preview.generation.load(Ordering::Acquire) != generation {
+        return Ok(());
+    }
+    let state = main.state::<Arc<State>>();
+    let compact = state
+        .settings
+        .lock()
+        .map_err(|_| state_error("设置"))?
+        .compact;
+    if !compact
+        || !main.is_visible()?
+        || main.is_minimized()?
+        || !crate::platform::main_has_foreground(state.main.load(Ordering::Acquire))
+    {
+        return Ok(());
+    }
+    let Some(panel) = main.app_handle().get_webview_window("preview") else {
+        return Ok(());
+    };
+    preview.publish(generation, content, |content| {
+        if let Err(error) = panel.emit("compact-preview-changed", Some(content)) {
+            crate::diag::write(format!("preview content event failed: {error}"));
+        }
+        if let Err(error) = reposition(main) {
+            crate::diag::write(format!("preview window update failed: {error}"));
+        }
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn poison<T>(mutex: &Mutex<T>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("模拟浮窗状态锁中毒");
+        }));
+        assert!(result.is_err());
+    }
+
+    fn content(generation: u64) -> Content {
+        Content {
+            generation,
+            item: ItemView::default(),
+            detail: ItemDetail {
+                text: String::new(),
+                truncated: false,
+                files: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn poisoned_content_rejects_reads_clear_height_and_publish() {
+        let state = PreviewState::default();
+        let generation = state.clear().unwrap();
+        poison(&state.content);
+        assert!(state.has_content().is_err());
+        assert!(state.clear().is_err());
+        assert!(state.report_height(generation, 180.0).is_err());
+        assert!(state
+            .publish(generation, content(generation), |_| panic!(
+                "中毒快照不能显示"
+            ))
+            .is_err());
+        assert_eq!(state.generation.load(Ordering::Acquire), generation);
+    }
+
+    #[test]
+    fn poisoned_height_keeps_content_readable_and_clearable() {
+        let state = PreviewState::default();
+        let generation = state.clear().unwrap();
+        state
+            .publish(generation, content(generation), |_| {})
+            .unwrap();
+        poison(&state.height);
+        assert!(state.report_height(generation, 180.0).is_err());
+        assert!(state.has_content().unwrap());
+        state.clear().unwrap();
+        assert!(!state.has_content().unwrap());
+    }
+
+    #[test]
+    fn geometry_changes_are_deduplicated_and_poison_is_reported() {
+        let state = PreviewState::default();
+        let geometry = Geometry {
+            right: true,
+            arrow: 60.0,
+            width: 360,
+            height: 180,
+            scale: 1.0,
+        };
+        assert!(state.update_geometry(geometry).unwrap());
+        assert!(!state.update_geometry(geometry).unwrap());
+        assert!(state.geometry.try_lock().is_ok());
+        poison(&state.geometry);
+        assert!(state.update_geometry(geometry).is_err());
+    }
+
     #[test]
     fn presentation_callback_can_reenter_snapshot_without_deadlock() {
         let state = PreviewState::default();
-        let generation = state.clear();
+        let generation = state.clear().unwrap();
         let content = Content {
             generation,
             item: ItemView::default(),
@@ -372,11 +527,13 @@ mod tests {
                 files: vec![],
             },
         };
-        assert!(!state.publish(generation, content, |_| {
-            assert!(state.has_content());
-            state.clear();
-        }));
-        assert!(!state.has_content());
+        assert!(!state
+            .publish(generation, content, |_| {
+                assert!(state.has_content().unwrap());
+                state.clear().unwrap();
+            })
+            .unwrap());
+        assert!(!state.has_content().unwrap());
     }
     const WORK: Rect = Rect {
         x: 0,
@@ -384,6 +541,36 @@ mod tests {
         width: 1920,
         height: 1040,
     };
+    #[test]
+    fn anchored_layout_clamps_to_work_area_and_points_to_selected_row() {
+        for scale in [1.0, 1.5, 2.0] {
+            for x in [100, 1500] {
+                let layout = Layout {
+                    main: Rect {
+                        x,
+                        y: 20,
+                        width: 390,
+                        height: 700,
+                    },
+                    work: WORK,
+                    scale,
+                    inner_y: 60,
+                };
+                let anchor = Anchor {
+                    id: "synthetic".into(),
+                    top: 1000.0,
+                    bottom: 1040.0,
+                };
+                let (bounds, geometry) = layout.anchored(&anchor, 420.0).unwrap();
+                assert_eq!(geometry.right, x == 100);
+                assert!(bounds.y >= WORK.y);
+                assert!(bounds.y + bounds.height as i32 <= WORK.y + WORK.height as i32);
+                assert_eq!(geometry.arrow, f64::from(bounds.height) / scale - 26.0);
+                assert_eq!(geometry.width, bounds.width);
+                assert_eq!(geometry.height, bounds.height);
+            }
+        }
+    }
     #[test]
     fn late_content_cannot_reopen_after_hide_or_new_selection() {
         let state = PreviewState::default();
@@ -396,14 +583,18 @@ mod tests {
                 files: vec![],
             },
         };
-        let old = state.clear();
-        let new = state.clear();
-        assert!(!state.publish(old, content(), |_| panic!("旧选择不能显示")));
-        assert!(state.publish(new, content(), |_| {}));
-        assert!(state.has_content());
-        state.clear();
-        assert!(!state.publish(new, content(), |_| panic!("隐藏后不能重新显示")));
-        assert!(!state.has_content());
+        let old = state.clear().unwrap();
+        let new = state.clear().unwrap();
+        assert!(!state
+            .publish(old, content(), |_| panic!("旧选择不能显示"))
+            .unwrap());
+        assert!(state.publish(new, content(), |_| {}).unwrap());
+        assert!(state.has_content().unwrap());
+        state.clear().unwrap();
+        assert!(!state
+            .publish(new, content(), |_| panic!("隐藏后不能重新显示"))
+            .unwrap());
+        assert!(!state.has_content().unwrap());
     }
     #[test]
     fn content_height_respects_minimum_maximum_and_monitor_limit() {
@@ -439,19 +630,19 @@ mod tests {
                 files: vec![],
             },
         };
-        let old = state.clear();
-        state.publish(old, content(old), |_| {});
-        assert!(state.report_height(old, 180.0));
-        assert!(!state.report_height(old, 180.2));
-        assert!(!state.report_height(old, f64::NAN));
-        let new = state.clear();
-        state.publish(new, content(new), |_| {});
-        assert!(!state.report_height(old, 640.0));
+        let old = state.clear().unwrap();
+        state.publish(old, content(old), |_| {}).unwrap();
+        assert!(state.report_height(old, 180.0).unwrap());
+        assert!(!state.report_height(old, 180.2).unwrap());
+        assert!(!state.report_height(old, f64::NAN).unwrap());
+        let new = state.clear().unwrap();
+        state.publish(new, content(new), |_| {}).unwrap();
+        assert!(!state.report_height(old, 640.0).unwrap());
         assert_eq!(*state.height.lock().unwrap(), Some(180.0));
-        assert!(state.report_height(new, 9000.0));
+        assert!(state.report_height(new, 9000.0).unwrap());
         assert_eq!(*state.height.lock().unwrap(), Some(640.0));
-        state.clear();
-        assert!(!state.report_height(new, 120.0));
+        state.clear().unwrap();
+        assert!(!state.report_height(new, 120.0).unwrap());
     }
     #[test]
     fn right_then_left_and_bottom_clamp() {

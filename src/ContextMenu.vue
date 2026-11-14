@@ -21,31 +21,42 @@ async function openSubmenu() {
   menuItems(root.value?.querySelector('.group-submenu'))[0]?.focus();
 }
 function closeSubmenu() { expanded.value = false; moveButton.value?.focus(); }
-function keydown(event: KeyboardEvent) {
+function focusedMenuItem(): HTMLButtonElement | null {
+  const focused = document.activeElement;
+  if (!(focused instanceof HTMLButtonElement)) return null;
+  return root.value?.contains(focused) && focused.matches('[role="menuitem"]') ? focused : null;
+}
+function moveMenuFocus(item: HTMLButtonElement | null, direction: number): void {
+  const entries = menuItems(item?.closest('[role="menu"]') ?? root.value);
+  const index = item ? entries.indexOf(item) : -1;
+  if (index < 0) {
+    entries[direction > 0 ? 0 : entries.length - 1]?.focus();
+    return;
+  }
+  entries[(index + direction + entries.length) % entries.length]?.focus();
+}
+function activateMenuItem(event: KeyboardEvent): void {
+  if (!event.repeat) focusedMenuItem()?.click();
+}
+const menuKeyActions: Readonly<Record<string, (event: KeyboardEvent) => void>> = {
+  Escape: () => { restoreOnClose = true; close(); },
+  ArrowDown: () => moveMenuFocus(focusedMenuItem(), 1),
+  ArrowUp: () => moveMenuFocus(focusedMenuItem(), -1),
+  ArrowRight: () => { if (focusedMenuItem() === moveButton.value) void openSubmenu(); },
+  ArrowLeft: () => {
+    const menu = focusedMenuItem()?.closest('[role="menu"]') ?? root.value;
+    if (menu !== root.value) closeSubmenu();
+  },
+  Enter: activateMenuItem,
+  ' ': activateMenuItem,
+  Tab: () => { if (!focusedMenuItem()) menuItems(root.value)[0]?.focus(); },
+};
+function keydown(event: KeyboardEvent): void {
   // 菜单独占键盘；组合输入不取消默认行为，也不传给列表快捷键。
   event.stopImmediatePropagation();
   if (event.isComposing || event.keyCode === 229) return;
   event.preventDefault();
-  if (event.key === 'Escape') { restoreOnClose = true; close(); return; }
-  const focused = document.activeElement;
-  const item = focused instanceof HTMLButtonElement && root.value?.contains(focused) && focused.matches('[role="menuitem"]') ? focused : null;
-  const menu = item?.closest('[role="menu"]') ?? root.value;
-  const entries = menuItems(menu);
-  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    const index = item ? entries.indexOf(item) : -1;
-    const next = index < 0 ? (event.key === 'ArrowDown' ? 0 : entries.length - 1)
-      : (index + (event.key === 'ArrowDown' ? 1 : -1) + entries.length) % entries.length;
-    entries[next]?.focus();
-  } else if (event.key === 'ArrowRight' && item === moveButton.value) {
-    void openSubmenu();
-
-  } else if (event.key === 'ArrowLeft' && menu !== root.value) {
-    closeSubmenu();
-  } else if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) {
-    item?.click();
-  } else if (event.key === 'Tab' && !item) {
-    menuItems(root.value)[0]?.focus();
-  }
+  menuKeyActions[event.key]?.(event);
 }
 async function position() {
   await nextTick();

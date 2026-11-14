@@ -9,6 +9,8 @@ async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './styles/main.css';
 import PreviewImage from './PreviewImage.vue';
+import { createItemDetail } from './itemDetail';
+import { createCompactPreview } from './compactPreview';
 import HistoryList from './HistoryList.vue';
 import SettingsView from './SettingsView.vue';
 import { applyTheme, shortcutLabel, type Settings, type SettingOptions } from './settings';
@@ -34,9 +36,14 @@ function rememberAnchor() {
   const row = list && Array.from(list.querySelectorAll<HTMLElement>('.item')).find(el => el.getBoundingClientRect().bottom > top + 1);
   if (row?.dataset.id) savedAnchor = { id: row.dataset.id, offset: row.getBoundingClientRect().top - top };
 }
+function recordElement(id: string | undefined): HTMLElement | undefined {
+  if (!id) return undefined;
+  return Array.from(listRoot.value?.querySelectorAll<HTMLElement>('.item') ?? [])
+    .find(element => element.dataset.id === id);
+}
 function restoreAnchor() {
   const list = listRoot.value;
-  const row = list && Array.from(list.querySelectorAll<HTMLElement>('.item')).find(el => el.dataset.id === savedAnchor?.id);
+  const row = recordElement(savedAnchor?.id);
   if (row && list && savedAnchor) {
     // 卡片切成短行时，旧负偏移可能超过整行高度；至少保留锚点的一部分可见。
     const offset = Math.max(savedAnchor.offset, 2 - row.getBoundingClientRect().height);
@@ -79,7 +86,7 @@ const kinds: { value: HistoryKind | null; label: string }[] = [
 function selectView(next: HistoryView) { view.value = next; }
 function selectCompactView(event: Event) {
   const value = (event.target as HTMLSelectElement).value;
-  selectView(value === 'all' ? 'all' : value === 'ungrouped' ? 'ungrouped' : Number(value));
+  selectView(value === 'all' || value === 'ungrouped' ? value : Number(value));
   // 下拉选择提交后交还记录导航；弹层选择过程中仍由原生select处理。
   void focusSearch();
 }
@@ -91,9 +98,12 @@ const selectedItems = computed(() => items.value.filter(item => selectedIds.valu
 const allPinned = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.pinned));
 const allSensitive = computed(() => selectedItems.value.length > 0 && selectedItems.value.every(item => item.sensitive));
 const protectedDeleteCount = computed(() => items.value.filter(item => pendingDelete.value?.includes(item.id) && (item.pinned || item.favorite || item.group_id != null)).length);
-const listFilter = computed<HistoryFilter>(() => ({ query: query.value, kind: kind.value,
-  ...(view.value === 'ungrouped' ? { group_id: -1 } : typeof view.value === 'number' ? { group_id: view.value } : {}),
-}));
+const listFilter = computed<HistoryFilter>(() => {
+  const filter: HistoryFilter = { query: query.value, kind: kind.value };
+  if (view.value === 'ungrouped') filter.group_id = -1;
+  if (typeof view.value === 'number') filter.group_id = view.value;
+  return filter;
+});
 let groupGeneration = 0;
 async function loadGroups() {
   const generation = ++groupGeneration;
@@ -110,7 +120,7 @@ async function changeItems(command: 'set_pinned' | 'move_to_group' | 'set_sensit
   const ids = selectedItems.value.map(item => item.id);
   const args = command === 'move_to_group' ? { ids, groupId } : { ids, value: command === 'set_pinned' ? !allPinned.value : !allSensitive.value };
   mutationBusy.value = true; contextMenu.value = null; error.value = '';
-  ++listGeneration; ++detailGeneration;
+  ++listGeneration; invalidateDetail();
   try { await invoke(command, args); }
   catch (e) { error.value = String(e); }
   finally {
@@ -129,7 +139,7 @@ async function focusSearch() { await nextTick(); if (!settingsOpen.value) search
 function filtersChanged(delay = 150) {
   resetOnShow = false;
     clearTimeout(searchTimer); searchTimer = undefined;
-  ++listGeneration; ++detailGeneration;
+  ++listGeneration; invalidateDetail();
   afterDelete = undefined; contextMenu.value = null; pendingDelete.value = null;
   items.value = []; selectOnly(0); nextOffset = 0; hasMore.value = true;
   pageError.value = ''; pageLoading.value = true;
@@ -195,7 +205,7 @@ async function performDelete(ids: string[]) {
   const next = items.value.slice(Math.max(0, index)).find(item => !removed.has(item.id));
   const position = { index: Math.max(0, index), id: next?.id, count: items.value.length };
   deleting.value = true; pendingDelete.value = null; contextMenu.value = null; error.value = '';
-  ++listGeneration; ++detailGeneration;
+  ++listGeneration; invalidateDetail();
   try {
     const report = await invoke<DeleteReport>('delete_items', { ids });
     afterDelete = position;
@@ -210,7 +220,7 @@ async function performDelete(ids: string[]) {
 }
 function confirmDelete() { if (pendingDelete.value) void performDelete(pendingDelete.value); }
 function historyChanged() {
-  lastFloatingId = undefined;
+  invalidateFloatingPreview();
   contextMenu.value = null;
   void loadGroups();
   if (deleting.value || mutationBusy.value) deferredHistory = true; else if (!searchTimer && !composing.value) void load();
@@ -242,69 +252,28 @@ async function loadMore() {
   }
 }
 function retryPage() { pageError.value = ''; void (retryRefresh ? load() : loadMore()); }
-interface Detail { text: string; truncated: boolean; files: { path: string; exists: boolean | null }[] }
-const detail = ref<Detail | null>(null), detailError = ref(''), detailLoading = ref(false);
-const revealed = ref(false);
-let detailGeneration = 0;
-function conceal() { ++detailGeneration; revealed.value = false; detail.value = null; detailLoading.value = false; }
-async function revealDetail() {
-  if (!active.value?.sensitive || detailLoading.value) return;
-  const id = active.value.id, generation = ++detailGeneration;
-  detailLoading.value = true; detailError.value = '';
-  try {
-    const result = await invoke<Detail>('reveal_item', { id });
-    if (generation === detailGeneration && active.value?.id === id) { detail.value = result; revealed.value = true; }
-  } catch { if (generation === detailGeneration) detailError.value = '显示原文失败'; }
-  finally { if (generation === detailGeneration) detailLoading.value = false; }
-}
-function visibilityChanged() { if (document.hidden) hiddenMain(); else focusMain(); }
-
-async function loadDetail() {
-  if (compact.value) { conceal(); return; }
-  const id = active.value?.id, generation = ++detailGeneration;
-  if (detailRoot.value) detailRoot.value.scrollTop = 0;
-  revealed.value = false; detail.value = null; detailError.value = ''; detailLoading.value = !!id;
-  if (!id || active.value?.kind === 'image') { detailLoading.value = false; return; }
-  try {
-    const result = await invoke<Detail>('item_detail', { id });
-    if (generation === detailGeneration) detail.value = result;
-  } catch (e) { if (generation === detailGeneration) detailError.value = String(e); }
-  finally { if (generation === detailGeneration) detailLoading.value = false; }
-}
 const stops: UnlistenFn[] = [];
 const active = computed(() => items.value[selected.value]);
-const floatingActive = ref(true);
-let geometryFrame = 0;
-let lastGeometry = '';
-function schedulePreviewGeometry() {
-  if (geometryFrame) return;
-  geometryFrame = requestAnimationFrame(() => {
-    geometryFrame = 0;
-    const list = listRoot.value;
-    const row = list && Array.from(list.querySelectorAll<HTMLElement>('.item')).find(el => el.dataset.id === active.value?.id);
-    const box = row?.getBoundingClientRect(), viewport = list?.getBoundingClientRect();
-    const top = box && viewport ? Math.max(box.top, viewport.top) : 0;
-    const bottom = box && viewport ? Math.min(box.bottom, viewport.bottom) : 0;
-    const anchor = compact.value && floatingActive.value && !settingsOpen.value && top < bottom ? { id: active.value!.id, top, bottom } : null;
-    const signature = JSON.stringify(anchor);
-    if (signature === lastGeometry) return;
-    lastGeometry = signature;
-    void invoke('position_compact_preview', { anchor }).catch(() => { lastGeometry = ''; });
-  });
-}
-let floatingRequest = 0;
-let lastFloatingId: string | null | undefined;
-function syncFloatingPreview() {
-  void nextTick(schedulePreviewGeometry);
-  const id = compact.value && floatingActive.value && !settingsOpen.value ? active.value?.id ?? null : null;
-  if (id === lastFloatingId) return;
-  lastFloatingId = id;
-  const request = ++floatingRequest;
-  void invoke('sync_compact_preview', { id }).catch(e => {
-    if (request === floatingRequest && id) { lastFloatingId = undefined; error.value = '浮动预览失败：' + String(e); }
-  });
-}
-function suspendFloatingPreview() { floatingActive.value = false; syncFloatingPreview(); }
+const {
+  detail, detailError, detailLoading, revealed,
+  conceal, revealDetail, loadDetail, invalidateDetail,
+} = createItemDetail({
+  active: () => active.value,
+  compact: () => compact.value,
+  resetScroll: () => { if (detailRoot.value) detailRoot.value.scrollTop = 0; },
+});
+function visibilityChanged() { if (document.hidden) hiddenMain(); else focusMain(); }
+const {
+  floatingActive, syncFloatingPreview, suspendFloatingPreview,
+  schedulePreviewGeometry, cancelPreviewGeometry, invalidateFloatingPreview,
+} = createCompactPreview({
+  active: () => active.value,
+  compact: () => compact.value,
+  settingsOpen: () => settingsOpen.value,
+  listRoot: () => listRoot.value,
+  recordElement,
+  reportError: message => { error.value = message; },
+});
 function focusMain() {
   floatingActive.value = true;
   if (!compact.value && !settingsOpen.value && active.value?.kind !== 'image' && !detail.value && !detailLoading.value) void loadDetail();
@@ -316,40 +285,71 @@ function hiddenMain() { resetOnShow = false; conceal(); suspendFloatingPreview()
 watch([active, compact, settingsOpen, floatingActive], syncFloatingPreview);
 
 watch(() => active.value?.id, () => { void loadDetail(); }, { flush: 'sync' });
+type DeletionPosition = { index: number; id?: string; count: number };
+interface RefreshedPage { refreshed: Item[]; more: boolean }
+function refreshTargetId(deletion: DeletionPosition | undefined): string | undefined {
+  return resetOnShow ? undefined : deletion?.id ?? active.value?.id;
+}
+async function refreshPages(generation: number, targetCount: number, deletion: DeletionPosition | undefined): Promise<RefreshedPage | undefined> {
+  const refreshed: Item[] = [];
+  let more = true;
+  // 重建已加载范围；选中项移到下一页时继续查找，保留选择。
+  while (more) {
+    const page = await invoke<Item[]>('list_items', { filter: listFilter.value, offset: refreshed.length, limit: PAGE_SIZE });
+    if (generation !== listGeneration) return;
+    refreshed.push(...page); more = page.length === PAGE_SIZE;
+    const id = refreshTargetId(deletion);
+    if (refreshed.length >= targetCount && (deletion || !id || refreshed.some(item => item.id === id))) break;
+  }
+  return { refreshed, more };
+}
+interface SelectionRestore { id?: string; oldIndex: number; deletion?: DeletionPosition }
+function restoreRefreshedSelection(refreshed: Item[], position: SelectionRestore): void {
+  const { id, oldIndex, deletion } = position;
+  const previousSelection = selectedIds.value;
+  const unique = new Map(refreshed.map(item => [item.id, item]));
+  items.value = [...unique.values()];
+  const found = items.value.findIndex(item => item.id === id);
+  selected.value = found >= 0 ? found : Math.max(0, Math.min(oldIndex, items.value.length - 1));
+  if (deletion || !id || found < 0) selectOnly(selected.value);
+  else selectedIds.value = new Set(items.value.filter(item => previousSelection.has(item.id)).map(item => item.id));
+}
+function refreshSelectionPosition(deletion: DeletionPosition | undefined): { resetSelection: boolean; id: string | undefined; oldIndex: number } {
+  const resetSelection = resetOnShow && !!settings.value?.select_first_on_show;
+  const retainedId = deletion ? deletion.id : active.value?.id;
+  const id = resetSelection ? undefined : retainedId;
+  const oldIndex = resetSelection ? 0 : deletion?.index ?? selected.value;
+  return { resetSelection, id, oldIndex };
+}
+function applyRefreshedPage(result: RefreshedPage, deletion: DeletionPosition | undefined): boolean {
+  const { refreshed, more } = result;
+  const { resetSelection, id, oldIndex } = refreshSelectionPosition(deletion);
+  resetOnShow = false;
+  restoreRefreshedSelection(refreshed, { id, oldIndex, deletion });
+  if (afterDelete === deletion) afterDelete = undefined;
+  if (!items.value.some(item => item.id === anchorId)) anchorId = active.value?.id;
+  nextOffset = refreshed.length; hasMore.value = more;
+  if (id === active.value?.id) void loadDetail();
+  return resetSelection;
+}
+async function restoreRefreshScroll(generation: number, scrollTop: number): Promise<void> {
+  await nextTick();
+  if (generation === listGeneration && listRoot.value) listRoot.value.scrollTop = scrollTop;
+}
+function refreshTargetCount(): number {
+  return resetOnShow ? PAGE_SIZE : Math.max(PAGE_SIZE, afterDelete?.count ?? items.value.length);
+}
 async function load() {
   conceal();
-  const generation = ++listGeneration, targetCount = resetOnShow ? PAGE_SIZE : Math.max(PAGE_SIZE, afterDelete?.count ?? items.value.length);
+  const generation = ++listGeneration, targetCount = refreshTargetCount();
   const deletion = afterDelete;
   const scrollTop = listRoot.value?.scrollTop ?? 0;
   pageLoading.value = true; pageError.value = '';
   try {
-    const refreshed: Item[] = [];
-    let more = true;
-    // 重建已加载范围；选中项移到下一页时继续查找，保留选择。
-    while (more) {
-      const page = await invoke<Item[]>('list_items', { filter: listFilter.value, offset: refreshed.length, limit: PAGE_SIZE });
-      if (generation !== listGeneration) return;
-      refreshed.push(...page); more = page.length === PAGE_SIZE;
-      const id = resetOnShow ? undefined : deletion?.id ?? active.value?.id;
-      if (refreshed.length >= targetCount && (deletion || !id || refreshed.some(item => item.id === id))) break;
-    }
-    const resetSelection = resetOnShow && !!settings.value?.select_first_on_show;
-    const id = resetSelection ? undefined : deletion ? deletion.id : active.value?.id;
-    const oldIndex = resetSelection ? 0 : deletion?.index ?? selected.value;
-    resetOnShow = false;
-    const previousSelection = selectedIds.value;
-    const unique = new Map(refreshed.map(item => [item.id, item]));
-    items.value = [...unique.values()];
-    const found = items.value.findIndex(item => item.id === id);
-    selected.value = found >= 0 ? found : Math.max(0, Math.min(oldIndex, items.value.length - 1));
-    if (deletion || !id || found < 0) selectOnly(selected.value);
-    else selectedIds.value = new Set(items.value.filter(item => previousSelection.has(item.id)).map(item => item.id));
-    if (afterDelete === deletion) afterDelete = undefined;
-    if (!items.value.some(item => item.id === anchorId)) anchorId = active.value?.id;
-    nextOffset = refreshed.length; hasMore.value = more;
-    if (id === active.value?.id) void loadDetail();
-    await nextTick();
-    if (generation === listGeneration && listRoot.value) listRoot.value.scrollTop = resetSelection ? 0 : scrollTop;
+    const result = await refreshPages(generation, targetCount, deletion);
+    if (!result || generation !== listGeneration) return;
+    const resetSelection = applyRefreshedPage(result, deletion);
+    await restoreRefreshScroll(generation, resetSelection ? 0 : scrollTop);
   } catch (e) {
     if (generation === listGeneration) { pageError.value = '刷新历史失败：' + String(e); retryRefresh = true; }
   } finally {
@@ -360,9 +360,10 @@ async function load() {
   }
 }
 const fileActionBusy = ref(false);
+const fileActionBlocked = computed(() => fileActionBusy.value || busy.value || deleting.value || organizing.value || pendingDelete.value);
 async function runFileAction(action: 'open' | 'reveal', index: number) {
   const id = contextMenu.value?.id ?? active.value?.id;
-  if (!id || fileActionBusy.value || busy.value || deleting.value || organizing.value || pendingDelete.value) return;
+  if (!id || fileActionBlocked.value) return;
   contextMenu.value = null; fileActionBusy.value = true; error.value = '';
   try { await invoke('file_action', { id, index, action }); }
   catch (e) { error.value = String(e); }
@@ -375,50 +376,114 @@ async function paste(plain = false) {
   catch (e) { error.value = String(e); }
   finally { busy.value = false; }
 }
-async function keydown(event: KeyboardEvent) {
+function selectFocusedRecord(target: Element | null): void {
+  const row = target?.closest<HTMLElement>('.list .item[data-id]');
+  if (row) {
+    const index = items.value.findIndex(item => item.id === row.dataset.id);
+    if (index >= 0 && index !== selected.value) { resetOnShow = false; selectOnly(index); }
+  }
+}
+function prepareEnterTarget(event: KeyboardEvent): boolean {
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  if (target?.closest('button:not(.item), select, a, textarea, input:not([type="search"]), [contenteditable]')) return false;
+  const inSearch = target === searchInput.value;
+  const inList = !!target?.closest('.list');
+  selectFocusedRecord(target);
+  const noFocus = !target || target === document.body || target === document.documentElement;
+  if (!inSearch && !inList && !noFocus) return false;
+  return true;
+}
+function isPinShortcut(event: KeyboardEvent): boolean {
+  return event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'p';
+}
+function settingsKeydown(event: KeyboardEvent): void {
+  if (isPinShortcut(event)) event.preventDefault();
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  if (!settingsBusy.value) toggleSettings();
+}
+function isSearchShortcut(event: KeyboardEvent): boolean {
+  return !settingsOpen.value && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'f';
+}
+async function keydown(event: KeyboardEvent): Promise<void> {
   if (settingsOpen.value && settingsRecording.value) return;
   if (event.isComposing || composing.value || event.keyCode === 229) return;
   if (menuInteracting.value) {
     if (event.key === 'Escape') { event.preventDefault(); contextMenu.value = null; }
     return;
   }
-  if (!settingsOpen.value && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'f') { event.preventDefault(); void focusSearch(); return; }
-  const recordShortcut = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === 'p';
-  if (settingsOpen.value) {
-    if (recordShortcut) event.preventDefault();
-    if (event.key === 'Escape') { event.preventDefault(); if (!settingsBusy.value) toggleSettings(); }
-    return;
-  }
+  if (isSearchShortcut(event)) { event.preventDefault(); void focusSearch(); return; }
+  if (settingsOpen.value) { settingsKeydown(event); return; }
+  await recordKeydown(event);
+}
+function handleRecordInput(event: KeyboardEvent): boolean {
+  const recordShortcut = isPinShortcut(event);
   const target = event.target instanceof Element ? event.target : document.activeElement;
   const otherInput = target !== searchInput.value && !!target?.closest('input, textarea, select, [contenteditable]');
-  if (otherInput) return;
+  if (otherInput) return true;
   if (recordShortcut) {
     event.preventDefault();
     if (!event.repeat && !organizing.value && !pendingDelete.value) void changeItems('set_pinned');
-    return;
+    return true;
   }
+  return false;
+}
+async function recordKeydown(event: KeyboardEvent): Promise<void> {
+  if (handleRecordInput(event)) return;
   if (organizing.value) return;
   // 保留工具按钮的原生激活；记录按钮的 Enter 属于记录粘贴协议。
   if (event.key === ' ') return;
-  if (event.key === 'Enter') {
-    const target = event.target instanceof Element ? event.target : document.activeElement;
-    if (target?.closest('button:not(.item), select, a, textarea, input:not([type="search"]), [contenteditable]')) return;
-    const inSearch = target === searchInput.value;
-    const inList = !!target?.closest('.list');
-    const row = target?.closest<HTMLElement>('.list .item[data-id]');
-    if (row) {
-      const index = items.value.findIndex(item => item.id === row.dataset.id);
-      if (index >= 0 && index !== selected.value) { resetOnShow = false; selectOnly(index); }
-    }
-    const noFocus = !target || target === document.body || target === document.documentElement;
-    if (!inSearch && !inList && !noFocus) return;
-  }
+  if (event.key === 'Enter' && !prepareEnterTarget(event)) return;
   if (pendingDelete.value) {
     if (event.key === 'Escape') { event.preventDefault(); pendingDelete.value = null; }
     // 确认条按钮仍可通过 Tab / Enter 操作，但不触发列表粘贴。
     return;
   }
   if (deleting.value) { event.preventDefault(); return; }
+  await dispatchRecordKeydown(event);
+}
+async function prepareNavigation(event: KeyboardEvent): Promise<boolean> {
+  if (event.key === 'ArrowDown' && selected.value === items.value.length - 1 && hasMore.value) {
+    if (pageLoading.value || pageError.value) return false;
+    const generation = listGeneration;
+    await loadMore();
+    if (generation !== listGeneration) return false;
+    if (selected.value === items.value.length - 1 && hasMore.value) return false;
+  }
+  return true;
+}
+async function navigateRecords(event: KeyboardEvent): Promise<void> {
+  const inSearch = event.target === searchInput.value;
+  event.preventDefault();
+  resetOnShow = false;
+  if (!await prepareNavigation(event)) return;
+  if (items.value.length) selectOnly((selected.value + (event.key === 'ArrowDown' ? 1 : -1) + items.value.length) % items.value.length);
+  contextMenu.value = null;
+  void nextTick(() => {
+    const row = listRoot.value?.querySelector<HTMLElement>(`.item[data-id="${active.value?.id}"]`);
+    row?.scrollIntoView({ block: 'nearest' });
+    // 从侧栏/筛选器进入记录导航后，焦点与选中记录一致；搜索中仍可直接输入。
+    if (!inSearch) row?.focus({ preventScroll: true });
+  });
+}
+function pasteFromKeyboard(event: KeyboardEvent): void {
+  if (contextMenu.value) return;
+  event.preventDefault();
+  void paste(event.shiftKey);
+}
+function escapeRecords(event: KeyboardEvent): void {
+  event.preventDefault();
+  if (query.value.length) { query.value = ''; void focusSearch(); return; }
+  conceal();
+  void invoke('hide_main');
+}
+const recordKeyActions: Readonly<Record<string, (event: KeyboardEvent) => void | Promise<void>>> = {
+  Enter: pasteFromKeyboard,
+  ArrowDown: navigateRecords,
+  ArrowUp: navigateRecords,
+  Escape: escapeRecords,
+};
+async function dispatchRecordKeydown(event: KeyboardEvent): Promise<void> {
   const inSearch = event.target === searchInput.value;
   if (event.key === 'Escape' && contextMenu.value) { event.preventDefault(); contextMenu.value = null; return; }
   // 搜索框非空时保留原生 Delete，光标在末尾也不会误删历史。
@@ -427,31 +492,9 @@ async function keydown(event: KeyboardEvent) {
     if (inSearch) return;
     event.preventDefault(); selectedIds.value = new Set(items.value.map(item => item.id)); contextMenu.value = null; return;
   }
-  if (event.key === 'Enter' && contextMenu.value) return;
-  if (event.key === 'Enter') { event.preventDefault(); void paste(event.shiftKey); }
-  else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault();
-    resetOnShow = false;
-    if (event.key === 'ArrowDown' && selected.value === items.value.length - 1 && hasMore.value) {
-      if (pageLoading.value || pageError.value) return;
-      const generation = listGeneration;
-      await loadMore();
-      if (generation !== listGeneration) return;
-      if (selected.value === items.value.length - 1 && hasMore.value) return;
-    }
-    if (items.value.length) selectOnly((selected.value + (event.key === 'ArrowDown' ? 1 : -1) + items.value.length) % items.value.length);
-    contextMenu.value = null;
-    void nextTick(() => {
-      const row = listRoot.value?.querySelector<HTMLElement>(`.item[data-id="${active.value?.id}"]`);
-      row?.scrollIntoView({ block: 'nearest' });
-      // 从侧栏/筛选器进入记录导航后，焦点与选中记录一致；搜索中仍可直接输入。
-      if (!inSearch) row?.focus({ preventScroll: true });
-    });
-  } else if (event.key === 'Escape') {
-    event.preventDefault();
-    if (query.value.length) { query.value = ''; void focusSearch(); } else { conceal(); void invoke('hide_main'); }
-  }
+  await recordKeyActions[event.key]?.(event);
 }
+
 function mainShown() {
   focusMain(); void focusSearch();
   resetOnShow = !!settings.value?.select_first_on_show;
@@ -489,7 +532,7 @@ onMounted(async () => {
   window.addEventListener('resize', checkLoadMore);
   window.addEventListener('resize', schedulePreviewGeometry);
 });
-onUnmounted(() => { cancelAnimationFrame(geometryFrame); window.removeEventListener('resize', schedulePreviewGeometry); suspendFloatingPreview(); clearInterval(fileTimer); conceal(); window.removeEventListener('blur', blurMain); document.removeEventListener('visibilitychange', visibilityChanged); clearTimeout(searchTimer); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', focusMain); window.removeEventListener('resize', checkLoadMore); listGeneration++; detailGeneration++; groupGeneration++; });
+onUnmounted(() => { cancelPreviewGeometry(); window.removeEventListener('resize', schedulePreviewGeometry); suspendFloatingPreview(); clearInterval(fileTimer); conceal(); window.removeEventListener('blur', blurMain); document.removeEventListener('visibilitychange', visibilityChanged); clearTimeout(searchTimer); stops.forEach(stop => stop()); window.removeEventListener('keydown', keydown); window.removeEventListener('focus', focusMain); window.removeEventListener('resize', checkLoadMore); listGeneration++; invalidateDetail(); groupGeneration++; });
 </script>
 
 <template>

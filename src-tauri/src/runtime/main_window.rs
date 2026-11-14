@@ -1,0 +1,238 @@
+use super::{
+    clear_matching_error, new_paste_intent, on_main, paste_generation, report, toggle_decision,
+    update_error, Control, State, ToggleDecision, LAST_EXTERNAL,
+};
+use crate::{diag, hook, main_position, platform};
+use anyhow::{anyhow, Result};
+use std::sync::{atomic::Ordering, Arc};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
+
+struct ToggleRequest {
+    external: isize,
+    location: Option<main_position::Location>,
+}
+struct ToggleSnapshot {
+    visible: bool,
+    minimized: bool,
+    foreground: bool,
+    before: Option<String>,
+}
+
+pub(super) fn open_settings(app: &AppHandle, state: &Arc<State>) -> Result<()> {
+    state.settings_requested.store(true, Ordering::Release);
+    let shared = state.clone();
+    let handle = app.clone();
+    on_main(app, move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        if let Err(error) = show_settings(&window, &shared) {
+            diag::write(format!("open settings failed: {error}"));
+        }
+    })
+}
+
+fn show_settings(window: &WebviewWindow, state: &State) -> Result<()> {
+    new_paste_intent();
+    platform::arm_main_menu_guard();
+    if let Err(error) = window.unminimize() {
+        diag::write(format!("settings restore failed: {error}"));
+    }
+    window.show()?;
+    let activated = unsafe {
+        SetForegroundWindow(platform::hwnd(state.main.load(Ordering::Acquire))).as_bool()
+    };
+    if !activated {
+        diag::write("settings foreground activation rejected".into());
+    }
+    if state.main_ready.load(Ordering::Acquire) {
+        window.emit("open-settings", ())?;
+        state.settings_requested.store(false, Ordering::Release);
+    }
+    Ok(())
+}
+
+pub(super) fn toggle(app: &AppHandle, state: &Arc<State>) -> Result<()> {
+    let current = platform::foreground();
+    let external = if platform::valid_external(current) {
+        current
+    } else {
+        LAST_EXTERNAL.load(Ordering::Acquire)
+    };
+    let mode = state
+        .settings
+        .lock()
+        .map_err(|_| anyhow!("设置状态不可用"))?
+        .main_position;
+    let location = if current == state.main.load(Ordering::Acquire) {
+        None
+    } else {
+        main_position::capture(mode, external)
+    };
+    let shared = state.clone();
+    let handle = app.clone();
+    on_main(app, move || {
+        platform::hide(shared.quick.load(Ordering::Acquire));
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        if let Err(error) = toggle_window(&window, &shared, ToggleRequest { external, location }) {
+            diag::write(format!("main window toggle failed: {error}"));
+        }
+    })
+}
+
+fn toggle_window(window: &WebviewWindow, state: &State, request: ToggleRequest) -> Result<()> {
+    let snapshot = ToggleSnapshot {
+        visible: window.is_visible()?,
+        minimized: window.is_minimized()?,
+        foreground: platform::foreground() == state.main.load(Ordering::Acquire),
+        before: diag::enabled().then(diag::foreground),
+    };
+    if toggle_decision(snapshot.visible, snapshot.minimized, snapshot.foreground)
+        == ToggleDecision::Hide
+    {
+        let result = window.hide();
+        diag::panel(false, result.is_err());
+        diag::write(format!("toggle visible={} minimized={} foreground={} decision=hide before={:?} hide_ok={} after={}", snapshot.visible, snapshot.minimized, snapshot.foreground, snapshot.before, result.is_ok(), diag::foreground()));
+        result?;
+        window.emit("main-hidden", ())?;
+        return Ok(());
+    }
+    show(window, state, request, snapshot)
+}
+
+fn show(
+    window: &WebviewWindow,
+    state: &State,
+    request: ToggleRequest,
+    snapshot: ToggleSnapshot,
+) -> Result<()> {
+    new_paste_intent();
+    update_error(state, None)?;
+    state.target.store(request.external, Ordering::Release);
+    diag::modifier_snapshot("toggle", "before_show");
+    platform::arm_main_menu_guard();
+    let restored = window.unminimize();
+    if let Some(location) = request.location {
+        if let Err(error) = main_position::apply(window, location) {
+            diag::write(format!("main_position failed={error}"));
+        }
+    }
+    let shown = window.show();
+    let (raised, foreground_ok) = raise_main(platform::hwnd(state.main.load(Ordering::Acquire)));
+    // 显示过程也受保护，完成后再保留完整的 300ms 时窗。
+    platform::arm_main_menu_guard();
+    diag::modifier_snapshot("toggle", "after_show");
+    if shown.is_ok() {
+        if let Err(error) = window.emit("main-shown", ()) {
+            diag::write(format!("main shown event failed: {error}"));
+        }
+    }
+    diag::panel(false, shown.is_ok());
+    diag::write(format!("toggle visible={} minimized={} foreground={} decision=show before={:?} restore_ok={} show_ok={} raise_ok={} set_foreground_ok={foreground_ok} after={}", snapshot.visible, snapshot.minimized, snapshot.foreground, snapshot.before, restored.is_ok(), shown.is_ok(), raised, diag::foreground()));
+    shown?;
+    restored?;
+    Ok(())
+}
+
+fn raise_main(main: HWND) -> (bool, bool) {
+    let raised = unsafe {
+        SetWindowPos(
+            main,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
+    // tao 的 set_focus 失败回退会注入 Alt，这里只使用原生激活。
+    let foreground_ok = unsafe { SetForegroundWindow(main).as_bool() };
+    (raised.is_ok(), foreground_ok)
+}
+
+pub(super) fn show_notice(
+    app: &AppHandle,
+    state: &Arc<State>,
+    message: String,
+    generation: Option<u64>,
+) -> Result<()> {
+    let shared = state.clone();
+    on_main(app, move || {
+        if generation.is_some_and(|g| g != paste_generation()) {
+            return;
+        }
+        // 提示跟随当前前台且不激活；原生回调期间不持有错误缓存锁。
+        if let Err(error) = platform::show_notice(shared.quick.load(Ordering::Acquire)) {
+            diag::write(format!("notice show failed: {error}"));
+            return;
+        }
+        if let Err(error) = clear_matching_error(&shared, &message) {
+            diag::write(format!("notice error acknowledgement failed: {error}"));
+        }
+    })
+}
+
+pub(super) fn show_quick(
+    app: &AppHandle,
+    state: &Arc<State>,
+    target: isize,
+    generation: u64,
+) -> Result<()> {
+    let quick = state.quick.load(Ordering::Acquire);
+    let shared = state.clone();
+    let handle = app.clone();
+    on_main(app, move || {
+        if generation != paste_generation() {
+            return;
+        }
+        if platform::show_quick(quick, target).is_err() {
+            if let Err(error) = shared
+                .control
+                .send(Control::Hook(hook::Action::Cancel, generation))
+            {
+                diag::write(format!("quick cancel control failed: {error}"));
+            }
+            report(&handle, &shared, "前台窗口已变化，面板已取消");
+        }
+    })
+}
+
+pub(super) fn recorded_hotkey(app: &AppHandle, packed: u32, session: u64) -> Result<()> {
+    if session != hook::RECORD_SESSION.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let value = if packed == 0 {
+        None
+    } else {
+        Some(format!("custom:{}:{}", (packed >> 8) & 15, packed & 255))
+    };
+    main.emit(
+        "hotkey-recorded",
+        serde_json::json!({"session":session,"hotkey":value}),
+    )?;
+    Ok(())
+}
+
+pub(super) fn hide_main(app: &AppHandle, _state: &State) -> Result<()> {
+    let handle = app.clone();
+    on_main(app, move || {
+        let Some(window) = handle.get_webview_window("main") else {
+            return;
+        };
+        if let Err(error) = window.hide() {
+            diag::write(format!("main hide failed: {error}"));
+            return;
+        }
+        diag::panel(false, false);
+        if let Err(error) = window.emit("main-hidden", ()) {
+            diag::write(format!("main hidden event failed: {error}"));
+        }
+    })
+}

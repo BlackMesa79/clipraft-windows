@@ -49,9 +49,10 @@ fn write_sensitive(
     expiry: Option<i64>,
 ) -> Result<()> {
     let json: String = conn.query_row("SELECT view FROM items WHERE id=?1", [id], |r| r.get(0))?;
-    let mut view: serde_json::Value = serde_json::from_str(&json)?;
-    view["summary"] = data.summary.clone().into();
-    view["sensitive_hits"] = serde_json::to_value(&data.hits)?;
+    let mut view: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&json).context("已存记录视图不是有效 JSON 对象")?;
+    view.insert("summary".into(), data.summary.clone().into());
+    view.insert("sensitive_hits".into(), serde_json::to_value(&data.hits)?);
     conn.execute("UPDATE items SET sensitive=1,expires_at=?2,search_text='',search_pinyin='',view=?3 WHERE id=?1",params![id,expiry,serde_json::to_string(&view)?])?;
     for hit in &data.hits {
         crate::diag::write(format!("sensitive id={id} rule={}", hit.rule));
@@ -86,6 +87,23 @@ impl Storage {
         if !(1..=1440).contains(&ttl) {
             bail!("敏感内容保留分钟数必须为 1–1440");
         }
+        let updates = self.prepare_sensitivity(ids, ttl)?;
+        let tx = self.conn.transaction()?;
+        let now = unix_millis();
+        if value {
+            mark_sensitive_batch(&tx, &updates, now)?;
+        } else {
+            unmark_sensitive_batch(&tx, &updates)?;
+        }
+        tx.commit()?;
+        Ok(updates.len())
+    }
+
+    fn prepare_sensitivity<'a>(
+        &self,
+        ids: &'a [String],
+        ttl: u32,
+    ) -> Result<Vec<PreparedSensitivity<'a>>> {
         let mut updates = Vec::new();
         let mut seen = HashSet::new();
         for id in ids {
@@ -95,88 +113,13 @@ impl Storage {
             if !self.conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM items WHERE id=?1)",
                 [id],
-                |r| r.get::<_, bool>(0),
+                |row| row.get::<_, bool>(0),
             )? {
                 continue;
             }
-            let clip = self.load(id)?;
-            let text = clip.text().unwrap_or_else(|| search_text(&clip));
-            let mut hits = sensitive::detect(&text, true);
-            if hits.is_empty() {
-                hits.push(Hit {
-                    rule: "manual".into(),
-                    range: 0..text.len(),
-                });
-            }
-            let detection = Detection::new(&text, hits, ttl);
-            updates.push((id, clip, detection));
+            updates.push(PreparedSensitivity::new(id, self.load(id)?, ttl));
         }
-        let tx = self.conn.transaction()?;
-        let now = unix_millis();
-        for (id, clip, data) in &updates {
-            if value {
-                write_sensitive(&tx, id, data, Some(now.saturating_add(data.ttl)))?;
-            } else {
-                let json: String =
-                    tx.query_row("SELECT view FROM items WHERE id=?1", [id], |r| r.get(0))?;
-                let mut view: serde_json::Value = serde_json::from_str(&json)?;
-                let search = search_text(clip);
-                let summary = if clip.kind() == "files" {
-                    clip.get("CF_HDROP")
-                        .and_then(model::decode_hdrop)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p))
-                        .collect::<Vec<_>>()
-                        .join("、")
-                } else {
-                    clip.text().unwrap_or_else(|| {
-                        if clip.kind() == "image" {
-                            "图片".into()
-                        } else {
-                            "富文本".into()
-                        }
-                    })
-                };
-                view["summary"] = summary.chars().take(180).collect::<String>().into();
-                view.as_object_mut().unwrap().remove("sensitive_hits");
-                tx.execute("UPDATE items SET sensitive=-1,expires_at=NULL,search_text=?2,search_pinyin=?3,view=?4 WHERE id=?1",params![id,search,search::pinyin_text(&search),serde_json::to_string(&view)?])?;
-            }
-        }
-        tx.commit()?;
-        Ok(updates.len())
-    }
-    /// 详情与显示原文共用读取入口；仅显式 reveal 跳过脱敏。
-    pub(crate) fn display_detail(&self, id: &str, reveal: bool) -> Result<crate::ItemDetail> {
-        let (state, json): (i64, String) =
-            self.conn
-                .query_row("SELECT sensitive,view FROM items WHERE id=?1", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?;
-        let clip = self.load(id)?;
-        if state != 1 || reveal {
-            return Ok(crate::detail(&clip));
-        }
-        let text = clip.text().unwrap_or_default();
-        let view: serde_json::Value = serde_json::from_str(&json)?;
-        let hits: Vec<Hit> = view
-            .get("sensitive_hits")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_else(|| {
-                vec![Hit {
-                    rule: "manual".into(),
-                    range: 0..text.len(),
-                }]
-            });
-        let masked = sensitive::redact(&text, &hits);
-        let mut chars = masked.chars();
-        let text = chars.by_ref().take(20000).collect();
-        Ok(crate::ItemDetail {
-            text,
-            truncated: chars.next().is_some(),
-            files: Vec::new(),
-        })
+        Ok(updates)
     }
     pub fn next_expiry(&self) -> Result<Option<i64>> {
         Ok(self
@@ -190,5 +133,92 @@ impl Storage {
             .query_map([now], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
         self.delete(&ids)
+    }
+}
+
+struct PreparedSensitivity<'a> {
+    id: &'a str,
+    clip: Clip,
+    detection: Detection,
+}
+
+impl<'a> PreparedSensitivity<'a> {
+    fn new(id: &'a str, clip: Clip, ttl: u32) -> Self {
+        let text = clip.text().unwrap_or_else(|| search_text(&clip));
+        let mut hits = sensitive::detect(&text, true);
+        if hits.is_empty() {
+            hits.push(Hit {
+                rule: "manual".into(),
+                range: 0..text.len(),
+            });
+        }
+        Self {
+            id,
+            detection: Detection::new(&text, hits, ttl),
+            clip,
+        }
+    }
+}
+
+fn mark_sensitive_batch(
+    conn: &Connection,
+    updates: &[PreparedSensitivity<'_>],
+    now: i64,
+) -> Result<()> {
+    for update in updates {
+        let detection = &update.detection;
+        write_sensitive(
+            conn,
+            update.id,
+            detection,
+            Some(now.saturating_add(detection.ttl)),
+        )?;
+    }
+    Ok(())
+}
+
+fn unmark_sensitive_batch(conn: &Connection, updates: &[PreparedSensitivity<'_>]) -> Result<()> {
+    for update in updates {
+        restore_sensitive(conn, update.id, &update.clip)?;
+    }
+    Ok(())
+}
+
+fn restore_sensitive(conn: &Connection, id: &str, clip: &Clip) -> Result<()> {
+    let json: String =
+        conn.query_row("SELECT view FROM items WHERE id=?1", [id], |row| row.get(0))?;
+    let mut view: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&json).context("已存记录视图不是有效 JSON 对象")?;
+    let search = search_text(clip);
+    view.insert(
+        "summary".into(),
+        restored_summary(clip)
+            .chars()
+            .take(180)
+            .collect::<String>()
+            .into(),
+    );
+    view.remove("sensitive_hits");
+    conn.execute("UPDATE items SET sensitive=-1,expires_at=NULL,search_text=?2,search_pinyin=?3,view=?4 WHERE id=?1",params![id,search,search::pinyin_text(&search),serde_json::to_string(&view)?])?;
+    Ok(())
+}
+
+fn restored_summary(clip: &Clip) -> String {
+    if clip.kind() == "files" {
+        clip.get("CF_HDROP")
+            .and_then(model::decode_hdrop)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.rsplit(['\\', '/']).next().unwrap_or(p))
+            .collect::<Vec<_>>()
+            .join("、")
+    } else {
+        clip.text().unwrap_or_else(|| {
+            if clip.kind() == "image" {
+                "图片".into()
+            } else {
+                "富文本".into()
+            }
+        })
     }
 }

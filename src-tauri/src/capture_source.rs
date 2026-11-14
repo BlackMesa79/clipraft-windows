@@ -49,9 +49,10 @@ pub(crate) fn truncate_title(title: &str) -> Option<String> {
 }
 
 pub(crate) fn capture(owner: &ClipboardOwner) -> CaptureSource {
-    let foreground = crate::clipboard_owner::window_process(crate::platform::hwnd(
-        crate::platform::foreground(),
-    ));
+    let foreground = crate::clipboard_owner::window_process(
+        crate::platform::hwnd(crate::platform::foreground()),
+        crate::diag::write,
+    );
     let Some(window) = select_window(owner, &foreground, std::process::id()) else {
         return CaptureSource::default();
     };

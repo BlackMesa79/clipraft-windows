@@ -771,10 +771,6 @@ fn compact_preview_reads_old_items_and_masks_sensitive_views() {
     assert!(view.sensitive);
     assert!(view.thumbnail.is_none() && view.preview.is_none() && view.files.is_empty());
     assert!(!view.summary.contains("Hello"));
-    assert!(!s
-        .display_detail(&all[0], false)
-        .unwrap()
-        .text
-        .contains("Hello"));
+    assert!(!s.display_detail(&all[0]).unwrap().text.contains("Hello"));
     assert!(s.preview_item("not-a-record").is_err());
 }

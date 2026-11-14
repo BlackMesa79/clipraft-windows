@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod compression_tests;
 pub mod crypto;
+mod detail;
 mod groups;
 #[cfg(test)]
 mod groups_tests;
@@ -219,7 +220,7 @@ impl Storage {
         let mut storage = Self {
             conn,
             blobs: root.join("data/blobs"),
-            key: crypto::derive(master),
+            key: crypto::derive(master)?,
         };
         migrations::upgrade(&mut storage, root, hook)?;
         Ok(storage)

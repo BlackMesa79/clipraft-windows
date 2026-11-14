@@ -27,28 +27,64 @@ export function shortcutParts(id?:string):[number,number]|undefined {
   if (presetShortcuts[id]) return presetShortcuts[id];
   const m=/^custom:(\d+):(\d+)$/.exec(id);if(m)return [Number(m[1]),Number(m[2])];
 }
-export function shortcutLabel(id?:string,modifiersOnly=false):string {
-  const parts=shortcutParts(id);if(!parts)return '';
-  const [mods,key]=parts;const names=[...[[8,'Win'],[1,'Ctrl'],[4,'Alt'],[2,'Shift']] as const].filter(([bit])=>!!(mods&bit)).map(([,name])=>String(name));
-  if(!modifiersOnly) names.push(key>=48&&key<=90?String.fromCharCode(key):key>=112&&key<=135?`F${key-111}`:({32:'Space',192:'`',189:'-',187:'=',186:';',188:',',190:'.',191:'/',219:'[',221:']',220:'\\',222:"'"} as Record<number,string>)[key]??`VK${key}`);
-  return names.join(' + ');
+const modifierNames = [[8, 'Win'], [1, 'Ctrl'], [4, 'Alt'], [2, 'Shift']] as const;
+const keyLabels: Readonly<Record<number, string>> = {
+  32: 'Space', 192: '`', 189: '-', 187: '=', 186: ';', 188: ',', 190: '.',
+  191: '/', 219: '[', 221: ']', 220: String.fromCharCode(92), 222: "'",
+};
+const triggerRanges = [[48, 57], [65, 90], [112, 135], [32, 32], [186, 192], [219, 222]] as const;
+
+function modifierLabels(modifiers: number): string[] {
+  return modifierNames.filter(([bit]) => !!(modifiers & bit)).map(([, name]) => name);
+}
+
+function keyLabel(key: number): string {
+  if (key >= 48 && key <= 90) return String.fromCharCode(key);
+  if (key >= 112 && key <= 135) return `F${key - 111}`;
+  return keyLabels[key] ?? `VK${key}`;
+}
+
+export function shortcutModifiersLabel(id?: string): string {
+  const parts = shortcutParts(id);
+  return parts ? modifierLabels(parts[0]).join(' + ') : '';
+}
+
+export function shortcutLabel(id?: string): string {
+  const parts = shortcutParts(id);
+  if (!parts) return '';
+  return [...modifierLabels(parts[0]), keyLabel(parts[1])].join(' + ');
+}
+
+function reservedShortcut(modifiers: number, key: number): boolean {
+  return (modifiers === 1 && [65, 67, 86, 88, 89, 90].includes(key)) ||
+    ((modifiers & 8) !== 0 && key === 76) || key === 123;
 }
 
 export function shortcutError(id:string):string {
   const parts=shortcutParts(id);if(!parts)return '快捷键格式无效';
   const [mods,key]=parts;
   if(!mods || (mods&~15)!==0 || !(mods&13))return '快捷键至少包含 Ctrl、Alt 或 Win';
-  if(!((key>=48&&key<=57)||(key>=65&&key<=90)||(key>=112&&key<=135)||key===32||(key>=186&&key<=192)||(key>=219&&key<=222)))return '请使用字母、数字、F1–F24、空格或常用标点作为触发键';
-  if((mods===1&&[65,67,86,88,89,90].includes(key))||((mods&8)!==0&&key===76)||key===123)return '此组合保留给系统或基础编辑操作，请换一个快捷键';
+  if (!triggerRanges.some(([min, max]) => key >= min && key <= max))return '请使用字母、数字、F1–F24、空格或常用标点作为触发键';
+  if (reservedShortcut(mods, key))return '此组合保留给系统或基础编辑操作，请换一个快捷键';
   return '';
 }
 
+const physicalPunctuation: Readonly<Record<string, number>> = {
+  Space: 32, Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190,
+  Slash: 191, Backquote: 192, BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+};
+
+function physicalKey(code: string): number {
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return code.charCodeAt(5);
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return 111 + Number(code.slice(1));
+  return physicalPunctuation[code] ?? 0;
+}
+
 // 录制使用物理键位，避免 Shift、输入法或不同字符大小写改变热键。
-export function shortcutFromKeyboard(event:KeyboardEvent):string|undefined {
+export function shortcutFromKeyboard(event: KeyboardEvent): string | undefined {
   if (/^(Control|Shift|Alt|Meta)(Left|Right)$/.test(event.code)) return;
-  const code=event.code;
-  const oem:Record<string,number>={Space:32,Semicolon:186,Equal:187,Comma:188,Minus:189,Period:190,Slash:191,Backquote:192,BracketLeft:219,Backslash:220,BracketRight:221,Quote:222};
-  const key=/^Key[A-Z]$/.test(code)?code.charCodeAt(3):/^Digit[0-9]$/.test(code)?code.charCodeAt(5):/^F([1-9]|1[0-9]|2[0-4])$/.test(code)?111+Number(code.slice(1)):oem[code]??0;
-  const mods=Number(event.ctrlKey)|(Number(event.shiftKey)<<1)|(Number(event.altKey)<<2)|(Number(event.metaKey)<<3);
-  return `custom:${mods}:${key}`;
+  const modifiers = Number(event.ctrlKey) | (Number(event.shiftKey) << 1) |
+    (Number(event.altKey) << 2) | (Number(event.metaKey) << 3);
+  return `custom:${modifiers}:${physicalKey(event.code)}`;
 }

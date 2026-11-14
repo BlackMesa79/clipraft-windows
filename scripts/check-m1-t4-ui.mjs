@@ -171,12 +171,12 @@ try {
   assert(await evaluate("!!document.querySelector('input[type=search]')"));assert.equal(await evaluate("document.querySelector('input').value"),'nihao');
   checks.push('设置页 Esc 返回列表，保留搜索并恢复输入焦点');
   await fresh();await evaluate('window.holdNext=true');await scroll();
-  await until(()=>evaluate('typeof window.releasePage===\"function\"'),'延迟分页未开始');
+  await until(()=>evaluate('typeof window.releasePage==="function"'),'延迟分页未开始');
   await input('Other');await count(30);await evaluate('window.releasePage()');await pause(100);await count(30);
   assert.deepEqual(await chosen(),['Other 220']);checks.push('筛选变更后丢弃过期分页响应');
   await fresh();await click(99);await evaluate('window.holdNext=true');
   // 不等待处理器完成：模拟方向键等待分页时用户立即输入新查询。
-  await press('ArrowDown',{},'window');await until(()=>evaluate('typeof window.releasePage===\"function\"'),'方向键分页未开始');
+  await press('ArrowDown',{},'window');await until(()=>evaluate('typeof window.releasePage==="function"'),'方向键分页未开始');
   await input('Other');await count(30);await evaluate('window.releasePage()');await pause(100);
   assert.deepEqual(await chosen(),['Other 220']);checks.push('等待旧分页的方向键不会移动新搜索的首条选择');
   await fresh();await evaluate('window.failNext=true');await scroll();

@@ -207,6 +207,50 @@ fn failed_blob_deletion_is_reported_and_retried_on_scan() {
     drop(locked);
     assert_eq!(s.scan_orphan_blobs().unwrap().reclaimed_blobs, 1);
 }
+
+#[test]
+fn vacuum_failure_reports_maintenance_after_rows_are_committed() {
+    use rusqlite::ffi;
+    use std::ffi::{c_char, c_int, c_void};
+
+    unsafe extern "C" fn deny_attach(
+        _: *mut c_void,
+        action: c_int,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> c_int {
+        if action == ffi::SQLITE_ATTACH {
+            ffi::SQLITE_DENY
+        } else {
+            ffi::SQLITE_OK
+        }
+    }
+
+    let fixture = Fixture::new();
+    let mut store = fixture.open();
+    seed(&store, 201);
+    // VACUUM 内部需要 ATTACH；仅此独立连接拒绝它，删除事务仍可正常提交。
+    let handle = unsafe { store.conn.handle() };
+    assert_eq!(
+        unsafe { ffi::sqlite3_set_authorizer(handle, Some(deny_attach), std::ptr::null_mut()) },
+        ffi::SQLITE_OK
+    );
+    let report = store.delete(&ids(&store)).unwrap();
+    assert_eq!(
+        unsafe { ffi::sqlite3_set_authorizer(handle, None, std::ptr::null_mut()) },
+        ffi::SQLITE_OK
+    );
+    assert_eq!(report.deleted_items, 201);
+    assert_eq!(report.deleted_ids.len(), 201);
+    assert!(!report.vacuumed);
+    assert_eq!(report.maintenance_errors.len(), 1);
+    assert!(report.maintenance_errors[0].starts_with("VACUUM 失败："));
+    assert!(ids(&store).is_empty());
+    drop(store);
+    assert!(ids(&fixture.open()).is_empty());
+}
 #[test]
 fn orphan_scan_only_removes_hash_orphans_and_tmp_regular_files() {
     let f = Fixture::new();

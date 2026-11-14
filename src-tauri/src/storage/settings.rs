@@ -1,6 +1,6 @@
 use super::Storage;
 use crate::settings::Settings;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 impl Storage {
     pub fn load_settings(&self) -> Result<Settings> {
@@ -10,13 +10,13 @@ impl Storage {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
-        Ok(Settings::from_rows(&rows, crate::diag::write))
+        Settings::from_rows(&rows, crate::diag::write)
     }
     pub fn save_settings(&mut self, settings: &Settings) -> Result<()> {
         let settings = settings.clone().normalized()?;
         let json = serde_json::to_value(&settings)?;
         let tx = self.conn.transaction()?;
-        for (key, value) in json.as_object().unwrap() {
+        for (key, value) in json.as_object().context("序列化设置不是 JSON 对象")? {
             tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, &value.to_string()])?;
         }
         tx.commit()?;

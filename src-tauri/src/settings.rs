@@ -1,7 +1,9 @@
+mod rows;
 use crate::storage::{validate_retention_policy, RetentionPolicy};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 pub const MB: u64 = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,39 +38,46 @@ impl Hotkey {
         Shortcut { key, modifiers }
     }
     pub fn label(self) -> String {
-        self.shortcut().label(false)
+        self.shortcut().label()
     }
     pub fn hold_label(self) -> String {
-        self.shortcut().label(true)
+        self.shortcut().hold_label()
     }
 }
 impl Shortcut {
-    pub fn label(self, modifiers_only: bool) -> String {
-        let mut parts: Vec<String> = [(8, "Win"), (1, "Ctrl"), (4, "Alt"), (2, "Shift")]
+    fn modifier_labels(self) -> Vec<String> {
+        [(8, "Win"), (1, "Ctrl"), (4, "Alt"), (2, "Shift")]
             .into_iter()
             .filter(|(bit, _)| self.modifiers & bit != 0)
             .map(|(_, name)| name.into())
-            .collect();
-        if !modifiers_only {
-            parts.push(match self.key {
-                0x30..=0x39 | 0x41..=0x5A => char::from_u32(self.key).unwrap().to_string(),
-                0x70..=0x87 => format!("F{}", self.key - 0x6f),
-                0x20 => "Space".into(),
-                0xC0 => "`".into(),
-                0xBD => "-".into(),
-                0xBB => "=".into(),
-                0xBA => ";".into(),
-                0xBC => ",".into(),
-                0xBE => ".".into(),
-                0xBF => "/".into(),
-                0xDB => "[".into(),
-                0xDD => "]".into(),
-                0xDC => "\\".into(),
-                0xDE => "'".into(),
-                _ => format!("VK{:02X}", self.key),
-            });
-        }
+            .collect()
+    }
+    pub fn hold_label(self) -> String {
+        self.modifier_labels().join(" + ")
+    }
+    pub fn label(self) -> String {
+        let mut parts = self.modifier_labels();
+        parts.push(self.key_label());
         parts.join(" + ")
+    }
+    fn key_label(self) -> String {
+        match self.key {
+            0x30..=0x39 | 0x41..=0x5A => char::from(self.key as u8).to_string(),
+            0x70..=0x87 => format!("F{}", self.key - 0x6f),
+            0x20 => "Space".into(),
+            0xC0 => "`".into(),
+            0xBD => "-".into(),
+            0xBB => "=".into(),
+            0xBA => ";".into(),
+            0xBC => ",".into(),
+            0xBE => ".".into(),
+            0xBF => "/".into(),
+            0xDB => "[".into(),
+            0xDD => "]".into(),
+            0xDC => "\\".into(),
+            0xDE => "'".into(),
+            _ => format!("VK{:02X}", self.key),
+        }
     }
 }
 impl From<Hotkey> for String {
@@ -252,7 +261,11 @@ pub(crate) fn normalize_ignored_app(raw: &str) -> Result<Option<&str>> {
     if raw.is_empty() {
         return Ok(None);
     }
-    let name = raw.rsplit(['\\', '/']).next().unwrap().trim();
+    let name = raw
+        .rsplit(['\\', '/'])
+        .next()
+        .context("忽略程序路径为空")?
+        .trim();
     if name.len() > 255
         || name.len() <= 4
         || !name.to_ascii_lowercase().ends_with(".exe")
@@ -291,7 +304,9 @@ impl Settings {
         validate_retention_policy(&self.retention_policy())?;
         let values = serde_json::to_value(self)?;
         for (key, range) in ranges() {
-            let value = values[key].as_u64().unwrap();
+            let value = values[key]
+                .as_u64()
+                .with_context(|| format!("设置字段 {key} 不是无符号整数"))?;
             if value < range.min || value > range.max {
                 bail!(
                     "{}必须在 {} 到 {} 之间",
@@ -313,74 +328,6 @@ impl Settings {
         self.ignored_apps = normalize_ignored_apps(&self.ignored_apps)?;
         self.validate()?;
         Ok(self)
-    }
-    /// 逐项解析与校验；日志不包含配置值。
-    pub fn from_rows(rows: &BTreeMap<String, String>, mut warn: impl FnMut(String)) -> Self {
-        let defaults = Self::default();
-        let mut result = defaults.clone();
-        let default_json = serde_json::to_value(&defaults).unwrap();
-        for (key, _) in default_json.as_object().unwrap() {
-            let parsed = rows
-                .get(key)
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-            if key == "ignored_apps" {
-                if let Some(entries) = parsed.as_ref().and_then(|value| value.as_array()) {
-                    let mut seen = HashSet::new();
-                    result.ignored_apps.clear();
-                    for (index, entry) in entries.iter().enumerate() {
-                        match entry.as_str().and_then(|raw| normalize_ignored_app(raw).ok()) {
-                            Some(Some(name)) => {
-                                if seen.insert(name.to_lowercase()) {
-                                    if result.ignored_apps.len() < 256 {
-                                        result.ignored_apps.push(name.to_string());
-                                    } else {
-                                        warn(format!("settings discard key=ignored_apps index={index} reason=too_many"));
-                                    }
-                                }
-                            }
-                            Some(None) => {}
-                            None => warn(format!("settings discard key=ignored_apps index={index} reason=invalid_entry")),
-                        }
-                    }
-                    continue;
-                }
-            }
-            let candidate = parsed.and_then(|value| {
-                let mut json = default_json.clone();
-                json[key] = value;
-                serde_json::from_value::<Self>(json)
-                    .ok()
-                    .filter(|s| s.validate_fields().is_ok())
-            });
-            if let Some(candidate) = candidate {
-                let mut json = serde_json::to_value(&result).unwrap();
-                json[key] = serde_json::to_value(candidate).unwrap()[key].clone();
-                result = serde_json::from_value(json).unwrap();
-            } else {
-                warn(format!(
-                    "settings fallback key={key} reason=missing_or_invalid"
-                ));
-            }
-        }
-        if validate_hotkeys(result.main_hotkey, result.quick_hotkey).is_err() {
-            if rows
-                .get("unified_hotkey")
-                .and_then(|raw| serde_json::from_str::<bool>(raw).ok())
-                == Some(true)
-            {
-                // 删除合并模式后优先保留用户主热键，只调整失效的快速面板组合。
-                result.quick_hotkey = QUICK_HOTKEYS
-                    .into_iter()
-                    .find(|key| validate_hotkeys(result.main_hotkey, *key).is_ok())
-                    .unwrap();
-                warn("settings fallback key=quick_hotkey reason=removed_unified_mode".into());
-            } else {
-                result.main_hotkey = defaults.main_hotkey;
-                result.quick_hotkey = defaults.quick_hotkey;
-                warn("settings fallback key=main_hotkey,quick_hotkey reason=conflict".into());
-            }
-        }
-        result
     }
 }
 fn field_label(key: &str) -> &str {
@@ -495,7 +442,7 @@ mod tests {
                 let mut data = rows(&saved);
                 data.insert(key.into(), bad.clone());
                 let mut warnings = Vec::new();
-                let actual = Settings::from_rows(&data, |w| warnings.push(w));
+                let actual = Settings::from_rows(&data, |w| warnings.push(w)).unwrap();
                 let mut expected = serde_json::to_value(&saved).unwrap();
                 expected[key] = serde_json::to_value(Settings::default()).unwrap()[key].clone();
                 assert_eq!(
@@ -558,7 +505,7 @@ mod tests {
         assert_eq!(normalized.ignored_apps, expected);
         assert_eq!(normalized.clone().normalized().unwrap(), normalized);
         assert_eq!(
-            Settings::from_rows(&rows(&saved), |_| panic!("有效配置")),
+            Settings::from_rows(&rows(&saved), |_| panic!("有效配置")).unwrap(),
             normalized
         );
         let empty = Settings {
@@ -567,7 +514,7 @@ mod tests {
         };
         assert!(empty.clone().normalized().unwrap().ignored_apps.is_empty());
         assert_eq!(
-            Settings::from_rows(&rows(&empty), |_| panic!("空列表有效")),
+            Settings::from_rows(&rows(&empty), |_| panic!("空列表有效")).unwrap(),
             empty.normalized().unwrap()
         );
     }
@@ -589,7 +536,7 @@ mod tests {
                 "{name}"
             );
             let mut warnings = Vec::new();
-            let actual = Settings::from_rows(&rows(&saved), |w| warnings.push(w));
+            let actual = Settings::from_rows(&rows(&saved), |w| warnings.push(w)).unwrap();
             assert_eq!(
                 actual,
                 Settings {
@@ -612,11 +559,14 @@ mod tests {
             r#"["Good.exe",42,null,"bad.dll","GOOD.EXE"," "]"#.into(),
         );
         let mut warnings = Vec::new();
-        let actual = Settings::from_rows(&data, |w| warnings.push(w));
+        let actual = Settings::from_rows(&data, |w| warnings.push(w)).unwrap();
         assert_eq!(actual.ignored_apps, ["Good.exe"]);
         assert_eq!(warnings.len(), 3);
         data.insert("ignored_apps".into(), r#"["bad.dll"]"#.into());
-        assert!(Settings::from_rows(&data, |_| {}).ignored_apps.is_empty());
+        assert!(Settings::from_rows(&data, |_| {})
+            .unwrap()
+            .ignored_apps
+            .is_empty());
     }
 
     #[test]
@@ -677,7 +627,7 @@ mod tests {
             let mut data = rows(&saved);
             data.remove(key);
             let mut warnings = Vec::new();
-            let actual = Settings::from_rows(&data, |w| warnings.push(w));
+            let actual = Settings::from_rows(&data, |w| warnings.push(w)).unwrap();
             assert_eq!(warnings.len(), 1, "{key}");
             let mut expected = serde_json::to_value(&saved).unwrap();
             expected[key] = serde_json::to_value(Settings::default()).unwrap()[key].clone();
@@ -696,7 +646,7 @@ mod tests {
                 let mut data = rows(&saved);
                 data.insert(key.clone(), bad.into());
                 let mut warnings = Vec::new();
-                let actual = Settings::from_rows(&data, |w| warnings.push(w));
+                let actual = Settings::from_rows(&data, |w| warnings.push(w)).unwrap();
                 assert_eq!(warnings.len(), 1, "{key}");
                 let mut expected = serde_json::to_value(&saved).unwrap();
                 expected[key] = serde_json::to_value(Settings::default()).unwrap()[key].clone();
@@ -709,7 +659,7 @@ mod tests {
         let mut data = rows(&Settings::default());
         data.insert("future".into(), "broken json".into());
         assert_eq!(
-            Settings::from_rows(&data, |_| panic!("unknown key is ignored")),
+            Settings::from_rows(&data, |_| panic!("unknown key is ignored")).unwrap(),
             Settings::default()
         );
     }
@@ -747,7 +697,7 @@ mod tests {
             ..Default::default()
         });
         data.insert("max_days".into(), "3651".into());
-        let loaded = Settings::from_rows(&data, |_| {});
+        let loaded = Settings::from_rows(&data, |_| {}).unwrap();
         assert_eq!(loaded.max_days, 30);
         assert_eq!(loaded.max_items, 1234);
     }
@@ -804,7 +754,7 @@ mod tests {
         };
         settings.validate().unwrap();
         let rows = rows(&settings);
-        assert_eq!(Settings::from_rows(&rows, |_| {}), settings);
+        assert_eq!(Settings::from_rows(&rows, |_| {}).unwrap(), settings);
         assert!(Settings {
             quick_hotkey: combo,
             ..settings
@@ -832,7 +782,7 @@ mod tests {
             ..Settings::default()
         });
         data.insert("unified_hotkey".into(), "true".into());
-        let loaded = Settings::from_rows(&data, |_| {});
+        let loaded = Settings::from_rows(&data, |_| {}).unwrap();
         assert_eq!(loaded.main_hotkey, main);
         assert_eq!(loaded.quick_hotkey, Hotkey::CtrlAltShiftV);
         loaded.validate().unwrap();

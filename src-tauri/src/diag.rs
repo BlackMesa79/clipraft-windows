@@ -1,6 +1,6 @@
 //! 可选诊断：钩子仅投递脱敏定长消息，文件写入由专用线程完成。
 use crate::{hook, paster, platform};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::{
     fs::OpenOptions,
     io::Write,
@@ -56,48 +56,13 @@ pub fn init(root: &Path) -> Result<()> {
         file,
         "session unix_ms={epoch} modifier_order=A2,A3,A0,A1,A4,A5,5B,5C"
     )?;
-    let _ = CLOCK.set(Instant::now());
+    CLOCK.get_or_init(Instant::now);
     let (tx, rx) = mpsc::sync_channel::<(u64, String)>(1024);
-    let _ = TEXT.set(tx);
+    TEXT.set(tx).map_err(|_| anyhow!("诊断日志已初始化"))?;
     let (ready, wait) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("diagnostic-log".into())
-        .spawn(move || unsafe {
-            let mut msg = MSG::default();
-            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-            THREAD.store(GetCurrentThreadId(), Ordering::Release);
-            let _ = ready.send(());
-            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-                if msg.message == KEY_MESSAGE {
-                    let packed = msg.wParam.0;
-                    let vk = packed & 0x1ff;
-                    let name = if vk == 0x100 {
-                        "other".into()
-                    } else {
-                        format!("0x{vk:02X}")
-                    };
-                    let action = hook::Action::from_raw((packed >> 12) & 7);
-                    let _ = writeln!(
-                        file,
-                        "t_ms={} key vk={name} down={} injected={} swallowed={} action={action:?} ctrl_async={} scan=0x{:02X}",
-                        msg.lParam.0,
-                        packed & 512 != 0,
-                        packed & 1024 != 0,
-                        packed & 2048 != 0,
-                        packed & (1 << 15) != 0,
-                        (packed >> 16) & 0xff
-                    );
-                }
-                while let Ok((time, text)) = rx.try_recv() {
-                    let _ = writeln!(file, "t_ms={time} {text}");
-                }
-                let lost = LOST.swap(0, Ordering::Relaxed);
-                if lost != 0 {
-                    let _ = writeln!(file, "t_ms={} dropped={lost}", millis());
-                }
-                let _ = file.flush();
-            }
-        })?;
+        .spawn(move || writer::run(file, rx, ready))?;
     wait.recv()?;
     Ok(())
 }
@@ -162,7 +127,8 @@ pub fn keyboard(
     }
 }
 pub fn write(text: String) {
-    if !enabled() {
+    let id = THREAD.load(Ordering::Relaxed);
+    if id == 0 {
         return;
     }
     if TEXT
@@ -171,13 +137,9 @@ pub fn write(text: String) {
     {
         LOST.fetch_add(1, Ordering::Relaxed);
     }
-    unsafe {
-        let _ = PostThreadMessageW(
-            THREAD.load(Ordering::Relaxed),
-            TEXT_MESSAGE,
-            WPARAM(0),
-            LPARAM(0),
-        );
+    // 使用同一次采样，退出清零不能把唤醒误投给调用线程自身。
+    if unsafe { PostThreadMessageW(id, TEXT_MESSAGE, WPARAM(0), LPARAM(0)) }.is_err() {
+        LOST.fetch_add(1, Ordering::Relaxed);
     }
 }
 pub fn foreground() -> String {
@@ -187,7 +149,7 @@ pub fn foreground() -> String {
         let count = GetClassNameW(hwnd, &mut class).max(0) as usize;
         let mut pid = 0;
         let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        let owner = crate::clipboard_owner::window_process(hwnd);
+        let owner = crate::clipboard_owner::window_process(hwnd, write);
         let mut gui = GUITHREADINFO {
             cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
@@ -235,13 +197,19 @@ pub fn modifier_snapshot(context: &str, stage: &str) {
 }
 /// 进程即将退出，直接写入并刷盘，避免异步日志队列尚未消费就 exit。
 pub fn startup_failure(message: &str) {
-    if let Ok(root) = crate::platform::data_root() {
-        if let Ok(mut file) = open_log(&root) {
-            let _ = writeln!(file, "startup failure: {message}");
-            let _ = file.sync_data();
-        }
+    let result = (|| -> Result<()> {
+        let root = crate::platform::data_root()?;
+        let mut file = open_log(&root)?;
+        writeln!(file, "startup failure: {message}")?;
+        file.sync_data()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        eprintln!("startup diagnostic failed: {error:#}");
     }
 }
+
+mod writer;
 
 #[cfg(test)]
 mod tests {

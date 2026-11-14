@@ -35,25 +35,36 @@ fn elevated(raw: isize) -> Result<bool> {
         Ok(elevation.TokenIsElevated != 0)
     }
 }
-pub fn prepare(target: isize, main: isize, restore_focus: bool) -> Result<()> {
+fn validate_target(target: isize, main: isize) -> Result<()> {
     if !platform::valid_external(target) {
         bail!("原目标窗口已失效");
     }
     if elevated(target)? && !elevated(main)? {
         bail!("目标窗口以管理员权限运行，当前进程不能向其发送按键");
     }
-    if restore_focus {
-        unsafe {
-            if !SetForegroundWindow(platform::hwnd(target)).as_bool() {
-                bail!("Windows 拒绝恢复目标窗口焦点");
-            }
-        }
+    Ok(())
+}
+pub fn prepare_current_target(target: isize, main: isize) -> Result<()> {
+    validate_target(target, main)?;
+    wait_for_target(target, platform::foreground, thread::sleep)
+}
+pub fn prepare_restored_target(target: isize, main: isize) -> Result<()> {
+    validate_target(target, main)?;
+    if !unsafe { SetForegroundWindow(platform::hwnd(target)) }.as_bool() {
+        bail!("Windows 拒绝恢复目标窗口焦点");
     }
+    wait_for_target(target, platform::foreground, thread::sleep)
+}
+fn wait_for_target(
+    target: isize,
+    mut foreground: impl FnMut() -> isize,
+    mut pause: impl FnMut(Duration),
+) -> Result<()> {
     for _ in 0..10 {
-        if platform::foreground() == target {
+        if foreground() == target {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(10));
+        pause(Duration::from_millis(10));
     }
     bail!("前台窗口已变化，已取消粘贴")
 }
@@ -280,6 +291,42 @@ pub fn inject(target: isize, intent: &PasteIntent<'_>) -> Result<PasteStatus> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn target_poll_preserves_probe_and_pause_order() {
+        use std::cell::RefCell;
+        for success_at in [Some(0), Some(4), Some(9), None] {
+            let events = RefCell::new(Vec::new());
+            let mut probes = 0;
+            let result = super::wait_for_target(
+                7,
+                || {
+                    events.borrow_mut().push("probe");
+                    let found = success_at == Some(probes);
+                    probes += 1;
+                    if found {
+                        7
+                    } else {
+                        3
+                    }
+                },
+                |delay| {
+                    assert_eq!(delay, Duration::from_millis(10));
+                    events.borrow_mut().push("pause");
+                },
+            );
+            let failures = success_at.unwrap_or(10);
+            let mut expected = ["probe", "pause"].repeat(failures);
+            if success_at.is_some() {
+                expected.push("probe");
+            }
+            assert_eq!(*events.borrow(), expected);
+            assert_eq!(result.is_ok(), success_at.is_some());
+            if let Err(error) = result {
+                assert_eq!(error.to_string(), "前台窗口已变化，已取消粘贴");
+            }
+        }
+    }
+
     use super::*;
     #[test]
     fn mask_is_an_unassigned_paired_key() {

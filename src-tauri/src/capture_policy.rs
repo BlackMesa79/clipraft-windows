@@ -13,6 +13,7 @@ pub enum CaptureError {
         image: bool,
     },
     Invalid,
+    SettingsUnavailable,
 }
 impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,6 +36,7 @@ impl std::fmt::Display for CaptureError {
             Self::Busy => "剪贴板被其他程序长时间占用，本次复制未记录",
             Self::Limit { .. } => unreachable!(),
             Self::Invalid => "剪贴板格式无效或数据不可读，本次复制未记录",
+            Self::SettingsUnavailable => "隐私设置不可用，本次复制未记录",
         })
     }
 }
@@ -98,6 +100,7 @@ pub fn run<T>(
         Err(CaptureError::Busy) => "busy",
         Err(CaptureError::Limit { .. }) => "limit",
         Err(CaptureError::Invalid) => "invalid",
+        Err(CaptureError::SettingsUnavailable) => "settings_unavailable",
     };
     log(format!("capture sequence={sequence} current={} self_write={} busy={busy} retries={retries} result={status} reason={reason}", current.sequence, current.self_write));
     result
@@ -342,6 +345,7 @@ mod tests {
     fn invalid_and_limit_do_not_retry_and_each_reports_once() {
         for (error, status) in [
             (CaptureError::Invalid, "invalid"),
+            (CaptureError::SettingsUnavailable, "settings_unavailable"),
             (
                 CaptureError::Limit {
                     actual: 600 * 1024 * 1024,

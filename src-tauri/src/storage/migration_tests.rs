@@ -123,7 +123,7 @@ fn blob(root: &Path, bytes: &[u8]) -> String {
     let id = model::digest(bytes);
     fs::write(
         root.join("data/blobs").join(&id),
-        crypto::encrypt(&crypto::derive(&MASTER), &id, bytes).unwrap(),
+        crypto::encrypt(&crypto::derive(&MASTER).unwrap(), &id, bytes).unwrap(),
     )
     .unwrap();
     id
@@ -1305,7 +1305,12 @@ fn save_copy_and_cut_remain_separate_records() {
 fn stage_v1(root: &Path) {
     let mut conn = connect(&root.join("history.db"));
     let tx = conn.transaction().unwrap();
-    migrations::migrate_v1(&tx, &root.join("data/blobs"), &crypto::derive(&MASTER)).unwrap();
+    migrations::migrate_v1(
+        &tx,
+        &root.join("data/blobs"),
+        &crypto::derive(&MASTER).unwrap(),
+    )
+    .unwrap();
     tx.pragma_update(None, "user_version", 1).unwrap();
     tx.commit().unwrap();
     assert_eq!(version(&conn), 1);

@@ -7,10 +7,7 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
-    System::{
-        LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount64,
-        Threading::GetCurrentThreadId,
-    },
+    System::{SystemInformation::GetTickCount64, Threading::GetCurrentThreadId},
     UI::{Input::KeyboardAndMouse::GetAsyncKeyState, WindowsAndMessaging::*},
 };
 
@@ -35,16 +32,17 @@ pub fn recording() -> bool {
         false
     }
 }
-pub fn set_recording(owner: isize, active: bool) -> u64 {
+pub fn start_recording(owner: isize) -> u64 {
     let session = RECORD_SESSION.fetch_add(1, Ordering::AcqRel) + 1;
-    if active {
-        RECORD_UNTIL.store(unsafe { GetTickCount64() } + 30_000, Ordering::Release);
-        RECORD_ARMED.store(session, Ordering::Release);
-        RECORD_OWNER.store(owner, Ordering::Release);
-    } else {
-        RECORD_OWNER.store(0, Ordering::Release);
-        RECORD_ARMED.store(0, Ordering::Release);
-    }
+    RECORD_UNTIL.store(unsafe { GetTickCount64() } + 30_000, Ordering::Release);
+    RECORD_ARMED.store(session, Ordering::Release);
+    RECORD_OWNER.store(owner, Ordering::Release);
+    session
+}
+pub fn stop_recording() -> u64 {
+    let session = RECORD_SESSION.fetch_add(1, Ordering::AcqRel) + 1;
+    RECORD_OWNER.store(0, Ordering::Release);
+    RECORD_ARMED.store(0, Ordering::Release);
     session
 }
 fn publish_recording(session: u64, packed: u32) -> bool {
@@ -134,11 +132,10 @@ static CANCEL_PANEL: AtomicBool = AtomicBool::new(false);
 pub fn cancel_panel() {
     CANCEL_PANEL.store(true, Ordering::Release);
     let id = THREAD.load(Ordering::Acquire);
-    if id != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(id, CANCEL_PANEL_MESSAGE, WPARAM(0), LPARAM(0));
-        }
-    }
+    crate::app_events::record(
+        "hook cancel post failed",
+        lifecycle::post_thread(id, CANCEL_PANEL_MESSAGE),
+    );
 }
 // 只在钩子所属线程调用，与回调串行；重复消息不再次取消后续打开的面板。
 fn handle_thread_message(message: u32) -> bool {
@@ -228,42 +225,31 @@ impl Machine {
         self.step(key, down, injected, enabled)
     }
     pub fn step(&mut self, key: u32, down: bool, injected: bool, enabled: bool) -> Decision {
-        let mut out = Decision {
+        let mut decision = Decision {
             swallow: false,
             action: None,
         };
         if injected || key > 255 {
-            return out;
+            return decision;
         }
-        let i = key as usize;
-        let repeated = self.down[i];
-        self.down[i] = down;
+        let index = key as usize;
+        let repeated = self.down[index];
+        self.down[index] = down;
         if !down {
-            out.swallow = self.swallowed[i];
-            self.swallowed[i] = false;
+            decision.swallow = self.swallowed[index];
+            self.swallowed[index] = false;
         }
-        let physical = self.modifier_bits();
-        let held = (0..4).fold(0u16, |bits, group| {
-            bits | (u16::from(physical & (3 << (group * 2)) != 0) << group)
-        });
-        let modifiers = held & self.shortcut.modifiers == self.shortcut.modifiers;
+        let held = held_modifiers(self.modifier_bits());
         if self.active {
-            if !modifiers {
-                self.active = false;
-                out.action = Some(Action::Commit);
-            } else if down {
-                out.action = match key {
-                    0x1B => {
-                        self.cancel();
-                        Some(Action::Cancel)
-                    }
-                    k if k == self.shortcut.key && !repeated => Some(Action::Next),
-                    0x28 => Some(Action::Next),
-                    0x26 => Some(Action::Previous),
-                    _ => None,
-                };
-                out.swallow = out.action.is_some();
-            }
+            self.step_active(
+                KeyPress {
+                    key,
+                    down,
+                    repeated,
+                },
+                held,
+                &mut decision,
+            );
         } else if enabled
             && down
             && !repeated
@@ -271,19 +257,60 @@ impl Machine {
             && held == self.shortcut.modifiers
         {
             self.active = true;
-            out.action = Some(Action::Open);
-            out.swallow = true;
+            decision.action = Some(Action::Open);
+            decision.swallow = true;
         }
-        // 已吞掉首次按下的键，关闭面板后仍吞掉其重复按下，直到配对释放。
-        if down && self.swallowed[i] {
-            out.swallow = true;
-        }
-        // 面板打开前已传给目标的按下，必须让后续释放继续传给目标。
-        if down && out.swallow && !repeated {
-            self.swallowed[i] = true;
-        }
-        out
+        self.pair_swallowed_press(index, down, repeated, &mut decision);
+        decision
     }
+
+    fn step_active(&mut self, press: KeyPress, held: u16, decision: &mut Decision) {
+        if held & self.shortcut.modifiers != self.shortcut.modifiers {
+            self.active = false;
+            decision.action = Some(Action::Commit);
+            return;
+        }
+        if !press.down {
+            return;
+        }
+        decision.action = match press.key {
+            0x1B => {
+                self.cancel();
+                Some(Action::Cancel)
+            }
+            key if key == self.shortcut.key && !press.repeated => Some(Action::Next),
+            0x28 => Some(Action::Next),
+            0x26 => Some(Action::Previous),
+            _ => None,
+        };
+        decision.swallow = decision.action.is_some();
+    }
+
+    fn pair_swallowed_press(
+        &mut self,
+        index: usize,
+        down: bool,
+        repeated: bool,
+        decision: &mut Decision,
+    ) {
+        // 关闭后仍吞掉已吞键的重复按下，直到配对释放。
+        if down && self.swallowed[index] {
+            decision.swallow = true;
+        }
+        // 已传给目标的首次按下，后续释放必须继续透传。
+        if down && decision.swallow && !repeated {
+            self.swallowed[index] = true;
+        }
+    }
+
+    fn reject_action(&mut self, key: u32) {
+        self.active = false;
+        // 投递失败后撤销本键配对，当前事件与后续释放都透传。
+        if let Some(swallowed) = self.swallowed.get_mut(key as usize) {
+            *swallowed = false;
+        }
+    }
+
     fn record_event(
         &mut self,
         key: u32,
@@ -301,9 +328,7 @@ impl Machine {
         }
         self.swallowed[key as usize] = true;
         let bits = self.modifier_bits();
-        let mods = (0..4).fold(0u16, |out, g| {
-            out | (u16::from(bits & (3 << (g * 2)) != 0) << g)
-        });
+        let mods = held_modifiers(bits);
         Some(if key == 0x1B {
             0
         } else {
@@ -316,6 +341,18 @@ impl Machine {
         }
     }
 }
+struct KeyPress {
+    key: u32,
+    down: bool,
+    repeated: bool,
+}
+
+fn held_modifiers(physical: u16) -> u16 {
+    (0..4).fold(0, |bits, group| {
+        bits | (u16::from(physical & (3 << (group * 2)) != 0) << group)
+    })
+}
+
 // 只清除失效的按下记录，不把系统中的注入按键补记为真实按键。
 // 异步状态早于当前事件，因此当前真实事件覆盖采样；注入事件不改变对应键。
 pub fn corrected_modifiers(
@@ -334,150 +371,11 @@ pub fn corrected_modifiers(
     corrected
 }
 thread_local! {static MACHINE:Cell<Machine>=Cell::new(Machine::default());}
-unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(None, code, w, l);
-    }
-    let data = &*(l.0 as *const KBDLLHOOKSTRUCT);
-    let down = w.0 == WM_KEYDOWN as usize || w.0 == WM_SYSKEYDOWN as usize;
-    let injected = data.flags.contains(LLKHF_INJECTED);
-    let logical = crate::paster::logical();
-    PHYSICAL.store(
-        corrected_modifiers(
-            PHYSICAL.load(Ordering::SeqCst),
-            logical,
-            data.vkCode,
-            down,
-            injected,
-        ),
-        Ordering::SeqCst,
-    );
-    // 线程局部固定大小状态，无分配、锁、IO、窗口/焦点修改或同步等待。
-    let swallow = MACHINE.with(|slot| {
-        let mut state = slot.get();
-        if CANCEL_PANEL.swap(false, Ordering::AcqRel) {
-            state.cancel();
-        }
-        let reserved = claim_event(&CONFIG_GATE);
-        if reserved && !state.active {
-            state.shortcut = read_shortcut(&SHORTCUT);
-        }
-        let was_down = data.vkCode < 256 && state.down[data.vkCode as usize];
-        let record_session = RECORD_SESSION.load(Ordering::Acquire);
-        let recording = recording() && record_session == RECORD_SESSION.load(Ordering::Acquire);
-        let mut decision = state.step_with_logical(
-            data.vkCode,
-            down,
-            injected,
-            reserved && !recording && READY.load(Ordering::Relaxed),
-            logical,
-        );
-        if recording {
-            if let Some(packed) = state.record_event(data.vkCode, down, injected, was_down) {
-                decision.swallow = true;
-                decision.action = None;
-                publish_recording(record_session, packed);
-            }
-        }
-        let mut swallow = decision.swallow;
-        crate::diag::panel(true, state.active);
-        if let Some(action) = decision.action {
-            // 在钩子观察到新 Open 时立即使旧粘贴过期，不等待 broker 或 UI 调度。
-            let generation = if action == Action::Open {
-                crate::runtime::new_paste_intent()
-            } else {
-                crate::runtime::paste_generation()
-            };
-            if PostThreadMessageW(
-                RECEIVER.load(Ordering::Relaxed),
-                ACTION_MESSAGE,
-                WPARAM(action as usize),
-                LPARAM(generation as isize),
-            )
-            .is_err()
-            {
-                state.active = false;
-                // 投递失败时让本次按下和后续释放都透传，避免留下不成对按键。
-                if (data.vkCode as usize) < state.swallowed.len() {
-                    state.swallowed[data.vkCode as usize] = false;
-                }
-                swallow = false;
-            }
-        }
-        crate::diag::panel(true, state.active);
-        crate::diag::keyboard(
-            data.vkCode,
-            data.scanCode,
-            down,
-            injected,
-            swallow,
-            decision.action,
-        );
-        if reserved && !state.active {
-            CONFIG_GATE.store(0, Ordering::Release);
-        }
-        slot.set(state);
-        swallow
-    });
-    if swallow {
-        LRESULT(1)
-    } else {
-        CallNextHookEx(None, code, w, l)
-    }
-}
-pub fn start(receiver: u32) -> Result<()> {
-    RECEIVER.store(receiver, Ordering::Release);
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    thread::Builder::new()
-        .name("keyboard-hook".into())
-        .spawn(move || unsafe {
-            let mut bits = 0;
-            for (i, k) in MODIFIER_KEYS.iter().enumerate() {
-                if GetAsyncKeyState(*k as i32) < 0 {
-                    bits |= 1 << i;
-                }
-            }
-            PHYSICAL.store(bits, Ordering::SeqCst);
-            MACHINE.with(|s| {
-                let mut m = s.get();
-                m.seed(bits);
-                s.set(m);
-            });
-            let module = GetModuleHandleW(None).ok().map(|m| m.into());
-            match SetWindowsHookExW(WH_KEYBOARD_LL, Some(callback), module, 0) {
-                Ok(hook) => {
-                    let mut msg = MSG::default();
-                    let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
-                    THREAD.store(GetCurrentThreadId(), Ordering::Release);
-                    let _ = tx.send(Ok(()));
-                    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-                        if handle_thread_message(msg.message) {
-                            continue;
-                        }
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
-                    THREAD.store(0, Ordering::Release);
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                Err(_) => {
-                    let _ = tx.send(Err(anyhow!("键盘钩子安装失败")));
-                }
-            }
-        })?;
-    rx.recv().map_err(|_| anyhow!("键盘线程启动失败"))?
-}
-pub fn stop() {
-    READY.store(false, Ordering::Release);
-    unsafe {
-        let _ = PostThreadMessageW(
-            THREAD.load(Ordering::Acquire),
-            WM_QUIT,
-            WPARAM(0),
-            LPARAM(0),
-        );
-    }
-}
+mod event;
+
+mod lifecycle;
+pub use lifecycle::{start, stop};
+
 pub fn initial_selection(len: usize) -> usize {
     usize::from(len > 1)
 }
@@ -492,6 +390,37 @@ pub fn move_selection(index: usize, len: usize, forward: bool) -> usize {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_lifecycle_advances_session_and_preserves_stop_deadline() {
+        let _guard = CONFIG_TEST_LOCK.lock().unwrap();
+        let previous = (
+            RECORD_OWNER.load(Ordering::Acquire),
+            RECORD_UNTIL.load(Ordering::Acquire),
+            RECORD_SESSION.load(Ordering::Acquire),
+            RECORD_ARMED.load(Ordering::Acquire),
+        );
+        let started = start_recording(123);
+        let deadline = RECORD_UNTIL.load(Ordering::Acquire);
+        let active = (
+            RECORD_OWNER.load(Ordering::Acquire),
+            RECORD_ARMED.load(Ordering::Acquire),
+        );
+        let stopped = stop_recording();
+        let inactive = (
+            RECORD_OWNER.load(Ordering::Acquire),
+            RECORD_ARMED.load(Ordering::Acquire),
+            RECORD_UNTIL.load(Ordering::Acquire),
+        );
+        RECORD_OWNER.store(previous.0, Ordering::Release);
+        RECORD_UNTIL.store(previous.1, Ordering::Release);
+        RECORD_SESSION.store(previous.2, Ordering::Release);
+        RECORD_ARMED.store(previous.3, Ordering::Release);
+        assert_eq!(started, previous.2 + 1);
+        assert_eq!(stopped, started + 1);
+        assert_eq!(active, (123, started));
+        assert_eq!(inactive, (0, 0, deadline));
+    }
+
     use super::*;
     const TRIGGER_VK: u32 = 0x56;
     #[test]

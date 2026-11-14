@@ -2,80 +2,37 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { shortcutLabel, shortcutParts, shortcutError, shortcutFromKeyboard, tightened, type Settings, type SettingOptions, type HotkeyReport } from './settings';
+import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
+import { shortcutLabel, shortcutParts, shortcutError, tightened, type Settings, type SettingOptions, type HotkeyReport } from './settings';
 const emit = defineEmits<{ saved: [settings: Settings]; busy: [busy: boolean]; recording: [active:boolean]; cancel: [] }>();
 const draft = ref<Settings>(), original = ref<Settings>(), options = ref<SettingOptions>();
 const error = ref(''), status = ref(''), busy = ref(false), pending = ref<{ settings: Settings; count: number }>();
 const appName = ref('');
 const categories = [{ id: 'general', label: '通用' }, { id: 'appearance', label: '外观' }, { id: 'history', label: '历史记录' }, { id: 'privacy', label: '隐私' }, { id: 'hotkeys', label: '快捷键' }];
 const category = ref('general');
-type HotkeyField='main_hotkey'|'quick_hotkey';
-const recordingField=ref<HotkeyField|null>(null), recordOperations=ref(0);
-const recordIssues=ref<Partial<Record<HotkeyField,{conflict:boolean;detail:string}>>>({});
-const hotkeyRevisions:Record<HotkeyField,number>={main_hotkey:0,quick_hotkey:0};
-function clearRecordIssue(field:HotkeyField){hotkeyRevisions[field]++;delete recordIssues.value[field];}
-function presetChanged(field:HotkeyField){clearRecordIssue(field);scheduleHotkeyCheck();}
-let recordingTimer:ReturnType<typeof setTimeout>|undefined,recordStop:UnlistenFn|undefined,disposed=false,recordSession=0,recordEpoch=0;
-const earlyRecordings=new Map<number,string|null>();
+const {
+  recordingField, recordOperations, recordIssues, clearRecordIssue,
+  record, stopRecording, blurRecording, recordingKeydown, receiveRecording,
+  isDisposed, markDisposed,
+} = createHotkeyRecording({ draft, scheduleHotkeyCheck });
+function presetChanged(field: HotkeyField) { clearRecordIssue(field); scheduleHotkeyCheck(); }
+let recordStop: UnlistenFn | undefined;
 const checkResult=ref<HotkeyReport>(),checkError=ref('');
 let checkTimer:ReturnType<typeof setTimeout>|undefined,checkSequence=0,checkAfterRecording=false;
 const hotkeysChanged=computed(()=>draft.value?.main_hotkey!==original.value?.main_hotkey||draft.value?.quick_hotkey!==original.value?.quick_hotkey);
 const checkBlocked=computed(()=>!!checkResult.value&&[checkResult.value.main,checkResult.value.quick].some(f=>f.status==='conflict'||f.status==='unavailable'));
-async function stopRecording(){
-  const epoch=++recordEpoch;
-  const field=recordingField.value,revision=field?hotkeyRevisions[field]:0;
-  clearTimeout(recordingTimer);
-  recordingField.value=null;recordSession=0;earlyRecordings.clear();
-  recordOperations.value++;
-  try {await invoke('set_hotkey_recording',{active:false});return true;}catch(e){if(!disposed&&epoch===recordEpoch&&field&&revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:String(e)};return false;}
-  finally {recordOperations.value--;}
-}
-async function record(field:HotkeyField){
-  if(recordOperations.value||disposed)return;
-  if(recordingField.value){await stopRecording();return;}
-  const epoch=++recordEpoch;
-  clearRecordIssue(field);const revision=hotkeyRevisions[field];
-  earlyRecordings.clear();recordingField.value=field;recordOperations.value++;
-  try {
-    const session=await invoke<number>('set_hotkey_recording',{active:true});
-    if(disposed||epoch!==recordEpoch){await invoke('set_hotkey_recording',{active:false});return;}
-    recordSession=session;
-    const early=earlyRecordings.get(session);earlyRecordings.clear();
-    if(early!==undefined){void finishRecording(early);return;}
-    recordingTimer=setTimeout(()=>{if(revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:'录制已超时，请重试'};void stopRecording();},30_000);
-  }
-  catch(e){if(!disposed&&epoch===recordEpoch){if(revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:String(e)};recordingField.value=null;recordSession=0;}}
-  finally {recordOperations.value--;}
-}
-function blurRecording(){if(recordingField.value)void stopRecording();}
-async function finishRecording(hotkey:string|null){
-  const field=recordingField.value;if(!field)return;
-  const revision=hotkeyRevisions[field];
-  const stopped=await stopRecording();if(!stopped||disposed||!hotkey||!draft.value||revision!==hotkeyRevisions[field])return;
-  const reason=shortcutError(hotkey);if(reason){recordIssues.value[field]={conflict:true,detail:reason};return;}
-  clearRecordIssue(field);
-  const unchanged=draft.value[field]===hotkey;
-  draft.value[field]=hotkey;
-  if(unchanged)scheduleHotkeyCheck();
-}
-function recordingKeydown(event:KeyboardEvent){
-  if(!recordingField.value&&!recordOperations.value)return;
-  // 在窗口捕获阶段处理，不能把 Esc/Enter/Space 交给主面板或当前按钮。
-  event.preventDefault();event.stopImmediatePropagation();
-  if(!recordingField.value||event.repeat)return;
-  if(event.key==='Escape'){void stopRecording();return;}
-  if(event.isComposing||event.keyCode===229)return;
-  const hotkey=shortcutFromKeyboard(event);
-  if(hotkey)void finishRecording(hotkey);
-}
 watch(()=>!!recordingField.value||recordOperations.value>0,value=>{
   emit('recording',value);
-  if(!value&&checkAfterRecording&&!disposed)scheduleHotkeyCheck();
+  if(!value&&checkAfterRecording&&!isDisposed())scheduleHotkeyCheck();
 },{flush:'sync'});
 
-function cancel(leave=false) {
+function cancel(): void {
   if (busy.value) return;
-  if(!leave&&(recordingField.value||recordOperations.value)){void stopRecording();return;}
+  if (recordingField.value || recordOperations.value) { void stopRecording(); return; }
+  leaveSettings();
+}
+function leaveSettings(): void {
+  if (busy.value) return;
   void stopRecording();
   if (original.value) draft.value = clone(original.value);
   appName.value = ''; pending.value = undefined; error.value = ''; status.value = '';
@@ -103,21 +60,31 @@ const hotkeyValidation = computed(() => {
   const a=shortcutParts(draft.value.main_hotkey),b=shortcutParts(draft.value.quick_hotkey);if(a&&b&&a[0]===b[0])return '两个快捷键不能相同或使用完全相同的修饰键';
   return '';
 });
-const hotkeyWarnings=computed(()=>{
-  const warnings:Partial<Record<HotkeyField,{text:string;detail:string}>>={};
-  if(!draft.value||recordingField.value||recordOperations.value)return warnings;
-  const main=shortcutParts(draft.value.main_hotkey),quick=shortcutParts(draft.value.quick_hotkey);
-  const pairConflict=!shortcutError(draft.value.main_hotkey)&&!shortcutError(draft.value.quick_hotkey)&&main&&quick&&main[0]===quick[0];
-  for(const [field,resultKey] of [['main_hotkey','main'],['quick_hotkey','quick']] as const){
-    const invalid=shortcutError(draft.value[field]);
-    const finding=checkResult.value?.[resultKey];
-    const issue=recordIssues.value[field];
-    if(invalid)warnings[field]={text:'检测到快捷键冲突',detail:invalid};
-    else if(pairConflict)warnings[field]={text:'检测到快捷键冲突',detail:hotkeyValidation.value};
-    else if(issue)warnings[field]={text:issue.conflict?'检测到快捷键冲突':'录制失败',detail:issue.detail};
-    else if(checkError.value)warnings[field]={text:'检测失败',detail:checkError.value};
-    else if(finding?.status==='conflict')warnings[field]={text:'检测到快捷键冲突',detail:finding.message};
-    else if(finding?.status==='unavailable')warnings[field]={text:'检测失败',detail:finding.message};
+interface HotkeyWarning { text: string; detail: string }
+function pairHasConflict(settings: Settings): boolean {
+  if (shortcutError(settings.main_hotkey) || shortcutError(settings.quick_hotkey)) return false;
+  const main = shortcutParts(settings.main_hotkey), quick = shortcutParts(settings.quick_hotkey);
+  return !!main && !!quick && main[0] === quick[0];
+}
+function fieldWarning(field: HotkeyField, resultKey: keyof HotkeyReport): HotkeyWarning | undefined {
+  const invalid = shortcutError(draft.value![field]);
+  if (invalid) return { text: '检测到快捷键冲突', detail: invalid };
+  if (pairHasConflict(draft.value!)) return { text: '检测到快捷键冲突', detail: hotkeyValidation.value };
+  const issue = recordIssues.value[field];
+  if (issue) return { text: issue.conflict ? '检测到快捷键冲突' : '录制失败', detail: issue.detail };
+  if (checkError.value) return { text: '检测失败', detail: checkError.value };
+  const finding = checkResult.value?.[resultKey];
+  if (!finding) return;
+  const findingLabels = { owned: undefined, available: undefined, conflict: '检测到快捷键冲突', unavailable: '检测失败' } satisfies Record<typeof finding.status, string | undefined>;
+  const text = findingLabels[finding.status];
+  return text ? { text, detail: finding.message } : undefined;
+}
+const hotkeyWarnings = computed(() => {
+  const warnings: Partial<Record<HotkeyField, HotkeyWarning>> = {};
+  if (!draft.value || recordingField.value || recordOperations.value) return warnings;
+  for (const [field, resultKey] of [['main_hotkey', 'main'], ['quick_hotkey', 'quick']] as const) {
+    const warning = fieldWarning(field, resultKey);
+    if (warning) warnings[field] = warning;
   }
   return warnings;
 });
@@ -142,25 +109,30 @@ async function checkHotkeys():Promise<boolean>{
   checkResult.value=undefined;checkError.value='';
   try{
     const result=await invoke<HotkeyReport>('check_hotkeys',{mainHotkey:draft.value.main_hotkey,quickHotkey:draft.value.quick_hotkey});
-    if(disposed||sequence!==checkSequence)return false;
+    if(isDisposed()||sequence!==checkSequence)return false;
     checkResult.value=result;
     return !checkBlocked.value;
-  }catch(e){if(!disposed&&sequence===checkSequence)checkError.value=String(e);return false;}
+  }catch(e){if(!isDisposed()&&sequence===checkSequence)checkError.value=String(e);return false;}
 }
-function scheduleHotkeyCheck(immediate=false){
+function prepareHotkeyCheck(): boolean {
   clearTimeout(checkTimer);checkSequence++;checkResult.value=undefined;checkError.value='';
-  if(!draft.value)return;
-  if(recordingField.value||recordOperations.value){checkAfterRecording=true;return;}
+  if(!draft.value)return false;
+  if(recordingField.value||recordOperations.value){checkAfterRecording=true;return false;}
   checkAfterRecording=false;
-  if(hotkeyValidation.value)return;
-  if(immediate)void checkHotkeys();
-  else checkTimer=setTimeout(()=>void checkHotkeys(),300);
+  return !hotkeyValidation.value;
+}
+function scheduleHotkeyCheck(): void {
+  if (prepareHotkeyCheck()) checkTimer=setTimeout(()=>void checkHotkeys(),300);
+}
+function checkInitialHotkeys(): void {
+  if (prepareHotkeyCheck()) void checkHotkeys();
 }
 watch(()=>[draft.value?.main_hotkey,draft.value?.quick_hotkey],([main,quick],[oldMain,oldQuick])=>{
   if(main===oldMain&&quick===oldQuick)return;
   if(main!==oldMain)clearRecordIssue('main_hotkey');
   if(quick!==oldQuick)clearRecordIssue('quick_hotkey');
-  scheduleHotkeyCheck(oldMain===undefined&&oldQuick===undefined);
+  if (oldMain===undefined&&oldQuick===undefined) { checkInitialHotkeys(); return; }
+  scheduleHotkeyCheck();
 });
 async function load() {
   error.value = ''; busy.value = true;
@@ -175,6 +147,8 @@ function addApp() {
   const name = appName.value.trim();
   if (!name || !draft.value) return;
   const filename = name.split(/[\\/]/).pop()!.trim();
+  // 文件名边界必须拒绝控制字符，保留此正则检查。
+  // eslint-disable-next-line no-control-regex
   if (!/^[^\\/:*?"<>|\x00-\x1f\x7f-\x9f]+\.exe$/i.test(filename) || new TextEncoder().encode(filename).length > 255) { error.value = '请输入有效的 exe 文件名或路径（文件名最多 255 UTF-8 字节）'; return; }
   if (draft.value.ignored_apps.length >= options.value!.ignored_apps_max) { error.value = `忽略程序最多 ${options.value!.ignored_apps_max} 个`; return; }
   if (!draft.value.ignored_apps.some(app => app.toLowerCase() === name.toLowerCase())) draft.value.ignored_apps.push(name);
@@ -210,24 +184,19 @@ async function confirm() {
 }
 onMounted(async()=>{
   await load();
-  const stop=await listen<{session:number;hotkey:string|null}>('hotkey-recorded',async({payload})=>{
-    const field=recordingField.value;if(!field)return;
-    if(!recordSession&&recordOperations.value){earlyRecordings.set(payload.session,payload.hotkey);return;}
-    if(payload.session!==recordSession)return;
-    await finishRecording(payload.hotkey);
-  });
-  if(disposed){stop();return;}recordStop=stop;
+  const stop=await listen<{session:number;hotkey:string|null}>('hotkey-recorded', ({payload}) => receiveRecording(payload));
+  if(isDisposed()){stop();return;}recordStop=stop;
   window.addEventListener('blur',blurRecording);
   window.addEventListener('keydown',recordingKeydown,true);
 });
-onUnmounted(()=>{disposed=true;clearTimeout(checkTimer);checkSequence++;recordStop?.();window.removeEventListener('blur',blurRecording);window.removeEventListener('keydown',recordingKeydown,true);void stopRecording();emit('recording',false);});
+onUnmounted(()=>{markDisposed();clearTimeout(checkTimer);checkSequence++;recordStop?.();window.removeEventListener('blur',blurRecording);window.removeEventListener('keydown',recordingKeydown,true);void stopRecording();emit('recording',false);});
 </script>
 
 <template>
   <section class="settings-view" aria-label="设置" :aria-busy="busy">
     <form v-if="draft && options" @submit.prevent="save" novalidate>
       <div class="settings-body">
-      <nav class="settings-nav" aria-label="设置分类"><button v-for="entry in categories" :key="entry.id" type="button" :aria-current="category === entry.id ? 'page' : undefined" @click="category = entry.id">{{ entry.label }}</button><button type="button" class="settings-toggle settings-back" :disabled="busy" @click="cancel(true)">返回列表</button></nav>
+      <nav class="settings-nav" aria-label="设置分类"><button v-for="entry in categories" :key="entry.id" type="button" :aria-current="category === entry.id ? 'page' : undefined" @click="category = entry.id">{{ entry.label }}</button><button type="button" class="settings-toggle settings-back" :disabled="busy" @click="leaveSettings()">返回列表</button></nav>
       <label class="settings-category">设置分类<select v-model="category" aria-label="设置分类"><option v-for="entry in categories" :key="entry.id" :value="entry.id">{{ entry.label }}</option></select></label>
       <div class="settings-content">
       <fieldset :disabled="busy" v-show="category === 'general'" data-category="general">

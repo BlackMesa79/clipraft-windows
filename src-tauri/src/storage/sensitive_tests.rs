@@ -322,7 +322,7 @@ fn list_quick_cache_detail_and_persisted_summary_are_masked() {
     for value in [
         serde_json::to_string(&quick).unwrap(),
         serde_json::to_string(&list).unwrap(),
-        serde_json::to_string(&s.display_detail(&id, false).unwrap()).unwrap(),
+        serde_json::to_string(&s.display_detail(&id).unwrap()).unwrap(),
     ] {
         assert!(!value.contains(&token()));
         assert!(value.contains("普通前文"));
@@ -332,7 +332,7 @@ fn list_quick_cache_detail_and_persisted_summary_are_masked() {
         .query_row("SELECT view FROM items WHERE id=?1", [&id], |r| r.get(0))
         .unwrap();
     assert!(!json.contains(&token()));
-    assert!(s.display_detail(&id, true).unwrap().text.contains(&token()));
+    assert!(s.reveal_detail(&id).unwrap().text.contains(&token()));
     assert!(s.load(&id).unwrap().text().unwrap().contains(&token()));
 }
 #[test]
@@ -351,7 +351,7 @@ fn manual_unmatched_text_masks_detail() {
     s.save(&c).unwrap();
     s.set_sensitive(&[c.hash()], true, 10).unwrap();
     assert!(!s
-        .display_detail(&c.hash(), false)
+        .display_detail(&c.hash())
         .unwrap()
         .text
         .contains("合成私密备忘内容"));
@@ -409,6 +409,47 @@ fn batch_rollback_preserves_state_and_index() {
     assert_eq!(state(&s, &a.hash()), (0, None));
     assert_eq!(indexed(&s, &a.hash()).0, "合成甲");
 }
+
+#[test]
+fn unreadable_batch_payload_is_rejected_before_any_mark_or_unmark_write() {
+    for value in [true, false] {
+        let fixture = Fixture::new();
+        let mut store = fixture.open();
+        let first = text("合成第一条");
+        let second = text(&"合成大文本".repeat(10000));
+        store.save(&first).unwrap();
+        store.save(&second).unwrap();
+        let ids = [first.hash(), second.hash()];
+        if !value {
+            store.set_sensitive(&ids, true, 10).unwrap();
+        }
+        let before = (state(&store, &ids[0]), indexed(&store, &ids[0]));
+        let view: String = store
+            .conn
+            .query_row("SELECT view FROM items WHERE id=?1", [&ids[0]], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let blob: String = store
+            .conn
+            .query_row("SELECT blob FROM formats WHERE item=?1", [&ids[1]], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        fs::remove_file(store.blobs.join(blob)).unwrap();
+        store.conn.execute_batch(&format!("CREATE TRIGGER detect_early_write BEFORE UPDATE OF sensitive ON items WHEN old.id='{}' BEGIN SELECT RAISE(ABORT,'TEST_ONLY_EARLY_WRITE'); END;", ids[0])).unwrap();
+        let error = store.set_sensitive(&ids, value, 10).unwrap_err();
+        assert!(!error.to_string().contains("TEST_ONLY_EARLY_WRITE"));
+        assert_eq!((state(&store, &ids[0]), indexed(&store, &ids[0])), before);
+        let after: String = store
+            .conn
+            .query_row("SELECT view FROM items WHERE id=?1", [&ids[0]], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, view);
+    }
+}
 #[test]
 fn high_entropy_setting_roundtrip_and_next_capture() {
     let f = Fixture::new();
@@ -452,11 +493,7 @@ fn rich_plain_text_detected() {
     });
     s.save(&c).unwrap();
     assert_eq!(state(&s, &c.hash()).0, 1);
-    assert!(!s
-        .display_detail(&c.hash(), false)
-        .unwrap()
-        .text
-        .contains(&token()));
+    assert!(!s.display_detail(&c.hash()).unwrap().text.contains(&token()));
 }
 #[test]
 fn second_dedup_check_honors_user_override() {
@@ -481,7 +518,7 @@ fn long_sensitive_suffix_not_sent_to_detail() {
     ));
     s.save(&c).unwrap();
     assert!(!s
-        .display_detail(&c.hash(), false)
+        .display_detail(&c.hash())
         .unwrap()
         .text
         .contains("TAIL_SYNTHETIC_SECRET"));
@@ -609,7 +646,7 @@ fn automatic_manual_and_negative_state_keep_real_fts_in_sync() {
         assert!(!view.contains(fake));
         for json in [
             serde_json::to_string(&s.list().unwrap()).unwrap(),
-            serde_json::to_string(&s.display_detail(&id, false).unwrap()).unwrap(),
+            serde_json::to_string(&s.display_detail(&id).unwrap()).unwrap(),
         ] {
             assert!(!json.contains(fake));
         }
@@ -654,11 +691,11 @@ fn html_and_rtf_formats_survive_masked_detail_and_explicit_reveal() {
     ]);
     s.save(&c).unwrap();
     let id = c.hash();
-    let masked = s.display_detail(&id, false).unwrap();
+    let masked = s.display_detail(&id).unwrap();
     assert!(!serde_json::to_string(&masked).unwrap().contains(fake));
     assert!(masked.text.contains("富文本前文"));
     assert!(masked.files.is_empty());
-    assert!(s.display_detail(&id, true).unwrap().text.contains(fake));
+    assert!(s.reveal_detail(&id).unwrap().text.contains(fake));
     let restored = s.load(&id).unwrap();
     for format in &c.formats {
         assert_eq!(restored.get(&format.name), Some(format.bytes.as_slice()));
@@ -696,7 +733,7 @@ fn html_only_rich_manual_mark_has_safe_detail_and_preserves_original_format() {
     assert!(item.sensitive && item.expires_at.is_some());
     for json in [
         serde_json::to_string(&item).unwrap(),
-        serde_json::to_string(&s.display_detail(&c.hash(), false).unwrap()).unwrap(),
+        serde_json::to_string(&s.display_detail(&c.hash()).unwrap()).unwrap(),
     ] {
         assert!(!json.contains(fake));
     }
@@ -787,7 +824,7 @@ fn manual_image_mark_hides_both_previews_and_unmark_restores_them() {
     assert!(marked.thumbnail.is_none() && marked.preview.is_none() && marked.placeholder.is_none());
     assert!(s.read_thumbnail(thumbnail).is_err());
     assert!(s.read_thumbnail(preview).is_err());
-    assert!(s.display_detail(&c.hash(), false).unwrap().files.is_empty());
+    assert!(s.display_detail(&c.hash()).unwrap().files.is_empty());
     assert_eq!(s.load(&c.hash()).unwrap().formats, c.formats);
     s.set_sensitive(&[c.hash()], false, 10).unwrap();
     let unmarked = s.list().unwrap().remove(0);
@@ -816,7 +853,7 @@ fn manual_file_mark_hides_paths_then_restores_filename_and_path_search() {
     let item = s.list().unwrap().remove(0);
     assert!(item.sensitive && item.expires_at.is_some());
     assert!(item.files.is_empty());
-    assert!(s.display_detail(&c.hash(), false).unwrap().files.is_empty());
+    assert!(s.display_detail(&c.hash()).unwrap().files.is_empty());
     assert!(!serde_json::to_string(&item).unwrap().contains(&path));
     assert_t7_indexes(&s, &c.hash(), ("", ""));
     s.set_sensitive(&[c.hash()], false, 10).unwrap();
@@ -1054,9 +1091,64 @@ fn unmark_transaction_failure_restores_all_states_views_and_fts() {
     for c in [&a, &b] {
         assert_t7_indexes(&s, &c.hash(), ("", ""));
         assert!(!s
-            .display_detail(&c.hash(), false)
+            .display_detail(&c.hash())
             .unwrap()
             .text
             .contains(&c.text().unwrap()));
     }
+}
+
+#[test]
+fn unmark_non_object_view_rolls_back_prior_updates() {
+    for invalid in ["[]", "null", "42", "\"invalid\""] {
+        let fixture = Fixture::new();
+        let mut store = fixture.open();
+        let first = text("sk-TESTONLY5555555555555555abcd");
+        let second = text("sk-TESTONLY6666666666666666abcd");
+        store.save(&first).unwrap();
+        store.save(&second).unwrap();
+        let before = [state(&store, &first.hash()), state(&store, &second.hash())];
+        store
+            .conn
+            .execute(
+                "UPDATE items SET view=?2 WHERE id=?1",
+                params![second.hash(), invalid],
+            )
+            .unwrap();
+        assert!(store
+            .set_sensitive(&[first.hash(), second.hash()], false, 10)
+            .is_err());
+        assert_eq!(
+            [state(&store, &first.hash()), state(&store, &second.hash())],
+            before
+        );
+        assert_t7_indexes(&store, &first.hash(), ("", ""));
+        assert_t7_indexes(&store, &second.hash(), ("", ""));
+    }
+}
+
+#[test]
+fn detail_reveal_keeps_corrupt_view_behavior_and_storage_state() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let clip = text(&token());
+    let id = clip.hash();
+    storage.save(&clip).unwrap();
+    let before_state = state(&storage, &id);
+    let before_index = indexed(&storage, &id);
+    storage
+        .conn
+        .execute("UPDATE items SET view='invalid-json' WHERE id=?1", [&id])
+        .unwrap();
+    assert!(storage.display_detail(&id).is_err());
+    assert_eq!(storage.reveal_detail(&id).unwrap().text, token());
+    assert_eq!(state(&storage, &id), before_state);
+    assert_eq!(indexed(&storage, &id), before_index);
+    storage
+        .conn
+        .execute("UPDATE items SET sensitive=-1 WHERE id=?1", [&id])
+        .unwrap();
+    assert_eq!(storage.display_detail(&id).unwrap().text, token());
+    assert!(storage.display_detail("missing").is_err());
+    assert!(storage.reveal_detail("missing").is_err());
 }

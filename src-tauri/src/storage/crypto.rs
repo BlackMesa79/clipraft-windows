@@ -15,12 +15,12 @@ pub fn random_key() -> Result<Zeroizing<[u8; 32]>> {
     getrandom::fill(key.as_mut()).map_err(|_| anyhow!("系统随机数不可用"))?;
     Ok(key)
 }
-pub fn derive(master: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+pub fn derive(master: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     let mut key = Zeroizing::new([0; 32]);
     Hkdf::<Sha256>::new(Some(b"ClipboardM0/v1"), master)
         .expand(b"encrypted-blob", key.as_mut())
-        .expect("固定派生长度有效");
-    key
+        .map_err(|_| anyhow!("对象密钥派生长度无效"))?;
+    Ok(key)
 }
 /// CM02 基线压缩；PNG/JPEG 已编码图片直接沿用 CM01。
 /// 只有至少节省 5% 才采用 CM02，整数比较避免浮点误差和乘法溢出。
@@ -157,11 +157,11 @@ fn decrypt_with_limit(key: &[u8; 32], id: &str, bytes: &[u8], limit: usize) -> R
     let (offset, length, aad) = match &bytes[..4] {
         b"CM01" => (4, None, id.as_bytes().to_vec()),
         b"CM02" | b"CM03" if bytes.len() >= BLOB_OVERHEAD as usize + 8 => {
-            let length = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+            let length = u64::from_le_bytes(bytes[4..12].try_into()?);
             if length > limit as u64 {
                 bail!("对象解压长度超过上限");
             }
-            let magic: &[u8; 4] = bytes[..4].try_into().unwrap();
+            let magic: &[u8; 4] = bytes[..4].try_into()?;
             if magic == b"CM03" && length >= limit.min(MAX_PLAIN_BYTES) as u64 {
                 bail!("对象预测解压长度超过上限");
             }
@@ -210,7 +210,7 @@ mod tests {
     use super::*;
     #[test]
     fn roundtrip_and_tamper() {
-        let key = derive(&[7; 32]);
+        let key = derive(&[7; 32]).unwrap();
         let mut c = encrypt(&key, "id", b"fixture").unwrap();
         assert_eq!(decrypt(&key, "id", &c).unwrap(), b"fixture");
         assert!(decrypt(&key, "other", &c).is_err());

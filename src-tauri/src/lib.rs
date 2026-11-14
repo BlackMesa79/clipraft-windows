@@ -1,3 +1,7 @@
+mod app_events;
+mod app_setup;
+mod app_smoke;
+mod app_tray;
 mod appearance;
 mod autostart;
 mod capture_policy;
@@ -12,6 +16,7 @@ mod file_status;
 pub mod hook;
 mod hotkey_check;
 mod image_normalize;
+mod item_detail;
 mod main_position;
 pub mod model;
 mod owner_flush;
@@ -22,18 +27,17 @@ pub mod sensitive;
 pub mod settings;
 pub mod storage;
 pub mod thumbnail;
+mod tray_status;
 
+use item_detail::ItemDetail;
 use runtime::{Control, Job, Panel, State};
-use std::{
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
-use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
+use std::sync::{atomic::Ordering, Arc};
+use tauri::{Emitter, Manager};
 
 // 仅接收已经过 read_thumbnail 白名单校验的内容。
 fn thumbnail_response(data: Option<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
     let mime = data.as_deref().and_then(thumbnail::preview_mime);
-    tauri::http::Response::builder()
+    let response = tauri::http::Response::builder()
         .status(if mime.is_some() { 200 } else { 404 })
         .header("Content-Type", mime.unwrap_or("application/octet-stream"))
         .header("Cache-Control", "no-store")
@@ -42,8 +46,16 @@ fn thumbnail_response(data: Option<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
             data.unwrap_or_default()
         } else {
             Vec::new()
-        })
-        .unwrap()
+        });
+    match response {
+        Ok(response) => response,
+        Err(error) => {
+            diag::write(format!("thumbnail response build failed: {error}"));
+            let mut response = tauri::http::Response::new(Vec::new());
+            *response.status_mut() = tauri::http::StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }
+    }
 }
 
 #[tauri::command]
@@ -61,7 +73,10 @@ async fn list_items(
             .map_err(|_| "存储不可用")?
             .list_page(&filter, offset, limit)
             .map_err(|e| format!("历史列表读取失败：{e}"))?;
-        shared.files.annotate(&mut items);
+        shared
+            .files
+            .annotate(&mut items)
+            .map_err(|e| e.to_string())?;
         Ok(items)
     })
     .await
@@ -197,16 +212,24 @@ async fn move_to_group(
 }
 
 #[tauri::command]
-fn get_settings(state: tauri::State<'_, Arc<State>>) -> settings::Settings {
-    state.settings.lock().unwrap().clone()
+fn get_settings(state: tauri::State<'_, Arc<State>>) -> Result<settings::Settings, String> {
+    state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "设置不可用".into())
 }
 #[tauri::command]
 fn get_setting_options() -> settings::SettingOptions {
     settings::options()
 }
 #[tauri::command]
-fn startup_error(state: tauri::State<'_, Arc<State>>) -> Option<String> {
-    state.startup_error.lock().unwrap().clone()
+fn startup_error(state: tauri::State<'_, Arc<State>>) -> Result<Option<String>, String> {
+    state
+        .startup_error
+        .lock()
+        .map(|error| error.clone())
+        .map_err(|_| "启动错误状态不可用".into())
 }
 #[tauri::command]
 async fn update_settings(
@@ -247,14 +270,14 @@ fn set_hotkey_recording(
         }
         let _guard = hook::reserve_configuration_when_hidden().map_err(|e| e.to_string())?;
         runtime::new_paste_intent();
-        let session = hook::set_recording(raw, true);
+        let session = hook::start_recording(raw);
         diag::write(format!("hotkey_record stage=start session={session}"));
         Ok(session)
     } else {
         if hook::recording() {
-            let _ = paster::mask_shortcut();
+            app_events::record("recording shortcut mask failed", paster::mask_shortcut());
         }
-        let session = hook::set_recording(0, false);
+        let session = hook::stop_recording();
         diag::write(format!("hotkey_record stage=stop session={session}"));
         Ok(session)
     }
@@ -291,38 +314,6 @@ async fn preview_cleanup(
     .await
     .map_err(|_| "清理预估任务失败")?
 }
-#[derive(Clone, serde::Serialize)]
-struct FileDetail {
-    path: String,
-    exists: Option<bool>,
-}
-#[derive(Clone, serde::Serialize)]
-struct ItemDetail {
-    text: String,
-    truncated: bool,
-    files: Vec<FileDetail>,
-}
-fn detail(clip: &model::Clip) -> ItemDetail {
-    let full = clip.text().unwrap_or_default();
-    let mut chars = full.chars();
-    let text = chars.by_ref().take(20000).collect();
-    let truncated = chars.next().is_some();
-    let files = clip
-        .get("CF_HDROP")
-        .and_then(model::decode_hdrop)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|path| FileDetail {
-            exists: std::path::Path::new(&path).try_exists().ok(),
-            path,
-        })
-        .collect();
-    ItemDetail {
-        text,
-        truncated,
-        files,
-    }
-}
 #[tauri::command]
 async fn item_detail(
     id: String,
@@ -334,7 +325,7 @@ async fn item_detail(
             .storage
             .lock()
             .map_err(|_| "存储不可用")?
-            .display_detail(&id, false)
+            .display_detail(&id)
             .map_err(|_| "记录读取失败".into())
     })
     .await
@@ -355,7 +346,7 @@ async fn reveal_item(
             .storage
             .lock()
             .map_err(|_| "存储不可用")?
-            .display_detail(&id, true)
+            .reveal_detail(&id)
             .map_err(|_| "记录读取失败".into())
     })
     .await
@@ -399,8 +390,12 @@ async fn image_failure_reason(
     .map_err(|_| "图片诊断任务失败")?
 }
 #[tauri::command]
-fn panel_state(state: tauri::State<'_, Arc<State>>) -> Panel {
-    state.panel.lock().unwrap().clone()
+fn panel_state(state: tauri::State<'_, Arc<State>>) -> Result<Panel, String> {
+    state
+        .panel
+        .lock()
+        .map(|panel| panel.clone())
+        .map_err(|_| "面板状态不可用".into())
 }
 #[tauri::command]
 fn resize_quick(
@@ -430,24 +425,34 @@ fn resize_quick(
     .map_err(|e| e.to_string())
 }
 #[tauri::command]
-fn last_error(state: tauri::State<'_, Arc<State>>) -> Option<String> {
-    state.error.lock().unwrap().take()
+fn last_error(state: tauri::State<'_, Arc<State>>) -> Result<Option<String>, String> {
+    state
+        .error
+        .lock()
+        .map(|mut error| error.take())
+        .map_err(|_| "错误状态不可用".into())
 }
 #[tauri::command]
-fn frontend_ready(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<State>>) {
+fn frontend_ready(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), String> {
     if window.label() == "quick" {
+        let has_items =
+            !state.smoke && !state.items.lock().map_err(|_| "面板条目不可用")?.is_empty();
         state.quick_ready.store(true, Ordering::Release);
         state.ready.store(true, Ordering::Release);
-        hook::READY.store(
-            !state.smoke && !state.items.lock().unwrap().is_empty(),
-            Ordering::Release,
-        );
+        hook::READY.store(has_items, Ordering::Release);
     } else {
         state.main_ready.store(true, Ordering::Release);
         if state.settings_requested.swap(false, Ordering::AcqRel) {
-            let _ = window.emit("open-settings", ());
+            window
+                .emit("open-settings", ())
+                .inspect_err(|_| state.settings_requested.store(true, Ordering::Release))
+                .map_err(|error| error.to_string())?;
         }
     }
+    Ok(())
 }
 #[tauri::command]
 fn thumbnail_loaded(state: tauri::State<'_, Arc<State>>) {
@@ -476,11 +481,16 @@ fn paste_item(
     if !platform::valid_external(target) {
         return Err(format!(
             "没有可用的目标窗口，请先激活目标程序，再按 {}",
-            state.settings.lock().unwrap().main_hotkey.label()
+            state
+                .settings
+                .lock()
+                .map_err(|_| "设置不可用")?
+                .main_hotkey
+                .label()
         ));
     }
     window.hide().map_err(|_| "主窗口隐藏失败")?;
-    let _ = window.emit("main-hidden", ());
+    app_events::record("main hidden event failed", window.emit("main-hidden", ()));
     diag::panel(false, false);
     state
         .jobs
@@ -499,7 +509,9 @@ fn paste_item(
 #[tauri::command]
 fn hide_main(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<State>>) {
     if window.label() == "main" {
-        let _ = state.control.send(Control::Hide);
+        if let Err(error) = state.control.send(Control::Hide) {
+            diag::write(format!("main hide control unavailable: {error}"));
+        }
     }
 }
 #[tauri::command]
@@ -511,14 +523,8 @@ fn sync_main_layout(
     if window.label() != "main" {
         return Err("仅主窗口可以调整布局".into());
     }
-    let compact = state.settings.lock().unwrap().compact;
+    let compact = state.settings.lock().map_err(|_| "设置不可用")?.compact;
     layout.apply(&window, compact).map_err(|e| e.to_string())
-}
-fn icon() -> tauri::image::Image<'static> {
-    let rgba = image::load_from_memory(include_bytes!("../icons/tray.png"))
-        .expect("内置品牌图标应为有效 PNG")
-        .into_rgba8();
-    tauri::image::Image::new_owned(rgba.into_raw(), 32, 32)
 }
 fn smoke_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "yes"))
@@ -537,25 +543,24 @@ fn startup_failed(error: &dyn std::fmt::Display, smoke: bool) -> ! {
     }
     std::process::exit(1);
 }
-pub fn run() {
-    let smoke = smoke_enabled(std::env::var("CLIPBOARD_M0_SMOKE").ok().as_deref());
-    // 数据错误必须在进入 Tauri 的 setup 回调前处理，避免被事件循环转成 panic。
-    let data = (|| -> anyhow::Result<_> {
-        let root = platform::data_root()?;
-        diag::init(&root)?;
-        let key = platform::master_key(&root)?;
-        let storage = storage::Storage::open(&root, &key)?;
-        // 迁移完成之后、runtime 启动之前扫描；维护失败只记录诊断。
-        if let Err(e) = storage.scan_orphan_blobs() {
-            diag::write(format!("startup orphan scan failed: {e}"));
+fn read_protocol_thumbnail(app: &tauri::AppHandle, id: &str) -> Option<Vec<u8>> {
+    let state = app.try_state::<Arc<State>>()?;
+    let result = state
+        .storage
+        .lock()
+        .map_err(|_| "存储不可用".to_string())
+        .and_then(|db| db.read_thumbnail(id).map_err(|error| error.to_string()));
+    match result {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            diag::write(format!("thumbnail request failed: {error}"));
+            None
         }
-        Ok((root, storage))
-    })();
-    let (root, mut storage) = match data {
-        Ok(data) => data,
-        Err(error) => startup_failed(&error, smoke),
-    };
-    let result = tauri::Builder::default()
+    }
+}
+
+fn application_builder() -> tauri::Builder<tauri::Wry> {
+    tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_setting_options,
@@ -594,267 +599,44 @@ pub fn run() {
         ])
         .register_uri_scheme_protocol("thumb", |context, request| {
             let id = request.uri().path().trim_start_matches('/');
-            let state = context.app_handle().try_state::<Arc<State>>();
             let data = if request.method() == tauri::http::Method::GET {
-                state.and_then(|s| {
-                    s.storage
-                        .lock()
-                        .ok()
-                        .and_then(|db| db.read_thumbnail(id).ok())
-                })
+                read_protocol_thumbnail(context.app_handle(), id)
             } else {
                 None
             };
             thumbnail_response(data)
         })
+}
+
+fn open_storage() -> anyhow::Result<(std::path::PathBuf, storage::Storage)> {
+    let root = platform::data_root()?;
+    diag::init(&root)?;
+    let key = platform::master_key(&root)?;
+    let storage = storage::Storage::open(&root, &key)?;
+    // 迁移完成之后、runtime 启动之前扫描；维护失败只记录诊断。
+    if let Err(e) = storage.scan_orphan_blobs() {
+        diag::write(format!("startup orphan scan failed: {e}"));
+    }
+    Ok((root, storage))
+}
+pub fn run() {
+    let smoke = smoke_enabled(std::env::var("CLIPBOARD_M0_SMOKE").ok().as_deref());
+    // 数据错误必须在进入 setup 前处理，避免被事件循环转成 panic。
+    let data = open_storage();
+    let (root, storage) = match data {
+        Ok(data) => data,
+        Err(error) => startup_failed(&error, smoke),
+    };
+    let result = application_builder()
         .setup(move |app| {
-            if smoke {
-                // 隔离检查使用合成透明图片，不读取真实剪贴板。
-                let mut encoded = std::io::Cursor::new(Vec::new());
-                let image =
-                    image::RgbaImage::from_pixel(1000, 400, image::Rgba([32, 128, 96, 128]));
-                image::DynamicImage::ImageRgba8(image)
-                    .write_to(&mut encoded, image::ImageFormat::Png)?;
-                storage.save(&model::Clip {
-                    formats: vec![model::FormatData {
-                        name: "PNG".into(),
-                        bytes: encoded.into_inner(),
-                    }],
-                })?;
-            }
-            let state = runtime::start(app.handle().clone(), storage, smoke)?;
-            app.manage(state.clone());
-            app.manage(appearance::WindowLayout::default());
-            app.manage(compact_preview::PreviewState::default());
-            let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("片筏剪贴板")
-                .icon(icon())?
-                .decorations(false)
-                .inner_size(1000.0, 700.0)
-                .visible(false)
-                .data_directory(root.join("webview"))
-                .build()?;
-            let preview = WebviewWindowBuilder::new(
-                app,
-                "preview",
-                WebviewUrl::App("index.html?panel=preview".into()),
-            )
-            .title("片筏剪贴板 · 内容预览")
-            // 原生阴影会增加白边和客户区偏移，改用透明客户区内的边框/阴影。
-            .shadow(false)
-            .transparent(true)
-            .owner(&main)?
-            .inner_size(360.0, 420.0)
-            .visible(false)
-            .focused(false)
-            .focusable(false)
-            .decorations(false)
-            .skip_taskbar(true)
-            .resizable(false)
-            .data_directory(root.join("webview"))
-            .build()?;
-            platform::prepare_preview(preview.hwnd()?.0 as isize)?;
-            for event in ["main-hidden", "history-changed"] {
-                let handle = app.handle().clone();
-                app.listen_any(event, move |_| {
-                    compact_preview::hide(&handle);
-                });
-            }
-            let quick = WebviewWindowBuilder::new(
-                app,
-                "quick",
-                WebviewUrl::App("index.html?panel=quick".into()),
-            )
-            .title("快速粘贴")
-            .inner_size(420.0, 530.0)
-            .visible(false)
-            .focused(false)
-            .focusable(false)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .data_directory(root.join("webview"))
-            .build()?;
-            // 忽略鼠标命中，避免 WebView 子窗口激活。
-            quick.set_ignore_cursor_events(true)?;
-            let main_hwnd = main.hwnd()?.0 as isize;
-            let quick_hwnd = quick.hwnd()?.0 as isize;
-            state.main.store(main_hwnd, Ordering::Release);
-            state.quick.store(quick_hwnd, Ordering::Release);
-            platform::prepare_quick(quick_hwnd)?;
-            platform::prepare_main(main_hwnd)?;
-            if state.startup_error.lock().unwrap().is_some() {
-                // 注册失败仍启动主界面，错误持久显示，允许用户修复设置。
-                main.show()?;
-            }
-            use tauri::{
-                menu::{Menu, MenuItem},
-                tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-            };
-            if !smoke {
-                let show = MenuItem::with_id(app, "show", "显示 / 隐藏", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let pause = MenuItem::with_id(
-                    app,
-                    "pause",
-                    if runtime::paused() {
-                        "恢复监听"
-                    } else {
-                        "暂停监听"
-                    },
-                    true,
-                    None::<&str>,
-                )?;
-                app.manage(PauseMenu(pause.clone()));
-                let settings = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-                let menu = Menu::with_items(app, &[&show, &pause, &settings, &quit])?;
-                TrayIconBuilder::with_id("main-tray")
-                    .icon(tray_icon(runtime::paused()))
-                    .tooltip(if runtime::paused() {
-                        "片筏剪贴板 · 已暂停监听"
-                    } else {
-                        "片筏剪贴板 · 正在监听"
-                    })
-                    .menu(&menu)
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "show" => {
-                            let _ = app.state::<Arc<State>>().control.send(Control::Toggle);
-                        }
-                        "pause" => {
-                            let _ = app.state::<Arc<State>>().control.send(Control::TogglePause);
-                        }
-                        "settings" => {
-                            let _ = app
-                                .state::<Arc<State>>()
-                                .control
-                                .send(Control::OpenSettings);
-                        }
-                        "quit" => app.exit(0),
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        if matches!(
-                            event,
-                            TrayIconEvent::Click {
-                                button: MouseButton::Left,
-                                button_state: MouseButtonState::Up,
-                                ..
-                            }
-                        ) {
-                            let _ = tray
-                                .app_handle()
-                                .state::<Arc<State>>()
-                                .control
-                                .send(Control::Toggle);
-                        }
-                    })
-                    .build(app)?;
+            let result = if smoke {
+                app_setup::initialize_smoke(app, storage, root)
             } else {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    let ready = || {
-                        state.main_ready.load(Ordering::Acquire)
-                            && state.quick_ready.load(Ordering::Acquire)
-                            && state.thumbnail_ready.load(Ordering::Acquire)
-                            && state.preview_ready.load(Ordering::Acquire)
-                    };
-                    for _ in 0..100 {
-                        std::thread::sleep(Duration::from_millis(100));
-                        if ready() {
-                            break;
-                        }
-                    }
-                    let report = serde_json::json!({
-                        "main_frontend_ready": state.main_ready.load(Ordering::Acquire),
-                        "quick_frontend_ready": state.quick_ready.load(Ordering::Acquire),
-                        "thumbnail_protocol_loaded": state.thumbnail_ready.load(Ordering::Acquire),
-                        "preview_protocol_loaded": state.preview_ready.load(Ordering::Acquire),
-                        "clipboard_listener_enabled": false,
-                        "keyboard_hook_enabled": false,
-                        "visual_verified": false
-                    });
-                    let _ = std::fs::write(
-                        root.join("smoke-result.json"),
-                        serde_json::to_vec_pretty(&report).unwrap(),
-                    );
-                    handle.exit(if ready() { 0 } else { 1 });
-                });
-            }
-            Ok(())
+                app_setup::initialize(app, storage, root)
+            };
+            result.map_err(Into::into)
         })
-        .on_window_event(|window, event| {
-            if window.label() == "main" {
-                if let tauri::WindowEvent::Focused(focused) = event {
-                    diag::write(format!(
-                        "main_focus focused={} foreground_owned={}",
-                        focused,
-                        platform::main_has_foreground(
-                            window.state::<Arc<State>>().main.load(Ordering::Acquire)
-                        )
-                    ));
-                }
-                if matches!(
-                    event,
-                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
-                ) {
-                    if window.is_minimized().unwrap_or(false) {
-                        compact_preview::hide(window.app_handle());
-                    } else if window
-                        .app_handle()
-                        .state::<compact_preview::PreviewState>()
-                        .has_content()
-                    {
-                        if let Some(main) = window.app_handle().get_webview_window("main") {
-                            if main.is_visible().unwrap_or(false)
-                                && platform::main_has_foreground(
-                                    window.state::<Arc<State>>().main.load(Ordering::Acquire),
-                                )
-                            {
-                                let _ = compact_preview::reposition(&main);
-                            }
-                        }
-                    }
-                }
-                if matches!(event, tauri::WindowEvent::Focused(true)) {
-                    let _ = window.emit("main-activated", ());
-                }
-                if matches!(event, tauri::WindowEvent::Focused(false)) {
-                    // 标题栏拖动和 WebView/宿主之间的焦点切换也可能产生失焦通知。
-                    // 等原生激活消息完成，再在 UI 线程核对前台归属及最新设置。
-                    let main = window.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        std::thread::sleep(Duration::from_millis(120));
-                        let target = main.clone();
-                        let _ = main.run_on_main_thread(move || {
-                            let state = target.state::<Arc<State>>();
-                            let foreground =
-                                platform::main_has_foreground(state.main.load(Ordering::Acquire));
-                            if !foreground {
-                                compact_preview::hide(target.app_handle());
-                                let _ = target.emit("main-deactivated", ());
-                            }
-                            if platform::should_hide_main(
-                                state.hide_on_blur.load(Ordering::Acquire),
-                                foreground,
-                            ) {
-                                let _ = target.hide();
-                                let _ = target.emit("main-hidden", ());
-                                diag::panel(false, false);
-                            }
-                        });
-                    });
-                }
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    compact_preview::hide(window.app_handle());
-                    let _ = window.hide();
-                    let _ = window.emit("main-hidden", ());
-                    diag::panel(false, false);
-                }
-            }
-        })
+        .on_window_event(app_events::on_window_event)
         .build(tauri::generate_context!());
     match result {
         Ok(app) => app.run(|_, event| {
@@ -869,11 +651,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item_detail::from_clip as detail;
     // AC-T8-2：比较实际图标像素；不创建托盘或操作真实桌面。
     #[test]
     fn t8_paused_tray_icon_is_visibly_distinct_and_same_size() {
-        let active = tray_icon(false);
-        let paused = tray_icon(true);
+        let active = tray_status::icon().unwrap();
+        let paused = tray_status::paused_icon().unwrap();
         assert_eq!((active.width(), active.height()), (32, 32));
         assert_eq!((paused.width(), paused.height()), (32, 32));
         assert_ne!(active.rgba(), paused.rgba());
@@ -933,35 +716,3 @@ mod paste_bench;
 
 #[cfg(test)]
 mod test_support;
-
-struct PauseMenu(tauri::menu::MenuItem<tauri::Wry>);
-fn tray_icon(paused: bool) -> tauri::image::Image<'static> {
-    if !paused {
-        return icon();
-    }
-    let mut rgba = icon().rgba().to_vec();
-    for y in 8..25 {
-        for x in [11, 12, 13, 18, 19, 20] {
-            let i = (y * 32 + x) * 4;
-            rgba[i..i + 4].copy_from_slice(&[220, 120, 20, 255]);
-        }
-    }
-    tauri::image::Image::new_owned(rgba, 32, 32)
-}
-fn update_tray(app: &tauri::AppHandle, paused: bool) {
-    if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_icon(Some(tray_icon(paused)));
-        let _ = tray.set_tooltip(Some(if paused {
-            "片筏剪贴板 · 已暂停监听"
-        } else {
-            "片筏剪贴板 · 正在监听"
-        }));
-    }
-    if let Some(menu) = app.try_state::<PauseMenu>() {
-        let _ = menu.0.set_text(if paused {
-            "恢复监听"
-        } else {
-            "暂停监听"
-        });
-    }
-}

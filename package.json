@@ -6,16 +6,22 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
-    "tauri": "node scripts/tauri.mjs"
+    "tauri": "node scripts/tauri.mjs",
+    "lint": "eslint src scripts vite.config.ts eslint.config.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "vue": "^3"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^6",
+    "eslint": "^10.15.0",
+    "eslint-plugin-vue": "^10.12.1",
+    "globals": "^17.14.0",
     "typescript": "~5.9.0",
+    "typescript-eslint": "^8.72.2",
     "vite": "^7",
     "vue-tsc": "^3"
   }

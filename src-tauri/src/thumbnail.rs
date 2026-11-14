@@ -1,157 +1,25 @@
+mod decode;
 use crate::model::{image_priority, Clip};
+use decode::decode_image;
+pub use decode::{decode_dib, dimensions};
 use image::{
     codecs::{
         jpeg::JpegEncoder,
         png::{CompressionType, FilterType, PngEncoder},
     },
-    DynamicImage, ImageEncoder, ImageReader, Rgba, RgbaImage,
+    DynamicImage, ImageEncoder,
 };
-use std::{
-    io::{Cursor, Read},
-    path::Path,
-};
+#[cfg(test)]
+use image::{Rgba, RgbaImage};
+#[cfg(test)]
+use std::io::Cursor;
+use std::{io::Read, path::Path};
 
 pub struct Preview {
     // 保留字段名兼容调用方；内容可以是 PNG 或 JPEG，以魔数为准。
     pub png: Option<Vec<u8>>,
     pub large_png: Option<Vec<u8>>,
     pub placeholder: Option<String>,
-}
-fn u32_at(b: &[u8], i: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?))
-}
-pub fn dimensions(b: &[u8], name: &str) -> Option<(u32, u32)> {
-    if name == "PNG" && b.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Some((
-            u32::from_be_bytes(b.get(16..20)?.try_into().ok()?),
-            u32::from_be_bytes(b.get(20..24)?.try_into().ok()?),
-        ));
-    }
-    if name.starts_with("CF_DIB") && u32_at(b, 0)? >= 40 {
-        return Some((
-            (u32_at(b, 4)? as i32).unsigned_abs(),
-            (u32_at(b, 8)? as i32).unsigned_abs(),
-        ));
-    }
-    None
-}
-fn component(pixel: u32, mask: u32) -> u8 {
-    if mask == 0 {
-        return 255;
-    }
-    let v = (pixel & mask) >> mask.trailing_zeros();
-    let max = mask >> mask.trailing_zeros();
-    ((v as u64 * 255) / max as u64) as u8
-}
-pub fn decode_dib(b: &[u8]) -> Option<DynamicImage> {
-    let header = u32_at(b, 0)? as usize;
-    if ![40, 52, 56, 108, 124].contains(&header) || b.len() < header {
-        return None;
-    }
-    let w = u32_at(b, 4)? as i32;
-    let height = u32_at(b, 8)? as i32;
-    if w <= 0 || height == 0 || height == i32::MIN {
-        return None;
-    }
-    let h = height.unsigned_abs();
-    let w = w as u32;
-    if w > 16384
-        || h > 16384
-        || w as u64 * h as u64 > crate::storage::crypto::MAX_PLAIN_BYTES as u64 / 4
-    {
-        return None;
-    }
-    let bits = u16::from_le_bytes(b.get(14..16)?.try_into().ok()?);
-    let compression = u32_at(b, 16)?;
-    let colors = u32_at(b, 32)? as usize;
-    let palette = if colors > 0 {
-        colors
-    } else if bits <= 8 {
-        1usize << bits
-    } else {
-        0
-    };
-    let masks_extra = if header == 40 && (compression == 3 || compression == 6) {
-        if compression == 6 {
-            16
-        } else {
-            12
-        }
-    } else {
-        0
-    };
-    let offset = header
-        .checked_add(masks_extra)?
-        .checked_add(palette.checked_mul(4)?)?;
-    if offset > b.len() {
-        return None;
-    }
-    if bits == 32 && [0, 3, 6].contains(&compression) {
-        let count = (w as usize).checked_mul(h as usize)?;
-        if b.len().checked_sub(offset)? < count.checked_mul(4)? {
-            return None;
-        }
-        let masks = if compression == 3 || compression == 6 {
-            [
-                u32_at(b, 40)?,
-                u32_at(b, 44)?,
-                u32_at(b, 48)?,
-                if header >= 56 || compression == 6 {
-                    u32_at(b, 52)?
-                } else {
-                    0
-                },
-            ]
-        } else {
-            [
-                0x00ff0000,
-                0x0000ff00,
-                0x000000ff,
-                if header >= 108 {
-                    u32_at(b, 52).unwrap_or(0)
-                } else {
-                    0
-                },
-            ]
-        };
-        let mut image = RgbaImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let row = if height > 0 { h - 1 - y } else { y };
-                let p = u32_at(b, offset + ((row * w + x) as usize) * 4)?;
-                image.put_pixel(
-                    x,
-                    y,
-                    Rgba([
-                        component(p, masks[0]),
-                        component(p, masks[1]),
-                        component(p, masks[2]),
-                        component(p, masks[3]),
-                    ]),
-                );
-            }
-        }
-        return Some(DynamicImage::ImageRgba8(image));
-    }
-    // 其他位深补齐 BMP 文件头，再交给受限解码器。
-    let mut bmp = Vec::with_capacity(b.len() + 14);
-    bmp.extend(b"BM");
-    bmp.extend(((b.len() + 14) as u32).to_le_bytes());
-    bmp.extend([0; 4]);
-    bmp.extend(((offset + 14) as u32).to_le_bytes());
-    bmp.extend(b);
-    decode_image(&bmp)
-}
-fn decode_image(bytes: &[u8]) -> Option<DynamicImage> {
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(crate::storage::crypto::MAX_PLAIN_BYTES as u64);
-    reader.limits(limits);
-    reader.decode().ok()
 }
 const FILE_LIMIT: u64 = 50 * 1024 * 1024;
 /// 仅识别支持的图片签名，不根据 blob 名称推断格式。
@@ -294,6 +162,21 @@ pub fn generate(clip: &Clip) -> Preview {
 mod tests {
     use super::*;
     use crate::model::FormatData;
+    #[test]
+    fn decoder_keeps_its_acceptance_separate_from_capture_normalization() {
+        let mut bytes = vec![0u8; 44];
+        for (offset, value) in [(0, 40u32), (4, 1), (8, 1), (20, 100)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        // 既有 32 位直接解码路径不以 planes/sizeImage 收紧接受范围。
+        bytes[14] = 32;
+        bytes[40..44].copy_from_slice(&[3, 2, 1, 0]);
+        let image = decode_dib(&bytes).expect("保持既有解码接受范围").to_rgba8();
+        assert_eq!(image.get_pixel(0, 0).0, [1, 2, 3, 255]);
+        let original = bytes.clone();
+        crate::image_normalize::normalize("CF_DIB", &mut bytes);
+        assert_eq!(bytes, original);
+    }
     #[test]
     fn image_file_extension_filter_is_case_insensitive() {
         for ext in ["png", "jpg", "jpeg", "gif", "bmp", "webp", "PNG", "JpEg"] {

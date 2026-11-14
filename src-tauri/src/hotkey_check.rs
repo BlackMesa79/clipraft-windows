@@ -124,7 +124,9 @@ impl<A: ProbeApi> Probe<A> {
 }
 impl<A: ProbeApi> Drop for Probe<A> {
     fn drop(&mut self) {
-        let _ = self.release();
+        if !self.release() {
+            crate::diag::write("hotkey probe final release failed".into());
+        }
     }
 }
 pub struct NativeApi(HWND);
