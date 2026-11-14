@@ -38,7 +38,7 @@ impl PasteTask<'_> {
             .storage
             .lock()
             .map_err(|_| anyhow!("存储不可用"))?
-            .load(&self.request.id)?;
+            .load_for_paste(&self.request.id)?;
         for format in &loaded.formats {
             // 仅输出固定支持格式的名称和大小，不记录内容或记录标识。
             if clipboard::SUPPORTED

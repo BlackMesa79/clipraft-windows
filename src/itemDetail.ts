@@ -1,8 +1,10 @@
 import { ref, type Ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { Item } from './history';
+import { createDetailImage } from './detailImage';
 
 interface Detail {
+  image?: number[];
   text: string;
   truncated: boolean;
   files: { path: string; exists: boolean | null }[];
@@ -17,6 +19,7 @@ interface ItemDetailController {
   detailError: Ref<string>;
   detailLoading: Ref<boolean>;
   revealed: Ref<boolean>;
+  imageSource: Ref<string>;
   invalidateDetail(): void;
   conceal(): void;
   revealDetail(): Promise<void>;
@@ -31,6 +34,11 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
     detailError = ref(''),
     detailLoading = ref(false);
   const revealed = ref(false);
+  const { imageSource, replaceImage } = createDetailImage();
+  function setDetail(result: Detail | null): void {
+    replaceImage(result?.image);
+    detail.value = result;
+  }
   let generation = 0;
   function invalidateDetail(): void {
     ++generation;
@@ -38,7 +46,7 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
   function conceal(): void {
     invalidateDetail();
     revealed.value = false;
-    detail.value = null;
+    setDetail(null);
     detailLoading.value = false;
   }
   async function revealDetail(): Promise<void> {
@@ -50,7 +58,7 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
     try {
       const result = await invoke<Detail>('reveal_item', { id });
       if (request === generation && context.active()?.id === id) {
-        detail.value = result;
+        setDetail(result);
         revealed.value = true;
       }
     } catch {
@@ -68,10 +76,10 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
       request = ++generation;
     context.resetScroll();
     revealed.value = false;
-    detail.value = null;
+    setDetail(null);
     detailError.value = '';
     detailLoading.value = !!id;
-    if (!id || context.active()?.kind === 'image') {
+    if (!id || (context.active()?.kind === 'image' && !context.active()?.sensitive)) {
       detailLoading.value = false;
       return;
     }
@@ -80,7 +88,7 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
   async function fetchDetail(id: string, request: number): Promise<void> {
     try {
       const result = await invoke<Detail>('item_detail', { id });
-      if (request === generation) detail.value = result;
+      if (request === generation) setDetail(result);
     } catch (error) {
       if (request === generation) detailError.value = String(error);
     } finally {
@@ -92,6 +100,7 @@ export function createItemDetail(context: DetailContext): ItemDetailController {
     detailError,
     detailLoading,
     revealed,
+    imageSource,
     invalidateDetail,
     conceal,
     revealDetail,

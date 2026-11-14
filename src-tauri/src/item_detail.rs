@@ -7,6 +7,8 @@ pub(crate) struct FileDetail {
 }
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct ItemDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) image: Option<Vec<u8>>,
     pub(crate) text: String,
     pub(crate) truncated: bool,
     pub(crate) files: Vec<FileDetail>,
@@ -27,6 +29,7 @@ pub(crate) fn from_clip(clip: &model::Clip) -> ItemDetail {
         })
         .collect();
     ItemDetail {
+        image: None,
         text,
         truncated,
         files,

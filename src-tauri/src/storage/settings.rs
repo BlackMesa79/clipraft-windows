@@ -19,6 +19,9 @@ impl Storage {
         for (key, value) in json.as_object().context("序列化设置不是 JSON 对象")? {
             tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, &value.to_string()])?;
         }
+        if settings.sensitive_ttl_minutes == 0 {
+            tx.execute("UPDATE items SET expires_at=NULL WHERE sensitive=1", [])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -116,7 +119,7 @@ mod tests {
             ("max_items", serde_json::json!(9)),
             ("max_bytes", serde_json::json!(1)),
             ("max_days", serde_json::json!(3651)),
-            ("sensitive_ttl_minutes", serde_json::json!(0)),
+            ("sensitive_ttl_minutes", serde_json::json!(1441)),
             ("quick_visible_count", serde_json::json!(16)),
             ("ignored_apps", serde_json::json!(["valid.exe", "bad.dll"])),
             ("ignored_apps", serde_json::json!([r"C:\Bad?.exe"])),

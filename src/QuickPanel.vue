@@ -5,7 +5,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import HistoryList from './HistoryList.vue';
 import UiIcon from './UiIcon.vue';
 import type { Item } from './history';
-import type { PanelState } from './panel';
+import { createPanelState, type PanelState } from './panel';
 import {
   applyTheme,
   shortcutLabel,
@@ -15,9 +15,16 @@ import {
 } from './settings';
 import './styles/quick.css';
 
-const items = ref<Item[]>([]),
-  selected = ref(0),
+const { panel, applyPanel } = createPanelState();
+const items = computed<Item[]>(() => panel.value.items),
+  selected = computed(() => panel.value.selected),
   error = ref('');
+watch(
+  () => panel.value.error,
+  (message) => {
+    error.value = message ?? '';
+  },
+);
 const settings = ref<Settings>(),
   settingOptions = ref<SettingOptions>();
 watch(settings, applyTheme);
@@ -25,10 +32,16 @@ const quickKey = computed(() => ({
   hold_label: shortcutModifiersLabel(settings.value?.quick_hotkey),
   trigger: shortcutLabel(settings.value?.quick_hotkey).split(' + ').at(-1) ?? '',
 }));
-const panelVisible = ref(false);
+const panelVisible = computed(() => panel.value.visible);
 const noticeOnly = computed(() => !panelVisible.value && !!error.value);
 const panelRoot = ref<HTMLElement | null>(null);
 const selectedIds = new Set<string>();
+const positions = computed(() =>
+  items.value.map(
+    (_, index) =>
+      ((panel.value.position + panel.value.total + index - selected.value) % panel.value.total) + 1,
+  ),
+);
 let panelObserver: ResizeObserver | undefined;
 let lastPanelSize = '';
 function resizeQuick() {
@@ -44,12 +57,6 @@ function resizeQuick() {
   });
 }
 watch([noticeOnly, error, panelVisible], resizeQuick, { flush: 'post' });
-function applyPanel(p: PanelState) {
-  items.value = p.items;
-  selected.value = p.selected;
-  panelVisible.value = p.visible;
-  error.value = p.error ?? '';
-}
 const stops: UnlistenFn[] = [];
 onMounted(async () => {
   if (panelRoot.value) {
@@ -93,20 +100,29 @@ onUnmounted(() => {
           }}</p></div
         ></div
       >
-      <span v-if="!noticeOnly" class="count">{{ items.length }} 条</span>
+      <span v-if="!noticeOnly" class="count"
+        >{{ panel.total ? panel.position + 1 : 0 }} / {{ panel.total }} 条</span
+      >
     </header>
     <div v-if="error" class="error" role="alert">{{ error }}</div>
-    <section v-if="!noticeOnly && !items.length" class="empty"
+    <section v-if="!noticeOnly && panel.loading" class="empty" role="status" aria-busy="true"
+      ><h2>正在加载所选记录…</h2><p>可继续选择，松开修饰键粘贴当前项。</p></section
+    >
+    <section v-else-if="!noticeOnly && !items.length && error" class="empty" role="status"
+      ><h2>所选记录暂时无法显示</h2><p>继续选择可重试，Esc 取消。</p></section
+    >
+    <section v-else-if="!noticeOnly && !items.length" class="empty"
       ><span><UiIcon name="copy" /></span><h2>从一次复制开始</h2
       ><p>复制文本、图片或文件后，会显示在这里。</p></section
     >
     <div v-else-if="!noticeOnly" class="workspace">
       <HistoryList
         :items="items"
+        :positions="positions"
         :selected="selected"
         :selected-ids="selectedIds"
         quick
-        :loading="false"
+        :loading="panel.loading"
         :has-more="true"
         :disabled="false"
         @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})"

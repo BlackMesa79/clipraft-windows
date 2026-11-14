@@ -110,7 +110,7 @@ try {
           if(window.holdNext){window.holdNext=false;return new Promise(resolve=>window.releasePage=()=>resolve(result));}
           return result;
         }
-        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null};
+        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};
         if(cmd==='last_error')return null;
         if(cmd==='frontend_ready'){window.ready=true;return;}
         if(cmd==='item_detail') {

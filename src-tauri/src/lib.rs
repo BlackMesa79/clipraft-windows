@@ -20,6 +20,8 @@ mod item_detail;
 mod main_position;
 pub mod model;
 mod owner_flush;
+pub mod panel_neighborhood;
+pub mod panel_session;
 pub mod paster;
 pub mod platform;
 mod runtime;
@@ -95,6 +97,7 @@ async fn delete_items(
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // 与保存/自动清理一致：先 capture_context 后 storage，避免反向嵌套死锁。
+        let _change = runtime::history_gate::begin(&shared).map_err(|e| e.to_string())?;
         let mut context = shared
             .capture_context
             .lock()
@@ -128,6 +131,7 @@ async fn update_history<T: Send + 'static>(
     }
     let app = window.app_handle().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _change = runtime::history_gate::begin(&state).map_err(|e| e.to_string())?;
         let result = {
             let mut store = state.storage.lock().map_err(|_| "存储不可用")?;
             change(&mut store).map_err(|e| e.to_string())?
@@ -370,6 +374,17 @@ async fn set_sensitive(
     .await
 }
 #[tauri::command]
+async fn keep_sensitive(
+    ids: Vec<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<usize, String> {
+    update_history(window, state.inner().clone(), move |storage| {
+        storage.keep_sensitive(&ids)
+    })
+    .await
+}
+#[tauri::command]
 async fn image_failure_reason(
     id: String,
     state: tauri::State<'_, Arc<State>>,
@@ -391,11 +406,7 @@ async fn image_failure_reason(
 }
 #[tauri::command]
 fn panel_state(state: tauri::State<'_, Arc<State>>) -> Result<Panel, String> {
-    state
-        .panel
-        .lock()
-        .map(|panel| panel.clone())
-        .map_err(|_| "面板状态不可用".into())
+    runtime::panel_snapshot(&state).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn resize_quick(
@@ -581,6 +592,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             file_actions::file_action,
             reveal_item,
             set_sensitive,
+            keep_sensitive,
             image_failure_reason,
             panel_state,
             resize_quick,

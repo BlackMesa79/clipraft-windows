@@ -10,13 +10,7 @@ pub(in crate::runtime) fn check_failures(app: &AppHandle) {
     let (jobs, queued) = mpsc::sync_channel(4);
     state.jobs = jobs;
     let state = Arc::new(state);
-    let mut controller = Controller {
-        app: app.clone(),
-        state: state.clone(),
-        panel: Panel::default(),
-        target: 0,
-        notice: NoticeDeadline::default(),
-    };
+    let mut controller = Controller::new(app.clone(), state.clone());
     controller.panel = Panel {
         items: vec![crate::model::ItemView {
             id: "synthetic".into(),
@@ -25,6 +19,7 @@ pub(in crate::runtime) fn check_failures(app: &AppHandle) {
         selected: 0,
         visible: true,
         error: None,
+        ..Default::default()
     };
     poison(&state.error);
     let generation = new_paste_intent();
@@ -43,7 +38,7 @@ pub(in crate::runtime) fn check_failures(app: &AppHandle) {
         .is_err());
     assert!(controller.handle(Control::Toggle).is_err());
     assert!(controller.panel.visible);
-    poison(&state.items);
+    poison(&state.history_gate.0);
     assert!(controller.handle(Control::HistoryChanged).is_err());
     poison(&state.panel);
     assert!(controller

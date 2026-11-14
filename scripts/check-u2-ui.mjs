@@ -127,7 +127,7 @@ try {
         if(cmd==='sync_compact_preview'){if(window.echoPreviewFocus&&args.id){window.previewFocusEchoes=(window.previewFocusEchoes??0)+1;if(window.previewFocusEchoes>10)throw Error('预览焦点反馈未收敛');window.dispatchEvent(new Event('focus'));}return;}
         if(cmd==='compact_preview_geometry')return null;
         if(cmd==='compact_preview_state'){if(location.search.includes('holdpreview'))return new Promise(r=>window.releasePreviewSnapshot=r);return null;}
-        if(cmd==='panel_state'){if(location.search.includes('fail=panel'))throw Error('合成 panel_state 失败');return {items:window.rows,selected:1,visible:true,error:null};}
+        if(cmd==='panel_state'){if(location.search.includes('fail=panel'))throw Error('合成 panel_state 失败');return {items:window.rows,selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};}
         if(cmd==='frontend_ready'){window.ready=true;return;}
         if(cmd==='set_hotkey_recording'){if(args.active&&window.holdRecording)await new Promise(resolve=>window.releaseRecording=resolve);return 1;}
         if(cmd==='list_items'){

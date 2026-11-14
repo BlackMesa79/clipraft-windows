@@ -136,7 +136,7 @@ try {
           if(window.holdNext){window.holdNext=false;return new Promise(resolve=>window.releasePage=()=>resolve(result));}
           return result;
         }
-        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null};
+        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};
         if(cmd==='delete_items') {
           window.deletes.push(args.ids);
           if(window.failDelete){window.failDelete=false;throw Error('合成删除失败');}

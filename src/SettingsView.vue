@@ -101,7 +101,7 @@ const fields = [
   { key: 'max_items', label: '最大条数', group: 'history' },
   { key: 'max_bytes', label: '最大空间（MB）', group: 'history' },
   { key: 'max_days', label: '保留天数（0 表示不限）', group: 'history' },
-  { key: 'sensitive_ttl_minutes', label: '敏感内容保留分钟数', group: 'privacy' },
+  { key: 'sensitive_ttl_minutes', label: '敏感内容保留时长', group: 'privacy' },
   { key: 'quick_visible_count', label: '快速面板可见条数（预留）', group: 'hotkeys' },
 ] as const;
 type NumericKey = (typeof fields)[number]['key'];
@@ -481,7 +481,8 @@ onUnmounted(() => {
           <fieldset :disabled="busy" v-show="category === 'privacy'" data-category="privacy">
             <legend>隐私</legend>
             <p class="detail-note"
-              >忽略列表保存后对后续复制立即生效，不删除已有历史；敏感内容识别及保留时间对后续采集生效。</p
+              >忽略列表与敏感识别保存后对后续复制生效，不删除已有历史。保留时长设为 0
+              会取消所有敏感记录的倒计时，普通历史清理规则仍然适用；恢复正数不改变已取消的倒计时。</p
             >
             <label class="check"
               ><input v-model="draft.sensitive_detection" type="checkbox" />识别敏感内容</label
@@ -494,17 +495,15 @@ onUnmounted(() => {
               />高熵字符串识别（可能误报，默认关闭）</label
             >
             <label class="number-field"
-              ><span>敏感内容保留分钟数</span
-              ><input
-                v-model.number="draft.sensitive_ttl_minutes"
-                type="number"
-                v-bind="range('sensitive_ttl_minutes')"
-                required
-              /><small
-                >范围 {{ range('sensitive_ttl_minutes').min }}–{{
-                  range('sensitive_ttl_minutes').max
-                }}</small
-              ></label
+              ><span>敏感内容保留时长</span
+              ><span class="duration-input"
+                ><input
+                  v-model.number="draft.sensitive_ttl_minutes"
+                  type="number"
+                  v-bind="range('sensitive_ttl_minutes')"
+                  required
+                /><span>分钟</span></span
+              ><small>0 为不设敏感删除倒计时；范围 0–1440</small></label
             >
             <p>忽略程序（每行一个 exe 名）</p>
             <ul class="ignored-apps"
@@ -732,6 +731,13 @@ onUnmounted(() => {
 }
 .number-field > span {
   width: 210px;
+}
+.number-field > .duration-input {
+  width: auto;
+  max-width: 100%;
+}
+.duration-input > span {
+  white-space: nowrap;
 }
 .number-field input,
 .number-field select {

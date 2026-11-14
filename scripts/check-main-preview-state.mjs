@@ -53,13 +53,14 @@ try {
     path.join(temporary, 'ipc.mjs'),
     'export const invoke = (...args) => globalThis.__mainPreviewInvoke(...args);',
   );
-  for (const name of ['itemDetail', 'compactPreview']) {
+  for (const name of ['detailImage', 'itemDetail', 'compactPreview']) {
     const source = await readFile(path.join(root, 'src', name + '.ts'), 'utf8');
     const compiled = ts.transpileModule(source, { compilerOptions: converted.options }).outputText;
-    assert(compiled.includes("'@tauri-apps/api/core'"));
     await writeFile(
       path.join(temporary, name + '.mjs'),
-      compiled.replace("'@tauri-apps/api/core'", "'./ipc.mjs'"),
+      compiled
+        .replace("'@tauri-apps/api/core'", "'./ipc.mjs'")
+        .replace("'./detailImage'", "'./detailImage.mjs'"),
     );
   }
   const { createItemDetail } = await import(pathToFileURL(path.join(temporary, 'itemDetail.mjs')));
@@ -145,6 +146,33 @@ try {
     await load;
     assert.equal(other.detail.value.text, 'other');
     assert.equal(detail.detail.value, null);
+  });
+  await test('敏感图片加载马赛克，显式查看替换图片，隐藏与失效释放地址', async () => {
+    active = { id: 'sensitive-image', sensitive: true, kind: 'image' };
+    const masked = detail.loadDetail();
+    latest('item_detail').resolve({ ...result(''), image: [1, 2, 3] });
+    await masked;
+    const maskedUrl = detail.imageSource.value;
+    assert(maskedUrl.startsWith('blob:'));
+    assert.deepEqual([...new Uint8Array(await (await fetch(maskedUrl)).arrayBuffer())], [1, 2, 3]);
+    const reveal = detail.revealDetail();
+    latest('reveal_item').resolve({ ...result(''), image: [4, 5, 6] });
+    await reveal;
+    assert.equal(detail.revealed.value, true);
+    assert.notEqual(detail.imageSource.value, maskedUrl);
+    await assert.rejects(fetch(maskedUrl));
+    const clearUrl = detail.imageSource.value;
+    const hidden = detail.loadDetail();
+    assert.equal(detail.imageSource.value, '');
+    await assert.rejects(fetch(clearUrl));
+    latest('item_detail').resolve({ ...result(''), image: [7, 8, 9] });
+    await hidden;
+    const late = detail.revealDetail();
+    detail.conceal();
+    latest('reveal_item').resolve({ ...result(''), image: [10, 11] });
+    await late;
+    assert.equal(detail.imageSource.value, '');
+    assert.equal(detail.revealed.value, false);
   });
   compact = true;
   let settingsOpen = false;

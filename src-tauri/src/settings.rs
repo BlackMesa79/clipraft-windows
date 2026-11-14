@@ -237,7 +237,7 @@ pub fn ranges() -> BTreeMap<&'static str, Range> {
         ("max_items", 10, 100_000, 1),
         ("max_bytes", 10 * MB, 100 * 1024 * MB, 1),
         ("max_days", 0, 3650, 1),
-        ("sensitive_ttl_minutes", 1, 1440, 1),
+        ("sensitive_ttl_minutes", 0, 1440, 1),
         ("quick_visible_count", 3, 15, 1),
     ]
     .into_iter()
@@ -335,7 +335,7 @@ fn field_label(key: &str) -> &str {
         "max_items" => "最大条数",
         "max_bytes" => "最大空间（字节）",
         "max_days" => "保留天数",
-        "sensitive_ttl_minutes" => "敏感内容保留分钟数",
+        "sensitive_ttl_minutes" => "敏感内容保留时长",
         "quick_visible_count" => "快速面板可见条数",
         _ => key,
     }

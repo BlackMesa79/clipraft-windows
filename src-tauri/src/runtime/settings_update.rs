@@ -34,6 +34,7 @@ pub(super) fn apply_settings(
         return Err(anyhow!("请先结束快捷键录制"));
     }
     let next = next.normalized()?;
+    let _change = super::history_gate::begin(state)?;
     let mut current = state
         .settings
         .lock()

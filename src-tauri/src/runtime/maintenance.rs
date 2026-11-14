@@ -71,7 +71,9 @@ fn expire(state: &State) -> Result<(Duration, bool)> {
             false,
         ));
     }
+    let _change = super::history_gate::begin(state)?;
     let report = store.delete_expired(now)?;
+    state.history_index.refresh(&store)?;
     owner_flush::invalidate_deleted(&mut context, &report.deleted_ids);
     Ok((Duration::from_millis(100), report.deleted_items > 0))
 }

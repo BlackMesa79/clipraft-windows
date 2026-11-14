@@ -30,6 +30,264 @@ fn token() -> String {
     format!("sk-{}", "SyntheticOnly0123456789abcdef")
 }
 
+#[test]
+fn sensitive_image_returns_mosaic_and_explicit_reveal_returns_registered_preview() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let image = image::RgbImage::from_fn(120, 80, |x, y| {
+        image::Rgb([(x * 2) as u8, (y * 3) as u8, ((x + y) % 256) as u8])
+    });
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let clip = Clip {
+        formats: vec![model::FormatData {
+            name: "PNG".into(),
+            bytes: encoded.into_inner(),
+        }],
+    };
+    storage.save(&clip).unwrap();
+    let item = storage.preview_item(&clip.hash()).unwrap();
+    let hash = item.preview.unwrap();
+    let clear = storage.read_thumbnail(&hash).unwrap();
+    storage.set_sensitive(&[clip.hash()], true, 10).unwrap();
+    assert!(storage.read_thumbnail(&hash).is_err());
+    let masked = storage.display_detail(&clip.hash()).unwrap();
+    let masked_bytes = masked.image.unwrap();
+    assert_ne!(masked_bytes, clear);
+    let decoded = image::load_from_memory(&masked_bytes).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (120, 80));
+    let colors: HashSet<_> = decoded.pixels().map(|pixel| pixel.0).collect();
+    assert!(colors.len() <= 100);
+    assert_eq!(
+        storage.reveal_detail(&clip.hash()).unwrap().image.unwrap(),
+        clear
+    );
+    assert!(
+        storage.read_thumbnail(&hash).is_err(),
+        "显式查看不放宽普通图片协议"
+    );
+    assert!(storage
+        .display_detail(&clip.hash())
+        .unwrap()
+        .image
+        .is_some());
+    storage.delete(&[clip.hash()]).unwrap();
+    assert!(storage.reveal_detail(&clip.hash()).is_err());
+}
+
+#[test]
+fn sensitive_image_files_use_cached_mosaic_and_reveal_without_reopening_source() {
+    for extension in ["png", "jpg"] {
+        let fixture = Fixture::new();
+        let mut storage = fixture.open();
+        let path = fixture.0.join(format!("synthetic.{extension}"));
+        let image = image::RgbImage::from_fn(120, 80, |x, y| {
+            image::Rgb([(x * 2) as u8, (y * 3) as u8, ((x + y) % 256) as u8])
+        });
+        image.save(&path).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let clip = Clip {
+            formats: vec![model::FormatData {
+                name: "CF_HDROP".into(),
+                bytes: model::encode_hdrop(std::slice::from_ref(&path)),
+            }],
+        };
+        storage.save(&clip).unwrap();
+        let original = storage.preview_item(&clip.hash()).unwrap();
+        assert_eq!(original.kind, "files");
+        let hash = original.preview.unwrap();
+        let clear = storage.read_thumbnail(&hash).unwrap();
+        storage.set_sensitive(&[clip.hash()], true, 10).unwrap();
+        fs::remove_file(&path).unwrap();
+        let safe = storage.preview_item(&clip.hash()).unwrap();
+        assert!(safe.files.is_empty() && safe.preview.is_none() && safe.thumbnail.is_none());
+        let masked = storage.display_detail(&clip.hash()).unwrap();
+        assert!(masked.files.is_empty() && masked.text.is_empty());
+        let bytes = masked.image.unwrap();
+        assert_ne!(bytes, clear);
+        let pixels = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(pixels.dimensions(), (120, 80));
+        assert!(
+            pixels
+                .pixels()
+                .map(|pixel| pixel.0)
+                .collect::<HashSet<_>>()
+                .len()
+                <= 100
+        );
+        let revealed = storage.reveal_detail(&clip.hash()).unwrap();
+        assert_eq!(revealed.image.unwrap(), clear);
+        assert_eq!(revealed.files[0].path, path);
+        assert_eq!(revealed.files[0].exists, Some(false));
+        assert!(storage.read_thumbnail(&hash).is_err());
+        assert!(storage
+            .display_detail(&clip.hash())
+            .unwrap()
+            .image
+            .is_some());
+    }
+}
+
+#[test]
+fn sensitive_non_image_files_keep_masked_details_without_image() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let path = fixture.0.join("synthetic.txt");
+    fs::write(&path, "synthetic text file").unwrap();
+    let path = path.to_string_lossy().into_owned();
+    let clip = Clip {
+        formats: vec![model::FormatData {
+            name: "CF_HDROP".into(),
+            bytes: model::encode_hdrop(std::slice::from_ref(&path)),
+        }],
+    };
+    storage.save(&clip).unwrap();
+    storage.set_sensitive(&[clip.hash()], true, 10).unwrap();
+    let masked = storage.display_detail(&clip.hash()).unwrap();
+    assert!(masked.image.is_none() && masked.files.is_empty());
+    let revealed = storage.reveal_detail(&clip.hash()).unwrap();
+    assert!(revealed.image.is_none());
+    assert_eq!(revealed.files[0].path, path);
+}
+
+#[test]
+fn keeping_one_sensitive_record_cancels_expiry_and_survives_recopy_and_reopen() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let clip = text(&token());
+    let id = clip.hash();
+    storage.save(&clip).unwrap();
+    let timed = text("独立定时删除测试");
+    storage.save(&timed).unwrap();
+    storage.set_sensitive(&[timed.hash()], true, 1).unwrap();
+    assert_eq!(
+        storage
+            .keep_sensitive(&[id.clone(), id.clone(), "missing".into()])
+            .unwrap(),
+        1
+    );
+    assert_eq!(state(&storage, &id), (1, None));
+    assert!(state(&storage, &timed.hash()).1.is_some());
+    storage.save(&clip).unwrap();
+    assert_eq!(state(&storage, &id), (1, None));
+    storage.save(&text("最新的普通内容")).unwrap();
+    storage.delete_expired(i64::MAX).unwrap();
+    assert!(storage.load(&id).is_ok());
+    assert!(storage.load(&timed.hash()).is_err());
+    drop(storage);
+    let mut storage = fixture.open();
+    assert_eq!(state(&storage, &id), (1, None));
+    storage.delete(std::slice::from_ref(&id)).unwrap();
+    assert!(storage.load(&id).is_err(), "永久保留仍允许手动删除");
+}
+
+#[test]
+fn single_and_global_disabled_sensitive_expiry_still_follow_normal_cleanup() {
+    let policies = [
+        RetentionPolicy {
+            max_items: 100,
+            max_bytes: u64::from(u32::MAX),
+            max_days: 1,
+        },
+        RetentionPolicy {
+            max_items: 1,
+            max_bytes: u64::from(u32::MAX),
+            max_days: 0,
+        },
+        RetentionPolicy {
+            max_items: 100,
+            max_bytes: 1,
+            max_days: 0,
+        },
+    ];
+    for global in [false, true] {
+        for policy in &policies {
+            for protection in ["none", "pinned", "grouped"] {
+                let fixture = Fixture::new();
+                let mut storage = fixture.open();
+                if global {
+                    storage
+                        .save_settings(&Settings {
+                            sensitive_ttl_minutes: 0,
+                            ..Settings::default()
+                        })
+                        .unwrap();
+                }
+                let id = save(&mut storage);
+                storage.keep_sensitive(std::slice::from_ref(&id)).unwrap();
+                match protection {
+                    "none" => {}
+                    "pinned" => {
+                        storage.set_pinned(std::slice::from_ref(&id), true).unwrap();
+                    }
+                    "grouped" => {
+                        let group = storage.create_group("测试分组").unwrap().id;
+                        storage
+                            .move_to_group(std::slice::from_ref(&id), Some(group))
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                storage.save(&text("保留最新的普通记录")).unwrap();
+                storage
+                    .conn
+                    .execute("UPDATE items SET used_at=0", [])
+                    .unwrap();
+                assert_eq!(state(&storage, &id), (1, None));
+                let expected = usize::from(protection == "none");
+                assert_eq!(storage.preview_cleanup(policy, i64::MAX).unwrap(), expected);
+                let report = storage.cleanup(policy, i64::MAX).unwrap();
+                assert_eq!(
+                    report.deleted_items, expected,
+                    "global={global}, protection={protection}, policy={policy:?}"
+                );
+                assert_eq!(storage.load(&id).is_ok(), protection != "none");
+            }
+        }
+    }
+}
+
+#[test]
+fn global_zero_cancels_existing_deadlines_and_covers_manual_and_detected_records() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let old = save(&mut storage);
+    assert!(state(&storage, &old).1.is_some());
+    let settings = Settings {
+        sensitive_ttl_minutes: 0,
+        ..Settings::default()
+    };
+    storage.save_settings(&settings).unwrap();
+    assert_eq!(storage.load_settings().unwrap().sensitive_ttl_minutes, 0);
+    assert_eq!(state(&storage, &old), (1, None));
+    let automatic = text(&format!("另一条 {}", token()));
+    storage.save(&automatic).unwrap();
+    assert_eq!(state(&storage, &automatic.hash()), (1, None));
+    let manual = text("全局永久保留的普通文本");
+    storage.save(&manual).unwrap();
+    storage.set_sensitive(&[manual.hash()], true, 1).unwrap();
+    assert_eq!(state(&storage, &manual.hash()), (1, None));
+    assert!(storage
+        .delete_expired(i64::MAX)
+        .unwrap()
+        .deleted_ids
+        .is_empty());
+    assert!(storage.next_expiry().unwrap().is_none());
+    storage.save_settings(&Settings::default()).unwrap();
+    storage.save(&automatic).unwrap();
+    assert_eq!(
+        state(&storage, &automatic.hash()),
+        (1, None),
+        "已保留的内容不重新开始倒计时"
+    );
+    let timed = text("之后新标记的内容");
+    storage.save(&timed).unwrap();
+    storage.set_sensitive(&[timed.hash()], true, 1).unwrap();
+    assert!(state(&storage, &timed.hash()).1.is_some());
+}
+
 /// AC-T9-2/4/5/7：分组、收藏、三态、分页搜索、清理和重启组合。
 #[test]
 fn t9_negative_state_search_survives_group_delete_cleanup_vacuum_and_reopen() {
@@ -529,7 +787,6 @@ fn invalid_ttl_rejected_without_changes() {
     let mut s = f.open();
     let id = save(&mut s);
     let before = state(&s, &id);
-    assert!(s.set_sensitive(std::slice::from_ref(&id), true, 0).is_err());
     assert!(s
         .set_sensitive(std::slice::from_ref(&id), true, 1441)
         .is_err());

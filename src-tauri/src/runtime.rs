@@ -1,5 +1,7 @@
 mod broker;
 mod broker_messages;
+pub(crate) mod history_gate;
+mod history_index;
 mod main_window;
 mod maintenance;
 mod panel_controller;
@@ -144,6 +146,7 @@ pub enum Control {
     Report(String),
     PasteReport(String, u64),
     HistoryChanged,
+    NeighborhoodReady,
     UpdateSettings(Settings, Sender<Result<Settings, String>>),
 }
 #[derive(Clone, Serialize, Default)]
@@ -152,11 +155,21 @@ pub struct Panel {
     pub selected: usize,
     pub visible: bool,
     pub error: Option<String>,
+    pub serial: u64,
+    pub session: u64,
+    pub position: usize,
+    pub total: usize,
+    pub loading: bool,
+    #[serde(skip)]
+    pub history_revision: u64,
 }
 pub struct State {
     pub files: crate::file_status::Cache,
     pub settings_requested: AtomicBool,
     pub items: Mutex<Vec<ItemView>>,
+    history_index: history_index::Cache,
+    history_gate: history_gate::Gate,
+    panel_serial: AtomicU64,
     pub storage: Mutex<Storage>,
     // 删除、保存与清理统一先锁此上下文，再锁 storage。
     pub capture_context: Mutex<Option<crate::owner_flush::CaptureContext>>,
@@ -208,18 +221,26 @@ pub fn report(_app: &AppHandle, state: &State, message: &str) {
     );
 }
 pub fn refresh(app: &AppHandle, state: &State) -> Result<()> {
-    let storage = state.storage.lock().map_err(|_| anyhow!("存储不可用"))?;
-    let mut items = storage.list()?;
-    state.files.annotate(&mut items)?;
-    let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
-    *state.items.lock().map_err(|_| anyhow!("历史快照不可用"))? = items;
-    hook::READY.store(enabled, Ordering::Release);
-    drop(storage);
+    if let Err(error) = refresh_snapshots(state) {
+        state.history_index.fail(error.to_string())?;
+        return Err(error);
+    }
     crate::app_events::record(
         "history control send failed",
         crate::app_events::send_control(&state.control, Control::HistoryChanged),
     );
     app.emit("history-changed", ())?;
+    Ok(())
+}
+fn refresh_snapshots(state: &State) -> Result<()> {
+    let storage = state.storage.lock().map_err(|_| anyhow!("存储不可用"))?;
+    let mut items = storage.list()?;
+    state.files.annotate(&mut items)?;
+    state.history_index.refresh(&storage)?;
+    let enabled = !state.smoke && !items.is_empty() && state.ready.load(Ordering::Acquire);
+    *state.items.lock().map_err(|_| anyhow!("历史快照不可用"))? = items;
+    hook::READY.store(enabled, Ordering::Release);
+    drop(storage);
     Ok(())
 }
 fn queue_capture() {
@@ -282,17 +303,48 @@ fn on_main(app: &AppHandle, f: impl FnOnce() + Send + 'static) -> Result<()> {
         .map_err(|error| anyhow!("主线程任务派发失败：{error}"))
 }
 // 快照来自已脱敏的内存条目；发布路径不能等待存储锁或执行 SQL。
+#[cfg(test)]
 fn store_panel_snapshot(state: &State, panel: &Panel) -> Result<()> {
-    *state.panel.lock().map_err(|_| anyhow!("面板快照不可用"))? = panel.clone();
+    let stamp = state
+        .history_gate
+        .0
+        .lock()
+        .map_err(|_| anyhow!("历史版本不可用"))?;
+    let mut panel = panel.clone();
+    history_gate::sanitize(&mut panel, *stamp);
+    *state.panel.lock().map_err(|_| anyhow!("面板快照不可用"))? = panel;
     Ok(())
 }
 fn publish(app: &AppHandle, state: &State, panel: &Panel) -> Result<()> {
-    store_panel_snapshot(state, panel)?;
-    app.emit_to("quick", "panel-state", panel)?;
+    let stamp = state
+        .history_gate
+        .0
+        .lock()
+        .map_err(|_| anyhow!("历史版本不可用"))?;
+    let mut panel = panel.clone();
+    history_gate::sanitize(&mut panel, *stamp);
+    panel.serial = state.panel_serial.fetch_add(1, Ordering::AcqRel) + 1;
+    *state.panel.lock().map_err(|_| anyhow!("面板快照不可用"))? = panel.clone();
+    app.emit_to("quick", "panel-state", &panel)?;
     Ok(())
+}
+pub(crate) fn panel_snapshot(state: &State) -> Result<Panel> {
+    let stamp = state
+        .history_gate
+        .0
+        .lock()
+        .map_err(|_| anyhow!("历史版本不可用"))?;
+    let mut panel = state
+        .panel
+        .lock()
+        .map_err(|_| anyhow!("面板快照不可用"))?
+        .clone();
+    history_gate::sanitize(&mut panel, *stamp);
+    Ok(panel)
 }
 // 按快照顺序替换为最新的完整展示对象，不新增条目。
 // 选中记录消失时取消，绝不把原下标解释为另一条记录。
+#[cfg(test)]
 fn refresh_panel_snapshot(
     snapshot: &[ItemView],
     current: &[ItemView],
@@ -412,6 +464,9 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         })?,
         settings_requested: AtomicBool::new(false),
         items: Mutex::new(items),
+        history_index: history_index::Cache::default(),
+        history_gate: history_gate::Gate::default(),
+        panel_serial: AtomicU64::new(0),
         storage: Mutex::new(storage),
         capture_context: Mutex::new(None),
         retention_policy: Mutex::new(policy),
@@ -1228,6 +1283,7 @@ mod settings_tests {
         assert_failed_rollback_is_reported(app.handle(), &fixture);
         assert_successful_update_commits_and_clears_startup_error(app.handle(), &fixture);
         panel_controller::tests::check_failures(app.handle());
+        panel_controller::integration_tests::check_integration(app.handle());
         // AC-6/7：复用本进程唯一的 Tauri 测试应用；不新建窗口或启动监听。
         // 持有存储及采集上下文时，真实 publish / panel_state 仍须完成。
         let fake = "sk-TESTONLY7777777777777777abcd";
@@ -1252,8 +1308,12 @@ mod settings_tests {
             selected: 0,
             visible: true,
             error: None,
+            history_revision: state.history_gate.stamp().unwrap().revision,
+            ..Default::default()
         };
-        let expected = serde_json::to_value(&panel).unwrap();
+        let mut expected_panel = panel.clone();
+        expected_panel.serial = state.panel_serial.load(Ordering::Acquire) + 1;
+        let expected = serde_json::to_value(&expected_panel).unwrap();
         let shared = Arc::new(state);
         assert!(app.manage(shared.clone()));
         let context_guard = shared.capture_context.lock().unwrap();

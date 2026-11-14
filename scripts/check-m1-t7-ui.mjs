@@ -95,6 +95,7 @@ try {
   };
   const mock = `(() => {
     const callbacks = new Map(), events = new Map(); let callbackId = 0;
+    window.clockNow=1800000000000;Date.now=()=>window.clockNow;
     const nativeInterval=window.setInterval;window.setInterval=(fn,ms,...args)=>{if(ms===60000)window.minuteTick=fn;return nativeInterval(fn,ms,...args);};
     window.groups = [{id:1,name:'工作',sort:0},{id:2,name:'私人',sort:1}];window.mutations=[];
     window.rows = Array.from({length:250},(_,i)=>({pinned:false,favorite:i<220,group_id:i<120?1:null,id:'item-'+i,kind:'text',summary:(i<220?'你好 Hello nihao nh ':'Other ') + i,formats:['CF_UNICODETEXT'],files:[],thumbnail:null,placeholder:null}));
@@ -139,7 +140,7 @@ try {
           if(window.holdNext){window.holdNext=false;return new Promise(resolve=>window.releasePage=()=>resolve(result));}
           return result;
         }
-        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null};
+        if(cmd==='panel_state')return {items:window.rows.slice(0,200),selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};
         if(cmd==='delete_items') {
           window.deletes.push(args.ids);
           if(window.failDelete){window.failDelete=false;throw Error('合成删除失败');}
@@ -380,7 +381,53 @@ try {
   await click(0);
   await detailReady();
   assert.equal(await evaluate("document.querySelector('.sensitive-badge').textContent"), '敏感');
-  checks.push('受保护记录只显示敏感，不显示倒计时');
+  checks.push('无删除倒计时的记录仅显示敏感标记');
+  await evaluate(
+    'window.clockNow+=45000;window.rows[0].expires_at=Date.now()+600000;window.changed()',
+  );
+  await settled();
+  assert.equal(
+    await evaluate("document.querySelector('.sensitive-badge').textContent"),
+    '敏感 · 10 分钟后删除',
+  );
+  checks.push('列表已存在45秒后新增10分钟倒计时，立即显示10而非11分钟');
+  for (const [advance, expected] of [
+    [59999, '10 分钟后删除'],
+    [1, '9 分钟后删除'],
+  ]) {
+    await evaluate(`window.clockNow+=${advance};window.minuteTick()`);
+    await pause(20);
+    assert.equal(
+      await evaluate("document.querySelector('.sensitive-badge').textContent"),
+      '敏感 · ' + expected,
+    );
+  }
+  checks.push('按剩余时长向上取整，整分钟边界不提前少算一分钟');
+  await evaluate(
+    'window.clockNow+=30000;window.rows[0].expires_at=Date.now()+600000;window.changed()',
+  );
+  await settled();
+  assert.equal(
+    await evaluate("document.querySelector('.sensitive-badge').textContent"),
+    '敏感 · 10 分钟后删除',
+  );
+  checks.push('同一记录重新设置到期时间立即校准显示时钟');
+  await evaluate('window.rows[0].expires_at=Date.now()+60000;window.changed()');
+  await settled();
+  for (const [advance, expected] of [
+    [0, '1 分钟后删除'],
+    [59999, '1 分钟后删除'],
+    [1, '即将删除'],
+  ]) {
+    await evaluate(`window.clockNow+=${advance};window.minuteTick()`);
+    await pause(20);
+    assert.equal(
+      await evaluate("document.querySelector('.sensitive-badge').textContent"),
+      '敏感 · ' + expected,
+    );
+  }
+  checks.push('1分钟、剩余1毫秒和到期瞬间显示准确，不显示0分钟');
+
   await evaluate('window.rows[0].expires_at=Date.now()-60000;window.changed()');
   await settled();
   // 通过受控时钟重新挂载，验证每分钟更新使用的同一计算路径。
@@ -422,6 +469,15 @@ try {
   await send('Page.navigate', { url: origin + '/?panel=quick' });
   await ready();
   await count(200);
+  await evaluate(
+    "window.clockNow+=45000;window.rows[0].expires_at=Date.now()+600000;window.emitEvent('panel-state',{items:window.rows.slice(0,200),selected:1,visible:true,error:null,serial:1,session:1,position:1,total:window.rows.length,loading:false})",
+  );
+  await pause(30);
+  assert.equal(
+    await evaluate("document.querySelector('.sensitive-badge').textContent"),
+    '敏感 · 10 分钟后删除',
+  );
+  checks.push('快速面板迟到的到期状态也立即显示准确分钟数');
   assert(await noPlain());
   assert(await evaluate("!!document.querySelector('.sensitive-badge')"));
   assert.equal(await evaluate("document.querySelector('.sensitive-actions')"), null);

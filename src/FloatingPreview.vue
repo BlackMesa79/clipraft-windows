@@ -5,10 +5,16 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import PreviewImage from './PreviewImage.vue';
 import { kindLabel, type Item } from './history';
 import { applyTheme, type Settings } from './settings';
+import { createDetailImage } from './detailImage';
 interface Content {
   generation?: number;
   item: Item;
-  detail: { text: string; truncated: boolean; files: { path: string; exists: boolean | null }[] };
+  detail: {
+    image?: number[];
+    text: string;
+    truncated: boolean;
+    files: { path: string; exists: boolean | null }[];
+  };
 }
 interface Geometry {
   right: boolean;
@@ -18,6 +24,7 @@ interface Geometry {
 const geometry = ref<Geometry>({ right: true, arrow: 60 });
 let geometryRevision = 0;
 const content = ref<Content>();
+const { imageSource, replaceImage } = createDetailImage();
 const error = ref('');
 const panel = ref<HTMLElement | null>(null),
   body = ref<HTMLElement | null>(null);
@@ -63,6 +70,7 @@ function receive(value: Content | null) {
   revision++;
   contentRevision.value++;
   content.value = value?.item && value.detail ? value : undefined;
+  replaceImage(content.value?.detail.image);
   error.value = '';
 }
 watch([contentRevision, () => geometry.value.width], async () => {
@@ -113,6 +121,7 @@ onMounted(async () => {
   }
 });
 onUnmounted(() => {
+  replaceImage();
   disposed = true;
   revision++;
   observer?.disconnect();
@@ -140,6 +149,12 @@ onUnmounted(() => {
         <section class="floating-content" :key="contentRevision"
           ><div ref="body" class="floating-body">
             <PreviewImage
+              v-if="imageSource && content.item.sensitive"
+              :source="imageSource"
+              large
+              @loaded="measureHeight"
+            />
+            <PreviewImage
               v-if="
                 !content.item.sensitive &&
                 (content.item.kind === 'image' ||
@@ -161,7 +176,12 @@ onUnmounted(() => {
             >
             <p v-if="content.detail.truncated" class="detail-note">内容过长，仅显示部分预览</p>
             <p
-              v-if="!content.detail.text && !content.detail.files.length && content.item.sensitive"
+              v-if="
+                !imageSource &&
+                !content.detail.text &&
+                !content.detail.files.length &&
+                content.item.sensitive
+              "
               >{{ content.item.summary }}</p
             >
           </div></section

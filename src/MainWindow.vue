@@ -203,7 +203,7 @@ function groupsChanged() {
   void load();
 }
 async function changeItems(
-  command: 'set_pinned' | 'move_to_group' | 'set_sensitive',
+  command: 'set_pinned' | 'move_to_group' | 'set_sensitive' | 'keep_sensitive',
   groupId?: number | null,
 ) {
   if (
@@ -215,10 +215,12 @@ async function changeItems(
   )
     return;
   const ids = selectedItems.value.map((item) => item.id);
-  const args =
-    command === 'move_to_group'
-      ? { ids, groupId }
-      : { ids, value: command === 'set_pinned' ? !allPinned.value : !allSensitive.value };
+  const args = {
+    move_to_group: { ids, groupId },
+    set_pinned: { ids, value: !allPinned.value },
+    set_sensitive: { ids, value: !allSensitive.value },
+    keep_sensitive: { ids },
+  }[command];
   mutationBusy.value = true;
   contextMenu.value = null;
   error.value = '';
@@ -450,6 +452,7 @@ const {
   detailError,
   detailLoading,
   revealed,
+  imageSource,
   conceal,
   revealDetail,
   loadDetail,
@@ -487,7 +490,7 @@ function focusMain() {
   if (
     !compact.value &&
     !settingsOpen.value &&
-    active.value?.kind !== 'image' &&
+    (active.value?.kind !== 'image' || active.value?.sensitive) &&
     !detail.value &&
     !detailLoading.value
   )
@@ -1088,10 +1091,12 @@ onUnmounted(() => {
           :groups="groups"
           :all-pinned="allPinned"
           :all-sensitive="allSensitive"
+          :all-sensitive-kept="selectedItems.every((item) => item.sensitive && !item.expires_at)"
           :files="active?.kind === 'files' && !active.sensitive ? active.files : undefined"
           @open-file="runFileAction('open', $event)"
           @reveal-file="runFileAction('reveal', $event)"
           @sensitive="changeItems('set_sensitive')"
+          @keep-sensitive="changeItems('keep_sensitive')"
           @pin="changeItems('set_pinned')"
           @move="changeItems('move_to_group', $event)"
           @delete="requestDelete"
@@ -1151,9 +1156,26 @@ onUnmounted(() => {
                   @click="loadDetail"
                   ><UiIcon name="refresh" /><span class="sr-only">刷新状态</span></button
                 ></div
-              ><h2 class="preview-title">{{ active.sensitive ? '敏感内容' : active.summary }}</h2>
+              ><h2 v-if="!active.sensitive" class="preview-title">{{ active.summary }}</h2>
+              <div
+                v-if="active.sensitive && (active.kind === 'image' || imageSource)"
+                class="sensitive-image"
+              >
+                <PreviewImage
+                  v-if="imageSource"
+                  :source="imageSource"
+                  large
+                  @loaded="invoke('preview_loaded').catch(() => {})"
+                />
+                <p v-else-if="!detailLoading && !detailError" class="detail-note"
+                  >记录没有可用的图片预览</p
+                >
+                <p class="detail-note">{{
+                  revealed ? '正在显示原图' : '图片已用马赛克遮挡，点击“显示原文”查看原图。'
+                }}</p>
+              </div>
               <PreviewImage
-                v-if="
+                v-else-if="
                   active.kind === 'image' ||
                   active.thumbnail ||
                   active.preview ||
@@ -1165,7 +1187,12 @@ onUnmounted(() => {
                 @loaded="invoke('preview_loaded').catch(() => {})"
               />
               <p
-                v-if="active.kind === 'image' && !active.preview && active.thumbnail"
+                v-if="
+                  !active.sensitive &&
+                  active.kind === 'image' &&
+                  !active.preview &&
+                  active.thumbnail
+                "
                 class="detail-note"
                 >旧记录：显示缩略图</p
               >

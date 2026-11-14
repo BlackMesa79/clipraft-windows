@@ -26,6 +26,13 @@ fn store_capture(
     maintenance: &mut CaptureMaintenance,
     captured: clipboard::Captured,
 ) {
+    let _change = match super::history_gate::begin(state) {
+        Ok(change) => change,
+        Err(error) => {
+            report(app, state, &error.to_string());
+            return;
+        }
+    };
     let saved = match save_capture(&state.storage, &state.capture_context, captured) {
         Ok(saved) => saved,
         Err(error) => {
@@ -80,6 +87,10 @@ pub(super) fn start(app: AppHandle, state: Arc<State>, receiver: Receiver<Job>) 
     thread::Builder::new()
         .name("clipboard-storage-worker".into())
         .spawn(move || {
+            if let Err(error) = super::history_index::initialize(&state) {
+                diag::write(format!("history index initialization failed: {error}"));
+                report(&app, &state, "历史索引准备失败，请稍后重试");
+            }
             let mut maintenance = CaptureMaintenance::default();
             while let Ok(job) = receiver.recv() {
                 match job {

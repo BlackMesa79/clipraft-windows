@@ -15,6 +15,23 @@ struct StoredDetail {
 
 impl Storage {
     pub(crate) fn display_detail(&self, id: &str) -> Result<ItemDetail> {
+        let protected_image: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE id=?1 AND sensitive=1 AND (kind='image' OR (kind='files' AND (preview IS NOT NULL OR thumbnail IS NOT NULL))))",
+            [id],
+            |row| row.get(0),
+        )?;
+        if protected_image {
+            let image = self
+                .detail_image(id)?
+                .map(|bytes| crate::thumbnail::mosaic(&bytes))
+                .transpose()?;
+            return Ok(ItemDetail {
+                image,
+                text: String::new(),
+                truncated: false,
+                files: Vec::new(),
+            });
+        }
         let stored = self.read_detail(id)?;
         if stored.state != 1 {
             return Ok(item_detail::from_clip(&stored.clip));
@@ -24,7 +41,21 @@ impl Storage {
 
     pub(crate) fn reveal_detail(&self, id: &str) -> Result<ItemDetail> {
         let stored = self.read_detail(id)?;
-        Ok(item_detail::from_clip(&stored.clip))
+        let mut detail = item_detail::from_clip(&stored.clip);
+        if matches!(stored.clip.kind(), "image" | "files") {
+            detail.image = self.detail_image(id)?;
+        }
+        Ok(detail)
+    }
+
+    fn detail_image(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        // 只按记录 ID 读取登记预览，普通缩略图协议仍拒绝敏感图片。
+        let preview: Option<String> = self.conn.query_row(
+            "SELECT COALESCE(preview,thumbnail) FROM items WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        preview.map(|hash| self.read_blob(&hash)).transpose()
     }
 
     fn read_detail(&self, id: &str) -> Result<StoredDetail> {
@@ -55,6 +86,7 @@ fn masked_detail(clip: &Clip, json: &str) -> Result<ItemDetail> {
     let mut chars = masked.chars();
     let text = chars.by_ref().take(20000).collect();
     Ok(ItemDetail {
+        image: None,
         text,
         truncated: chars.next().is_some(),
         files: Vec::new(),

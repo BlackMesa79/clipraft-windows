@@ -1,7 +1,8 @@
+mod session;
+
 use super::{
     apply_settings, hide_panel, main_window, on_main, paste_generation, paused, platform, publish,
-    refresh_panel_snapshot, update_error, Control, Job, NoticeDeadline, Panel, State, CAPTURE_GATE,
-    LAST_SEQUENCE, PAUSED,
+    update_error, Control, Job, NoticeDeadline, Panel, State, CAPTURE_GATE, LAST_SEQUENCE, PAUSED,
 };
 use crate::{
     diag,
@@ -26,6 +27,9 @@ struct Controller {
     panel: Panel,
     target: isize,
     notice: NoticeDeadline,
+    coordinator: Option<crate::panel_neighborhood::Coordinator>,
+    loader: crate::panel_neighborhood::Loader,
+    next_session: u64,
 }
 
 impl Controller {
@@ -48,6 +52,7 @@ impl Controller {
             Control::OpenSettings => self.open_settings(),
             Control::Toggle => self.toggle_main(),
             Control::HistoryChanged => self.history_changed(),
+            Control::NeighborhoodReady => self.neighborhood_ready(),
             Control::Hide => main_window::hide_main(&self.app, &self.state),
             Control::Hook(action, generation) => self.action(action, generation),
         }
@@ -89,7 +94,7 @@ impl Controller {
     fn open_settings(&mut self) -> Result<()> {
         hook::cancel_panel();
         self.notice.cancel();
-        hide_panel(&self.app, &self.state, &mut self.panel)?;
+        self.close()?;
         main_window::open_settings(&self.app, &self.state)
     }
 
@@ -99,41 +104,11 @@ impl Controller {
         self.panel.error = None;
         self.app.emit("operation-error", "")?;
         hook::cancel_panel();
+        self.clear_session()?;
         self.panel.visible = false;
         diag::panel(true, false);
         publish(&self.app, &self.state, &self.panel)?;
         main_window::toggle(&self.app, &self.state)
-    }
-
-    fn history_changed(&mut self) -> Result<()> {
-        if !self.panel.visible {
-            return Ok(());
-        }
-        let refreshed = {
-            let current = self
-                .state
-                .items
-                .lock()
-                .map_err(|_| anyhow!("历史快照不可用"))?;
-            refresh_panel_snapshot(
-                &self.panel.items,
-                &current,
-                self.panel
-                    .items
-                    .get(self.panel.selected)
-                    .map(|item| item.id.as_str()),
-            )
-        };
-        if let Some((items, selected)) = refreshed {
-            self.panel.items = items;
-            self.panel.selected = selected;
-            return publish(&self.app, &self.state, &self.panel);
-        }
-        self.panel.items.clear();
-        self.panel.selected = 0;
-        self.panel.error = None;
-        self.notice.cancel();
-        hide_panel(&self.app, &self.state, &mut self.panel)
     }
 
     fn action(&mut self, action: Action, generation: u64) -> Result<()> {
@@ -144,7 +119,7 @@ impl Controller {
             Action::Open => self.open(generation),
             Action::Next | Action::Previous => self.navigate(action),
             Action::Commit => self.commit(generation),
-            Action::Cancel => hide_panel(&self.app, &self.state, &mut self.panel),
+            Action::Cancel => self.close(),
         }
     }
 
@@ -152,63 +127,35 @@ impl Controller {
         update_error(&self.state, None)?;
         self.target = platform::foreground();
         if !platform::valid_external(self.target) {
-            hook::cancel_panel();
-            diag::panel(true, false);
-            return Ok(());
+            return self.close();
         }
-        self.panel = Panel {
-            items: self
-                .state
-                .items
-                .lock()
-                .map_err(|_| anyhow!("历史快照不可用"))?
-                .iter()
-                .take(9)
-                .cloned()
-                .collect(),
-            selected: 0,
-            visible: true,
-            error: None,
-        };
-        if self.panel.items.is_empty() {
-            hook::cancel_panel();
-            self.panel.visible = false;
-            diag::panel(true, false);
-            return Ok(());
+        if let Err(error) = self.start_session() {
+            self.close()?;
+            return self.show_report(error.to_string(), Some(generation));
+        }
+        if !self.panel.visible {
+            return self.close();
         }
         self.notice.cancel();
         self.app.emit("operation-error", "")?;
-        self.panel.selected = hook::initial_selection(self.panel.items.len());
         publish(&self.app, &self.state, &self.panel)?;
         main_window::show_quick(&self.app, &self.state, self.target, generation)
     }
 
-    fn navigate(&mut self, action: Action) -> Result<()> {
-        if !self.panel.visible {
-            return Ok(());
-        }
-        self.panel.selected = hook::move_selection(
-            self.panel.selected,
-            self.panel.items.len(),
-            action == Action::Next,
-        );
-        publish(&self.app, &self.state, &self.panel)
-    }
-
     fn commit(&mut self, generation: u64) -> Result<()> {
-        let paste = self.panel.visible;
-        hide_panel(&self.app, &self.state, &mut self.panel)?;
-        if !paste {
-            return Ok(());
-        }
-        let Some(item) = self.panel.items.get(self.panel.selected) else {
+        let id = self
+            .coordinator
+            .as_mut()
+            .and_then(|session| session.commit());
+        self.close()?;
+        let Some(id) = id else {
             return Ok(());
         };
         if self
             .state
             .jobs
             .try_send(Job::Paste {
-                id: item.id.clone(),
+                id,
                 target: self.target,
                 restore: false,
                 plain: false,
@@ -255,6 +202,9 @@ impl Controller {
         hook::cancel_panel();
         // 失败后连同已排队的显示回调一起作废，旧 Commit 不能复用失效快照。
         let generation = super::new_paste_intent();
+        if let Err(error) = self.clear_session() {
+            diag::write(format!("panel session cleanup failed: {error}"));
+        }
         self.panel = Panel::default();
         self.notice.cancel();
         generation
@@ -265,13 +215,7 @@ pub(super) fn start(app: AppHandle, state: Arc<State>, controls: Receiver<Contro
     thread::Builder::new()
         .name("panel-controller".into())
         .spawn(move || {
-            let mut controller = Controller {
-                app,
-                state,
-                panel: Panel::default(),
-                target: 0,
-                notice: NoticeDeadline::default(),
-            };
+            let mut controller = Controller::new(app, state);
             loop {
                 if let Err(error) = controller.expire_notice() {
                     controller.abort(error);
@@ -290,5 +234,7 @@ pub(super) fn start(app: AppHandle, state: Arc<State>, controls: Receiver<Contro
     Ok(())
 }
 
+#[cfg(test)]
+pub(super) mod integration_tests;
 #[cfg(test)]
 pub(super) mod tests;

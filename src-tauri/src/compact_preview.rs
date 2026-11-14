@@ -460,6 +460,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                image: None,
                 text: String::new(),
                 truncated: false,
                 files: vec![],
@@ -522,6 +523,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                image: None,
                 text: String::new(),
                 truncated: false,
                 files: vec![],
@@ -578,6 +580,7 @@ mod tests {
             generation: state.generation.load(Ordering::Acquire),
             item: ItemView::default(),
             detail: ItemDetail {
+                image: None,
                 text: "synthetic".into(),
                 truncated: false,
                 files: vec![],
@@ -625,6 +628,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                image: None,
                 text: String::new(),
                 truncated: false,
                 files: vec![],

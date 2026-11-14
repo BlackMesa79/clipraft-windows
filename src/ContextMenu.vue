@@ -8,6 +8,7 @@ const props = defineProps<{
   groups?: Group[];
   allPinned?: boolean;
   allSensitive?: boolean;
+  allSensitiveKept?: boolean;
   label?: string;
   files?: string[];
 }>();
@@ -21,6 +22,7 @@ const emit = defineEmits<{
   close: [];
   pin: [];
   sensitive: [];
+  keepSensitive: [];
   move: [groupId: number | null];
   openFile: [index: number];
   revealFile: [index: number];
@@ -182,6 +184,14 @@ onUnmounted(() => {
       <button type="button" role="menuitem" @click="emit('sensitive')">{{
         allSensitive ? '取消敏感标记' : '标记为敏感'
       }}</button>
+      <button
+        v-if="allSensitive"
+        type="button"
+        role="menuitem"
+        :disabled="allSensitiveKept"
+        @click="emit('keepSensitive')"
+        >{{ allSensitiveKept ? '已取消敏感删除倒计时' : '取消敏感删除倒计时' }}</button
+      >
       <button type="button" role="menuitem" @click="emit('delete')">删除</button>
       <button type="button" role="menuitem" @click="emit('paste')">粘贴</button>
       <template v-if="files?.length">

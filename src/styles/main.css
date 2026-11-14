@@ -297,6 +297,34 @@
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
+  margin-bottom: 14px;
+}
+
+.sensitive-image .large-preview {
+  width: 100%;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.sensitive-image .large-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 400px;
+  object-fit: contain;
+}
+.sensitive-image .detail-note {
+  margin: 10px 0;
+  line-height: 1.6;
+}
+.duration-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.duration-input input {
+  min-width: 0;
 }
 
 /* v2.2：常规侧栏、内容与详情；紧凑模式独立于主题和常规布局。 */

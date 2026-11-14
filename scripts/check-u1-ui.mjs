@@ -109,7 +109,7 @@ try {
         window.calls.push({cmd,args});
         if(cmd==='plugin:event|listen'){events.set(args.event,args.handler);return id;}
         if(cmd==='resize_quick'){if(window.failResize){window.failResize=false;window.resizeFailures=(window.resizeFailures??0)+1;throw Error('合成 resize 失败');}window.resizeSuccess=(window.resizeSuccess??0)+1;return;}
-        if(cmd==='panel_state'){if(location.search.includes('fail=panel'))throw Error('合成 panel_state 失败');return {items:window.rows,selected:1,visible:true,error:null};}
+        if(cmd==='panel_state'){if(location.search.includes('fail=panel'))throw Error('合成 panel_state 失败');return {items:window.rows,selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};}
         if(cmd==='frontend_ready'){window.ready=true;return;}
         if(cmd==='list_items')return window.rows;
         if(cmd==='list_groups')return [];
@@ -138,7 +138,16 @@ try {
     await send('Page.navigate', { url: origin + '/' + query });
     await until(() => evaluate('window.ready===true'), '未 ready');
   };
+  let panelSerial = 0;
   const emit = async (payload) => {
+    payload = {
+      serial: ++panelSerial,
+      session: 1,
+      position: payload.selected,
+      total: 3,
+      loading: false,
+      ...payload,
+    };
     await evaluate(`window.emitEvent('panel-state',${JSON.stringify(payload)})`);
     await pause(70);
   };

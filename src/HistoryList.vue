@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 const now = ref(Date.now());
 let clock: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
@@ -18,8 +18,9 @@ import PreviewImage from './PreviewImage.vue';
 import UiIcon from './UiIcon.vue';
 import { groupColorStyle } from './groupColors';
 import { filename, kindLabel, type Group, type Item } from './history';
-defineProps<{
+const props = defineProps<{
   items: Item[];
+  positions?: number[];
   groups?: Group[];
   selected: number;
   selectedIds: Set<string>;
@@ -29,6 +30,14 @@ defineProps<{
   hasMore: boolean;
   disabled: boolean;
 }>();
+// 新到期时间必须与当前时刻比较，不能沿用上一次分钟 tick 的旧时刻。
+watch(
+  () => props.items.map((item) => item.expires_at),
+  () => {
+    now.value = Date.now();
+  },
+  { flush: 'sync' },
+);
 const emit = defineEmits<{
   choose: [index: number, event: MouseEvent];
   context: [index: number, event: MouseEvent];
@@ -64,7 +73,7 @@ defineExpose({ element });
       @contextmenu.prevent="emit('context', index, $event)"
       @dblclick="emit('paste')"
     >
-      <span class="index">{{ index + 1 }}</span>
+      <span class="index">{{ positions?.[index] ?? index + 1 }}</span>
       <span
         v-if="
           !quick &&
@@ -86,7 +95,9 @@ defineExpose({ element });
           "
       /></span>
       <PreviewImage
-        v-if="quick && (item.kind === 'image' || item.thumbnail || item.placeholder)"
+        v-if="
+          quick && !item.sensitive && (item.kind === 'image' || item.thumbnail || item.placeholder)
+        "
         :hash="item.thumbnail"
         :placeholder="item.placeholder"
         @loaded="emit('thumbnailLoaded')"

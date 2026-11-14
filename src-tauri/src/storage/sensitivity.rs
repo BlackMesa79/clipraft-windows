@@ -48,6 +48,12 @@ fn write_sensitive(
     data: &Detection,
     expiry: Option<i64>,
 ) -> Result<()> {
+    let unlimited: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key='sensitive_ttl_minutes' AND value='0')",
+        [],
+        |row| row.get(0),
+    )?;
+    let expiry = if unlimited { None } else { expiry };
     let json: String = conn.query_row("SELECT view FROM items WHERE id=?1", [id], |r| r.get(0))?;
     let mut view: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&json).context("已存记录视图不是有效 JSON 对象")?;
@@ -75,7 +81,12 @@ pub(super) fn apply_detection(
         return Ok(());
     }
     // 已经保留过的敏感记录不因取消保护后再次复制而恢复倒计时。
-    let next = if pinned || favorite || group.is_some() || (state == 1 && expiry.is_none()) {
+    let next = if data.ttl == 0
+        || pinned
+        || favorite
+        || group.is_some()
+        || (state == 1 && expiry.is_none())
+    {
         None
     } else {
         Some(now.saturating_add(data.ttl))
@@ -84,8 +95,8 @@ pub(super) fn apply_detection(
 }
 impl Storage {
     pub fn set_sensitive(&mut self, ids: &[String], value: bool, ttl: u32) -> Result<usize> {
-        if !(1..=1440).contains(&ttl) {
-            bail!("敏感内容保留分钟数必须为 1–1440");
+        if ttl > 1440 {
+            bail!("敏感内容保留时长必须为 0–1440 分钟");
         }
         let updates = self.prepare_sensitivity(ids, ttl)?;
         let tx = self.conn.transaction()?;
@@ -121,6 +132,18 @@ impl Storage {
         }
         Ok(updates)
     }
+    pub fn keep_sensitive(&mut self, ids: &[String]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        for id in ids {
+            changed += tx.execute(
+                "UPDATE items SET expires_at=NULL WHERE id=?1 AND sensitive=1 AND expires_at IS NOT NULL", [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn next_expiry(&self) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -171,7 +194,7 @@ fn mark_sensitive_batch(
             conn,
             update.id,
             detection,
-            Some(now.saturating_add(detection.ttl)),
+            (detection.ttl > 0).then(|| now.saturating_add(detection.ttl)),
         )?;
     }
     Ok(())

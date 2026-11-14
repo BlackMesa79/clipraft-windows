@@ -12,6 +12,9 @@ mod maintenance_tests;
 #[cfg(test)]
 mod migration_tests;
 mod migrations;
+mod panel;
+#[cfg(test)]
+mod panel_tests;
 mod predict;
 #[cfg(test)]
 mod prediction_tests;
@@ -273,22 +276,6 @@ impl Storage {
     pub fn list(&self) -> Result<Vec<ItemView>> {
         self.list_page(&ListFilter::default(), 0, QUICK_PAGE_SIZE)
     }
-    /// 只查询快速面板快照中的 id，不受历史第一页缓存或排序影响。
-    pub fn existing_panel_ids(&self, ids: &[&str]) -> Result<HashSet<String>> {
-        if ids.len() > 9 {
-            bail!("快速面板快照不能超过 9 条");
-        }
-        if ids.is_empty() {
-            return Ok(HashSet::new());
-        }
-        let placeholders = vec!["?"; ids.len()].join(",");
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT id FROM items WHERE id IN ({placeholders})"
-        ))?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| row.get(0))?;
-        rows.collect::<rusqlite::Result<HashSet<_>>>()
-            .map_err(Into::into)
-    }
     /// 独立预览按 id 获取安全视图，不受快速面板第一页缓存限制。
     pub fn preview_item(&self, id: &str) -> Result<ItemView> {
         Ok(self.conn.query_row("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE id=?1", [id], item_view)?)
@@ -547,7 +534,7 @@ mod tests {
     // 此查询只依赖 items.id；内存库避免读取真实记录或创建 blob 文件。
     fn panel_id_storage() -> Storage {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE items (id TEXT PRIMARY KEY)")
+        conn.execute_batch("CREATE TABLE items (id TEXT PRIMARY KEY, expires_at INTEGER)")
             .unwrap();
         Storage {
             conn,
@@ -586,7 +573,7 @@ mod tests {
         );
     }
     #[test]
-    fn panel_ids_handle_empty_and_maximum_snapshot_sizes() {
+    fn panel_ids_handle_empty_and_more_than_legacy_snapshot_size() {
         let s = panel_id_storage();
         assert!(s.existing_panel_ids(&[]).unwrap().is_empty());
         let ids: Vec<_> = (0..9).map(|index| format!("item-{index}")).collect();
@@ -601,7 +588,10 @@ mod tests {
             ids.iter().cloned().collect()
         );
         requested.push("tenth");
-        assert!(s.existing_panel_ids(&requested).is_err());
+        assert_eq!(
+            s.existing_panel_ids(&requested).unwrap(),
+            ids.iter().cloned().collect()
+        );
     }
     #[test]
     fn encrypted_persistence_and_dedup() {
