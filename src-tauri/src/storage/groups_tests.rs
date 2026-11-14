@@ -749,3 +749,32 @@ fn quick_cache_over_200_pins_keeps_newest_pins_and_excludes_unpinned() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn compact_preview_reads_old_items_and_masks_sensitive_views() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    let all = seed(&mut s, 210);
+    // 旧记录不能只依赖 quick 的第一页缓存。
+    s.conn
+        .execute("UPDATE items SET touched=0 WHERE id=?1", [&all[0]])
+        .unwrap();
+    assert!(!s.list().unwrap().iter().any(|item| item.id == all[0]));
+    assert_eq!(s.preview_item(&all[0]).unwrap().id, all[0]);
+    s.conn
+        .execute(
+            "UPDATE items SET sensitive=1,thumbnail='synthetic',preview='synthetic' WHERE id=?1",
+            [&all[0]],
+        )
+        .unwrap();
+    let view = s.preview_item(&all[0]).unwrap();
+    assert!(view.sensitive);
+    assert!(view.thumbnail.is_none() && view.preview.is_none() && view.files.is_empty());
+    assert!(!view.summary.contains("Hello"));
+    assert!(!s
+        .display_detail(&all[0], false)
+        .unwrap()
+        .text
+        .contains("Hello"));
+    assert!(s.preview_item("not-a-record").is_err());
+}

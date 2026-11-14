@@ -1,13 +1,18 @@
+mod appearance;
 mod autostart;
 mod capture_policy;
 mod capture_source;
 mod clipboard;
 mod clipboard_diag;
 mod clipboard_owner;
+mod compact_preview;
 mod diag;
+mod file_actions;
 mod file_status;
 pub mod hook;
+mod hotkey_check;
 mod image_normalize;
+mod main_position;
 pub mod model;
 mod owner_flush;
 pub mod paster;
@@ -23,7 +28,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // 仅接收已经过 read_thumbnail 白名单校验的内容。
 fn thumbnail_response(data: Option<Vec<u8>>) -> tauri::http::Response<Vec<u8>> {
@@ -132,18 +137,6 @@ async fn set_pinned(
     .await
 }
 #[tauri::command]
-async fn set_favorite(
-    ids: Vec<String>,
-    value: bool,
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, Arc<State>>,
-) -> Result<usize, String> {
-    update_history(window, state.inner().clone(), move |s| {
-        s.set_favorite(&ids, value)
-    })
-    .await
-}
-#[tauri::command]
 async fn list_groups(
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<Vec<storage::GroupView>, String> {
@@ -239,6 +232,49 @@ async fn update_settings(
     .map_err(|_| "设置任务失败")?
 }
 #[tauri::command]
+fn set_hotkey_recording(
+    active: bool,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<u64, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("仅主窗口可录制快捷键".into());
+    }
+    if active {
+        let raw = window.hwnd().map_err(|_| "窗口不可用")?.0 as isize;
+        if platform::foreground() != raw {
+            return Err("请先激活设置窗口".into());
+        }
+        let _guard = hook::reserve_configuration_when_hidden().map_err(|e| e.to_string())?;
+        runtime::new_paste_intent();
+        let session = hook::set_recording(raw, true);
+        diag::write(format!("hotkey_record stage=start session={session}"));
+        Ok(session)
+    } else {
+        if hook::recording() {
+            let _ = paster::mask_shortcut();
+        }
+        let session = hook::set_recording(0, false);
+        diag::write(format!("hotkey_record stage=stop session={session}"));
+        Ok(session)
+    }
+}
+#[tauri::command]
+async fn check_hotkeys(
+    main_hotkey: settings::Hotkey,
+    quick_hotkey: settings::Hotkey,
+    window: tauri::WebviewWindow,
+) -> Result<hotkey_check::Report, String> {
+    if window.label() != "main" {
+        return Err("仅主窗口可检测快捷键".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime::check_hotkeys(main_hotkey, quick_hotkey).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "热键检测任务失败")?
+}
+#[tauri::command]
 async fn preview_cleanup(
     policy: storage::RetentionPolicy,
     state: tauri::State<'_, Arc<State>>,
@@ -255,12 +291,12 @@ async fn preview_cleanup(
     .await
     .map_err(|_| "清理预估任务失败")?
 }
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct FileDetail {
     path: String,
     exists: Option<bool>,
 }
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct ItemDetail {
     text: String,
     truncated: bool,
@@ -466,31 +502,30 @@ fn hide_main(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<State>>) 
         let _ = state.control.send(Control::Hide);
     }
 }
-fn icon() -> tauri::image::Image<'static> {
-    let mut rgba = vec![0u8; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            let i = (y * 32 + x) * 4;
-            let paper = (8..24).contains(&x) && (6..27).contains(&y);
-            let line = (11..21).contains(&x) && [12, 16, 20].contains(&y);
-            let color = if line {
-                [34, 48, 70, 255]
-            } else if paper {
-                [226, 237, 246, 255]
-            } else {
-                [43, 112, 127, 255]
-            };
-            rgba[i..i + 4].copy_from_slice(&color);
-        }
+#[tauri::command]
+fn sync_main_layout(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+    layout: tauri::State<'_, appearance::WindowLayout>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("仅主窗口可以调整布局".into());
     }
-    tauri::image::Image::new_owned(rgba, 32, 32)
+    let compact = state.settings.lock().unwrap().compact;
+    layout.apply(&window, compact).map_err(|e| e.to_string())
+}
+fn icon() -> tauri::image::Image<'static> {
+    let rgba = image::load_from_memory(include_bytes!("../icons/tray.png"))
+        .expect("内置品牌图标应为有效 PNG")
+        .into_rgba8();
+    tauri::image::Image::new_owned(rgba.into_raw(), 32, 32)
 }
 fn smoke_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches!(value, "1" | "true" | "yes"))
 }
 
 fn startup_failed(error: &dyn std::fmt::Display, smoke: bool) -> ! {
-    let message = format!("剪贴板 M0 启动失败：{error}");
+    let message = format!("片筏剪贴板 启动失败：{error}");
     eprintln!("{message}");
     diag::startup_failure(&message);
     if !platform::unattended_startup(
@@ -524,19 +559,21 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_setting_options,
+            set_hotkey_recording,
+            check_hotkeys,
             update_settings,
             preview_cleanup,
             startup_error,
             list_items,
             delete_items,
             set_pinned,
-            set_favorite,
             list_groups,
             create_group,
             rename_group,
             delete_group,
             move_to_group,
             item_detail,
+            file_actions::file_action,
             reveal_item,
             set_sensitive,
             image_failure_reason,
@@ -547,7 +584,13 @@ pub fn run() {
             thumbnail_loaded,
             preview_loaded,
             paste_item,
-            hide_main
+            hide_main,
+            sync_main_layout,
+            compact_preview::sync_compact_preview,
+            compact_preview::position_compact_preview,
+            compact_preview::resize_compact_preview,
+            compact_preview::compact_preview_geometry,
+            compact_preview::compact_preview_state
         ])
         .register_uri_scheme_protocol("thumb", |context, request| {
             let id = request.uri().path().trim_start_matches('/');
@@ -581,12 +624,42 @@ pub fn run() {
             }
             let state = runtime::start(app.handle().clone(), storage, smoke)?;
             app.manage(state.clone());
+            app.manage(appearance::WindowLayout::default());
+            app.manage(compact_preview::PreviewState::default());
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("剪贴板 M0")
+                .title("片筏剪贴板")
+                .icon(icon())?
+                .decorations(false)
                 .inner_size(1000.0, 700.0)
                 .visible(false)
                 .data_directory(root.join("webview"))
                 .build()?;
+            let preview = WebviewWindowBuilder::new(
+                app,
+                "preview",
+                WebviewUrl::App("index.html?panel=preview".into()),
+            )
+            .title("片筏剪贴板 · 内容预览")
+            // 原生阴影会增加白边和客户区偏移，改用透明客户区内的边框/阴影。
+            .shadow(false)
+            .transparent(true)
+            .owner(&main)?
+            .inner_size(360.0, 420.0)
+            .visible(false)
+            .focused(false)
+            .focusable(false)
+            .decorations(false)
+            .skip_taskbar(true)
+            .resizable(false)
+            .data_directory(root.join("webview"))
+            .build()?;
+            platform::prepare_preview(preview.hwnd()?.0 as isize)?;
+            for event in ["main-hidden", "history-changed"] {
+                let handle = app.handle().clone();
+                app.listen_any(event, move |_| {
+                    compact_preview::hide(&handle);
+                });
+            }
             let quick = WebviewWindowBuilder::new(
                 app,
                 "quick",
@@ -639,9 +712,9 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(tray_icon(runtime::paused()))
                     .tooltip(if runtime::paused() {
-                        "剪贴板 M1 · 已暂停监听"
+                        "片筏剪贴板 · 已暂停监听"
                     } else {
-                        "剪贴板 M1 · 正在监听"
+                        "片筏剪贴板 · 正在监听"
                     })
                     .menu(&menu)
                     .show_menu_on_left_click(false)
@@ -713,8 +786,69 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
+                if let tauri::WindowEvent::Focused(focused) = event {
+                    diag::write(format!(
+                        "main_focus focused={} foreground_owned={}",
+                        focused,
+                        platform::main_has_foreground(
+                            window.state::<Arc<State>>().main.load(Ordering::Acquire)
+                        )
+                    ));
+                }
+                if matches!(
+                    event,
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+                ) {
+                    if window.is_minimized().unwrap_or(false) {
+                        compact_preview::hide(window.app_handle());
+                    } else if window
+                        .app_handle()
+                        .state::<compact_preview::PreviewState>()
+                        .has_content()
+                    {
+                        if let Some(main) = window.app_handle().get_webview_window("main") {
+                            if main.is_visible().unwrap_or(false)
+                                && platform::main_has_foreground(
+                                    window.state::<Arc<State>>().main.load(Ordering::Acquire),
+                                )
+                            {
+                                let _ = compact_preview::reposition(&main);
+                            }
+                        }
+                    }
+                }
+                if matches!(event, tauri::WindowEvent::Focused(true)) {
+                    let _ = window.emit("main-activated", ());
+                }
+                if matches!(event, tauri::WindowEvent::Focused(false)) {
+                    // 标题栏拖动和 WebView/宿主之间的焦点切换也可能产生失焦通知。
+                    // 等原生激活消息完成，再在 UI 线程核对前台归属及最新设置。
+                    let main = window.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        std::thread::sleep(Duration::from_millis(120));
+                        let target = main.clone();
+                        let _ = main.run_on_main_thread(move || {
+                            let state = target.state::<Arc<State>>();
+                            let foreground =
+                                platform::main_has_foreground(state.main.load(Ordering::Acquire));
+                            if !foreground {
+                                compact_preview::hide(target.app_handle());
+                                let _ = target.emit("main-deactivated", ());
+                            }
+                            if platform::should_hide_main(
+                                state.hide_on_blur.load(Ordering::Acquire),
+                                foreground,
+                            ) {
+                                let _ = target.hide();
+                                let _ = target.emit("main-hidden", ());
+                                diag::panel(false, false);
+                            }
+                        });
+                    });
+                }
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
+                    compact_preview::hide(window.app_handle());
                     let _ = window.hide();
                     let _ = window.emit("main-hidden", ());
                     diag::panel(false, false);
@@ -818,9 +952,9 @@ fn update_tray(app: &tauri::AppHandle, paused: bool) {
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_icon(Some(tray_icon(paused)));
         let _ = tray.set_tooltip(Some(if paused {
-            "剪贴板 M1 · 已暂停监听"
+            "片筏剪贴板 · 已暂停监听"
         } else {
-            "剪贴板 M1 · 正在监听"
+            "片筏剪贴板 · 正在监听"
         }));
     }
     if let Some(menu) = app.try_state::<PauseMenu>() {

@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import ContextMenu from './ContextMenu.vue';
+import UiIcon from './UiIcon.vue';
+import { groupColorStyle } from './groupColors';
 import type { Group, HistoryView } from './history';
 const props = defineProps<{ groups: Group[]; view: HistoryView; disabled: boolean }>();
 const emit = defineEmits<{ select: [view: HistoryView]; changed: []; interacting: [value: boolean]; menuOpen: [value: boolean] }>();
@@ -49,14 +51,16 @@ async function remove() {
 
 <template>
   <nav class="group-sidebar" aria-label="历史视图与分组">
+    <div class="group-scroll">
     <div class="group-views">
-      <button v-for="entry in ([['all', '全部'], ['favorites', '收藏'], ['ungrouped', '未分组']] as const)" :key="entry[0]" type="button" :aria-pressed="view === entry[0]" :disabled="disabled || saving || editing !== null || deleting !== null" @click="emit('select', entry[0])">{{ entry[1] }}</button>
+      <button v-for="entry in ([['all', '全部'], ['ungrouped', '未分组']] as const)" :key="entry[0]" type="button" :aria-pressed="view === entry[0]" :disabled="disabled || saving || editing !== null || deleting !== null" @click="emit('select', entry[0])"><UiIcon v-if="entry[0] === 'all'" name="layers" /><span v-else class="group-dot ungrouped-dot"></span>{{ entry[1] }}</button>
+      <div class="groups-heading">我的分组</div>
       <template v-for="group in groups" :key="group.id">
         <form v-if="editing === group.id" class="group-editor" @submit.prevent="save">
           <input :ref="el => input = el as HTMLInputElement" v-model="name" aria-label="重命名分组" :disabled="saving" @keydown.enter="($event.isComposing || $event.keyCode === 229) && $event.preventDefault()">
           <button type="submit" :disabled="saving || disabled">保存</button><button type="button" :disabled="saving" @click="cancel">取消</button>
         </form>
-        <button v-else type="button" :aria-pressed="view === group.id" :disabled="disabled || saving || editing !== null || deleting !== null" @click="emit('select', group.id)" @contextmenu.prevent="openMenu(group, $event)">{{ group.name }} <span class="group-count">{{ group.count }}</span></button>
+        <button v-else class="colored-group" :style="groupColorStyle(group.id)" type="button" :aria-pressed="view === group.id" :disabled="disabled || saving || editing !== null || deleting !== null" @click="emit('select', group.id)" @contextmenu.prevent="openMenu(group, $event)"><span class="group-dot"></span><span class="group-name">{{ group.name }}</span> <span class="group-count">{{ group.count }}</span></button>
       </template>
       <button type="button" :disabled="disabled || saving || editing !== null || deleting !== null || groups.length >= 100" @click="edit()">+ 新建分组</button>
     </div>
@@ -69,6 +73,8 @@ async function remove() {
       <button type="button" :disabled="saving || disabled" @click="remove">确认删除分组</button><button type="button" :disabled="saving" @click="cancel">取消</button>
     </div>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    </div>
+    <div class="sidebar-bottom"><slot /></div>
     <ContextMenu v-if="menu" :x="menu.x" :y="menu.y" label="分组操作" @close="menu = null">
       <button type="button" role="menuitem" @click="edit(groups.find(g => g.id === menu?.id))">重命名</button>
       <button type="button" role="menuitem" @click="deleting = menu.id; menu = null; error = ''">删除分组</button>

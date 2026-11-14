@@ -16,7 +16,10 @@ use std::{
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     System::Threading::GetCurrentThreadId,
-    UI::{Input::KeyboardAndMouse::GetKeyboardLayout, WindowsAndMessaging::*},
+    UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyboardLayout, VK_CONTROL},
+        WindowsAndMessaging::*,
+    },
 };
 const KEY_MESSAGE: u32 = WM_APP + 91;
 const TEXT_MESSAGE: u32 = WM_APP + 92;
@@ -76,11 +79,13 @@ pub fn init(root: &Path) -> Result<()> {
                     let action = hook::Action::from_raw((packed >> 12) & 7);
                     let _ = writeln!(
                         file,
-                        "t_ms={} key vk={name} down={} injected={} swallowed={} action={action:?}",
+                        "t_ms={} key vk={name} down={} injected={} swallowed={} action={action:?} ctrl_async={} scan=0x{:02X}",
                         msg.lParam.0,
                         packed & 512 != 0,
                         packed & 1024 != 0,
-                        packed & 2048 != 0
+                        packed & 2048 != 0,
+                        packed & (1 << 15) != 0,
+                        (packed >> 16) & 0xff
                     );
                 }
                 while let Ok((time, text)) = rx.try_recv() {
@@ -115,8 +120,16 @@ fn safe_vk(vk: u32) -> usize {
         0x100
     }
 }
+fn safe_scan(vk: u32, scan: u32) -> usize {
+    if safe_vk(vk) == 0x100 {
+        0
+    } else {
+        (scan & 0xff) as usize
+    }
+}
 pub fn keyboard(
     vk: u32,
+    scan: u32,
     down: bool,
     injected: bool,
     swallowed: bool,
@@ -140,7 +153,9 @@ pub fn keyboard(
         | ((down as usize) << 9)
         | ((injected as usize) << 10)
         | ((swallowed as usize) << 11)
-        | (action.map_or(0, |a| a as usize) << 12);
+        | (action.map_or(0, |a| a as usize) << 12)
+        | ((unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0) as usize) << 15
+        | (safe_scan(vk, scan) << 16);
     if unsafe { PostThreadMessageW(id, KEY_MESSAGE, WPARAM(packed), LPARAM(now as isize)) }.is_err()
     {
         LOST.fetch_add(1, Ordering::Relaxed);
@@ -170,12 +185,25 @@ pub fn foreground() -> String {
         let hwnd = platform::hwnd(platform::foreground());
         let mut class = [0u16; 256];
         let count = GetClassNameW(hwnd, &mut class).max(0) as usize;
-        let tid = GetWindowThreadProcessId(hwnd, None);
+        let mut pid = 0;
+        let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let owner = crate::clipboard_owner::window_process(hwnd);
+        let mut gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let gui_ok = GetGUIThreadInfo(tid, &mut gui).is_ok();
         let layout = GetKeyboardLayout(tid);
         format!(
-            "class={:?} hkl={:X}",
+            "class={:?} hkl={:X} exe={:?} pid={} hwnd=0x{:X} focus=0x{:X} active=0x{:X} gui_ok={}",
             String::from_utf16_lossy(&class[..count]),
-            layout.0 as usize
+            layout.0 as usize,
+            owner.exe,
+            pid,
+            hwnd.0 as usize,
+            gui.hwndFocus.0 as usize,
+            gui.hwndActive.0 as usize,
+            gui_ok
         )
     }
 }
@@ -218,6 +246,13 @@ pub fn startup_failure(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_character_scan_codes_are_redacted() {
+        assert_eq!(safe_scan(0x41, 30), 0);
+        assert_eq!(safe_scan(0x31, 2), 0);
+        assert_eq!(safe_scan(0x56, 47), 47);
+        assert_eq!(safe_scan(0xA2, 29), 29);
+    }
     #[test]
     fn log_creates_new_data_directory_and_preserves_existing_log() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

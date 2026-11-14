@@ -66,6 +66,7 @@ mod tests {
             main_hotkey: crate::settings::Hotkey::CtrlBacktick,
             quick_hotkey: crate::settings::Hotkey::AltShiftV,
             quick_visible_count: 9,
+            ..Settings::default()
         };
         let saved_json = serde_json::to_value(&saved).unwrap();
         let defaults = serde_json::to_value(Settings::default()).unwrap();

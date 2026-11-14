@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { Group } from './history';
-const props = defineProps<{ x: number; y: number; groups?: Group[]; allPinned?: boolean; allFavorite?: boolean; allSensitive?: boolean; label?: string }>();
+import { groupColorStyle } from './groupColors';
+const props = defineProps<{ x: number; y: number; groups?: Group[]; allPinned?: boolean; allSensitive?: boolean; label?: string; files?: string[] }>();
 const expanded = ref(false);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 const moveButton = ref<HTMLButtonElement | null>(null);
 let restoreOnClose = false;
-const emit = defineEmits<{ delete: []; paste: []; close: []; pin: []; favorite: []; sensitive: []; move: [groupId: number | null] }>();
+const emit = defineEmits<{ delete: []; paste: []; close: []; pin: []; sensitive: []; move: [groupId: number | null]; openFile: [index: number]; revealFile: [index: number] }>();
 const root = ref<HTMLElement | null>(null), left = ref(props.x), top = ref(props.y);
 function outside(event: PointerEvent) { if (!root.value?.contains(event.target as Node)) emit('close'); }
 function close() { emit('close'); }
@@ -37,6 +38,7 @@ function keydown(event: KeyboardEvent) {
     entries[next]?.focus();
   } else if (event.key === 'ArrowRight' && item === moveButton.value) {
     void openSubmenu();
+
   } else if (event.key === 'ArrowLeft' && menu !== root.value) {
     closeSubmenu();
   } else if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) {
@@ -74,15 +76,20 @@ onUnmounted(() => { window.removeEventListener('pointerdown', outside); window.r
   <div ref="root" class="context-menu" role="menu" :aria-label="label ?? '记录操作'" :style="{ left: left + 'px', top: top + 'px' }" @contextmenu.prevent>
     <slot>
     <button type="button" role="menuitem" @click="emit('pin')">{{ allPinned ? '取消置顶' : '置顶' }}</button>
-    <button type="button" role="menuitem" @click="emit('favorite')">{{ allFavorite ? '取消收藏' : '收藏' }}</button>
     <button ref="moveButton" type="button" role="menuitem" aria-haspopup="menu" :aria-expanded="expanded" @click="expanded ? closeSubmenu() : openSubmenu()">移到分组 ▸</button>
     <div v-if="expanded" role="menu" aria-label="移到分组" class="group-submenu">
-      <button type="button" role="menuitem" @click="emit('move', null)">移出分组</button>
-      <button v-for="group in groups" :key="group.id" type="button" role="menuitem" @click="emit('move', group.id)">{{ group.name }}</button>
+      <button v-for="group in groups" :key="group.id" class="colored-group" :style="groupColorStyle(group.id)" type="button" role="menuitem" @click="emit('move', group.id)"><span class="group-dot" aria-hidden="true"></span>{{ group.name }}</button>
+      <div role="separator" class="menu-separator"></div>
+      <button type="button" role="menuitem" class="remove-group" title="保留记录，仅移出当前分组" @click="emit('move', null)"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 15-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m4 2 2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0M4 2v3M2 4h3m15 18v-3m2 1h-3"/></svg> 移出分组</button>
     </div>
     <button type="button" role="menuitem" @click="emit('sensitive')">{{ allSensitive ? '取消敏感标记' : '标记为敏感' }}</button>
     <button type="button" role="menuitem" @click="emit('delete')">删除</button>
     <button type="button" role="menuitem" @click="emit('paste')">粘贴</button>
+    <template v-if="files?.length">
+      <div role="separator" class="menu-separator"></div>
+      <button v-if="files.length === 1" type="button" role="menuitem" @click="emit('openFile', 0)">用默认应用打开</button>
+      <button type="button" role="menuitem" @click="emit('revealFile', 0)">在资源管理器中定位</button>
+    </template>
     </slot>
   </div>
 </template>

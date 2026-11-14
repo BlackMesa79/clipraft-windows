@@ -288,6 +288,10 @@ impl Storage {
         rows.collect::<rusqlite::Result<HashSet<_>>>()
             .map_err(Into::into)
     }
+    /// 独立预览按 id 获取安全视图，不受快速面板第一页缓存限制。
+    pub fn preview_item(&self, id: &str) -> Result<ItemView> {
+        Ok(self.conn.query_row("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE id=?1", [id], item_view)?)
+    }
     pub fn list_page(
         &self,
         filter: &ListFilter,
@@ -300,6 +304,8 @@ impl Storage {
             match kind.as_str() {
                 "text" => sql.push_str(" AND kind IN ('text','rich')"),
                 "link" => sql.push_str(" AND is_link=1"),
+                // 仅按已保存的路径类型识别，不依赖缩略图或实时文件访问；EXISTS 避免分页重复。
+                "image" => sql.push_str(" AND (kind='image' OR (kind='files' AND EXISTS (SELECT 1 FROM json_each(items.view,'$.files') f WHERE lower(f.value) GLOB '*.png' OR lower(f.value) GLOB '*.jpg' OR lower(f.value) GLOB '*.jpeg' OR lower(f.value) GLOB '*.gif' OR lower(f.value) GLOB '*.bmp' OR lower(f.value) GLOB '*.webp')))"),
                 _ => {
                     sql.push_str(" AND kind=?");
                     values.push(kind.clone().into());

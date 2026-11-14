@@ -1,11 +1,86 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { tightened, type Settings, type SettingOptions } from './settings';
-const emit = defineEmits<{ saved: [settings: Settings]; busy: [busy: boolean] }>();
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { shortcutLabel, shortcutParts, shortcutError, shortcutFromKeyboard, tightened, type Settings, type SettingOptions, type HotkeyReport } from './settings';
+const emit = defineEmits<{ saved: [settings: Settings]; busy: [busy: boolean]; recording: [active:boolean]; cancel: [] }>();
 const draft = ref<Settings>(), original = ref<Settings>(), options = ref<SettingOptions>();
 const error = ref(''), status = ref(''), busy = ref(false), pending = ref<{ settings: Settings; count: number }>();
 const appName = ref('');
+const categories = [{ id: 'general', label: '通用' }, { id: 'appearance', label: '外观' }, { id: 'history', label: '历史记录' }, { id: 'privacy', label: '隐私' }, { id: 'hotkeys', label: '快捷键' }];
+const category = ref('general');
+type HotkeyField='main_hotkey'|'quick_hotkey';
+const recordingField=ref<HotkeyField|null>(null), recordOperations=ref(0);
+const recordIssues=ref<Partial<Record<HotkeyField,{conflict:boolean;detail:string}>>>({});
+const hotkeyRevisions:Record<HotkeyField,number>={main_hotkey:0,quick_hotkey:0};
+function clearRecordIssue(field:HotkeyField){hotkeyRevisions[field]++;delete recordIssues.value[field];}
+function presetChanged(field:HotkeyField){clearRecordIssue(field);scheduleHotkeyCheck();}
+let recordingTimer:ReturnType<typeof setTimeout>|undefined,recordStop:UnlistenFn|undefined,disposed=false,recordSession=0,recordEpoch=0;
+const earlyRecordings=new Map<number,string|null>();
+const checkResult=ref<HotkeyReport>(),checkError=ref('');
+let checkTimer:ReturnType<typeof setTimeout>|undefined,checkSequence=0,checkAfterRecording=false;
+const hotkeysChanged=computed(()=>draft.value?.main_hotkey!==original.value?.main_hotkey||draft.value?.quick_hotkey!==original.value?.quick_hotkey);
+const checkBlocked=computed(()=>!!checkResult.value&&[checkResult.value.main,checkResult.value.quick].some(f=>f.status==='conflict'||f.status==='unavailable'));
+async function stopRecording(){
+  const epoch=++recordEpoch;
+  const field=recordingField.value,revision=field?hotkeyRevisions[field]:0;
+  clearTimeout(recordingTimer);
+  recordingField.value=null;recordSession=0;earlyRecordings.clear();
+  recordOperations.value++;
+  try {await invoke('set_hotkey_recording',{active:false});return true;}catch(e){if(!disposed&&epoch===recordEpoch&&field&&revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:String(e)};return false;}
+  finally {recordOperations.value--;}
+}
+async function record(field:HotkeyField){
+  if(recordOperations.value||disposed)return;
+  if(recordingField.value){await stopRecording();return;}
+  const epoch=++recordEpoch;
+  clearRecordIssue(field);const revision=hotkeyRevisions[field];
+  earlyRecordings.clear();recordingField.value=field;recordOperations.value++;
+  try {
+    const session=await invoke<number>('set_hotkey_recording',{active:true});
+    if(disposed||epoch!==recordEpoch){await invoke('set_hotkey_recording',{active:false});return;}
+    recordSession=session;
+    const early=earlyRecordings.get(session);earlyRecordings.clear();
+    if(early!==undefined){void finishRecording(early);return;}
+    recordingTimer=setTimeout(()=>{if(revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:'录制已超时，请重试'};void stopRecording();},30_000);
+  }
+  catch(e){if(!disposed&&epoch===recordEpoch){if(revision===hotkeyRevisions[field])recordIssues.value[field]={conflict:false,detail:String(e)};recordingField.value=null;recordSession=0;}}
+  finally {recordOperations.value--;}
+}
+function blurRecording(){if(recordingField.value)void stopRecording();}
+async function finishRecording(hotkey:string|null){
+  const field=recordingField.value;if(!field)return;
+  const revision=hotkeyRevisions[field];
+  const stopped=await stopRecording();if(!stopped||disposed||!hotkey||!draft.value||revision!==hotkeyRevisions[field])return;
+  const reason=shortcutError(hotkey);if(reason){recordIssues.value[field]={conflict:true,detail:reason};return;}
+  clearRecordIssue(field);
+  const unchanged=draft.value[field]===hotkey;
+  draft.value[field]=hotkey;
+  if(unchanged)scheduleHotkeyCheck();
+}
+function recordingKeydown(event:KeyboardEvent){
+  if(!recordingField.value&&!recordOperations.value)return;
+  // 在窗口捕获阶段处理，不能把 Esc/Enter/Space 交给主面板或当前按钮。
+  event.preventDefault();event.stopImmediatePropagation();
+  if(!recordingField.value||event.repeat)return;
+  if(event.key==='Escape'){void stopRecording();return;}
+  if(event.isComposing||event.keyCode===229)return;
+  const hotkey=shortcutFromKeyboard(event);
+  if(hotkey)void finishRecording(hotkey);
+}
+watch(()=>!!recordingField.value||recordOperations.value>0,value=>{
+  emit('recording',value);
+  if(!value&&checkAfterRecording&&!disposed)scheduleHotkeyCheck();
+},{flush:'sync'});
+
+function cancel(leave=false) {
+  if (busy.value) return;
+  if(!leave&&(recordingField.value||recordOperations.value)){void stopRecording();return;}
+  void stopRecording();
+  if (original.value) draft.value = clone(original.value);
+  appName.value = ''; pending.value = undefined; error.value = ''; status.value = '';
+  emit('cancel');
+}
 const clone = (value: Settings): Settings => JSON.parse(JSON.stringify(value));
 const fields = [
   { key: 'max_items', label: '最大条数', group: 'history' },
@@ -21,8 +96,34 @@ function range(key: NumericKey) {
   return { min: r.min / unit, max: r.max / unit, step: r.step / unit };
 }
 function numeric(key: NumericKey, event: Event) { draft.value![key] = (event.target as HTMLInputElement).valueAsNumber * factor(key); }
+const hotkeyValidation = computed(() => {
+  if (!draft.value || !options.value) return '';
+  if(recordingField.value||recordOperations.value)return '正在录制快捷键，按 Esc 或点取消录制';
+  for(const field of ['main_hotkey','quick_hotkey'] as const){const reason=shortcutError(draft.value[field]);if(reason)return reason;}
+  const a=shortcutParts(draft.value.main_hotkey),b=shortcutParts(draft.value.quick_hotkey);if(a&&b&&a[0]===b[0])return '两个快捷键不能相同或使用完全相同的修饰键';
+  return '';
+});
+const hotkeyWarnings=computed(()=>{
+  const warnings:Partial<Record<HotkeyField,{text:string;detail:string}>>={};
+  if(!draft.value||recordingField.value||recordOperations.value)return warnings;
+  const main=shortcutParts(draft.value.main_hotkey),quick=shortcutParts(draft.value.quick_hotkey);
+  const pairConflict=!shortcutError(draft.value.main_hotkey)&&!shortcutError(draft.value.quick_hotkey)&&main&&quick&&main[0]===quick[0];
+  for(const [field,resultKey] of [['main_hotkey','main'],['quick_hotkey','quick']] as const){
+    const invalid=shortcutError(draft.value[field]);
+    const finding=checkResult.value?.[resultKey];
+    const issue=recordIssues.value[field];
+    if(invalid)warnings[field]={text:'检测到快捷键冲突',detail:invalid};
+    else if(pairConflict)warnings[field]={text:'检测到快捷键冲突',detail:hotkeyValidation.value};
+    else if(issue)warnings[field]={text:issue.conflict?'检测到快捷键冲突':'录制失败',detail:issue.detail};
+    else if(checkError.value)warnings[field]={text:'检测失败',detail:checkError.value};
+    else if(finding?.status==='conflict')warnings[field]={text:'检测到快捷键冲突',detail:finding.message};
+    else if(finding?.status==='unavailable')warnings[field]={text:'检测失败',detail:finding.message};
+  }
+  return warnings;
+});
 const validation = computed(() => {
   if (!draft.value || !options.value) return '';
+  if(hotkeyValidation.value)return hotkeyValidation.value;
   for (const field of fields) {
     const value = draft.value[field.key], r = options.value.ranges[field.key];
     if (!Number.isSafeInteger(value) || value < r.min || value > r.max) return `${field.label}必须在 ${range(field.key).min} 到 ${range(field.key).max} 之间，且字节数或条数为整数`;
@@ -32,11 +133,41 @@ const validation = computed(() => {
 });
 watch(draft, () => { pending.value = undefined; status.value = ''; }, { deep: true, flush: 'sync' });
 watch(busy, value => emit('busy', value), { flush: 'sync' });
+async function checkHotkeys():Promise<boolean>{
+  if(!draft.value)return false;
+  if(recordingField.value||recordOperations.value){checkAfterRecording=true;return false;}
+  if(hotkeyValidation.value)return false;
+  clearTimeout(checkTimer);
+  const sequence=++checkSequence;
+  checkResult.value=undefined;checkError.value='';
+  try{
+    const result=await invoke<HotkeyReport>('check_hotkeys',{mainHotkey:draft.value.main_hotkey,quickHotkey:draft.value.quick_hotkey});
+    if(disposed||sequence!==checkSequence)return false;
+    checkResult.value=result;
+    return !checkBlocked.value;
+  }catch(e){if(!disposed&&sequence===checkSequence)checkError.value=String(e);return false;}
+}
+function scheduleHotkeyCheck(immediate=false){
+  clearTimeout(checkTimer);checkSequence++;checkResult.value=undefined;checkError.value='';
+  if(!draft.value)return;
+  if(recordingField.value||recordOperations.value){checkAfterRecording=true;return;}
+  checkAfterRecording=false;
+  if(hotkeyValidation.value)return;
+  if(immediate)void checkHotkeys();
+  else checkTimer=setTimeout(()=>void checkHotkeys(),300);
+}
+watch(()=>[draft.value?.main_hotkey,draft.value?.quick_hotkey],([main,quick],[oldMain,oldQuick])=>{
+  if(main===oldMain&&quick===oldQuick)return;
+  if(main!==oldMain)clearRecordIssue('main_hotkey');
+  if(quick!==oldQuick)clearRecordIssue('quick_hotkey');
+  scheduleHotkeyCheck(oldMain===undefined&&oldQuick===undefined);
+});
 async function load() {
   error.value = ''; busy.value = true;
   try {
     const [settings, opts] = await Promise.all([invoke<Settings>('get_settings'), invoke<SettingOptions>('get_setting_options')]);
-    original.value = clone(settings); draft.value = clone(settings); options.value = opts;
+    const compatible = { ...settings, theme: settings.theme ?? 'light', layout: settings.layout ?? 'list', compact: settings.compact ?? false, hide_on_blur: settings.hide_on_blur ?? false, select_first_on_show: settings.select_first_on_show ?? false, main_position: (settings as {main_position?:string}).main_position === 'input' ? 'mouse' : settings.main_position ?? 'remember' } as Settings;
+    original.value = clone(compatible); draft.value = clone(compatible); options.value = opts;
   } catch (e) { error.value = String(e); }
   finally { busy.value = false; }
 }
@@ -53,6 +184,7 @@ async function save() {
   if (busy.value || !draft.value || !original.value || validation.value) return;
   error.value = ''; status.value = ''; busy.value = true;
   try {
+    if(hotkeysChanged.value&&!await checkHotkeys()){category.value='hotkeys';return;}
     const next = clone(draft.value);
     if (tightened(next, original.value)) {
       const count = await invoke<number>('preview_cleanup', { policy: { max_items: next.max_items, max_bytes: next.max_bytes, max_days: next.max_days } });
@@ -63,6 +195,7 @@ async function save() {
 }
 async function submit(next: Settings) {
   const saved = await invoke<Settings>('update_settings', { settings: next });
+  clearRecordIssue('main_hotkey');clearRecordIssue('quick_hotkey');
   original.value = clone(saved); draft.value = clone(saved); pending.value = undefined;
   const normalized = JSON.stringify(next.ignored_apps) !== JSON.stringify(saved.ignored_apps);
   status.value = normalized ? '设置已保存；忽略程序已规范化（路径转文件名、去除空白及重复项）' : '设置已保存'; emit('saved', saved);
@@ -75,29 +208,56 @@ async function confirm() {
   catch (e) { error.value = String(e); pending.value = undefined; }
   finally { busy.value = false; }
 }
-onMounted(load);
+onMounted(async()=>{
+  await load();
+  const stop=await listen<{session:number;hotkey:string|null}>('hotkey-recorded',async({payload})=>{
+    const field=recordingField.value;if(!field)return;
+    if(!recordSession&&recordOperations.value){earlyRecordings.set(payload.session,payload.hotkey);return;}
+    if(payload.session!==recordSession)return;
+    await finishRecording(payload.hotkey);
+  });
+  if(disposed){stop();return;}recordStop=stop;
+  window.addEventListener('blur',blurRecording);
+  window.addEventListener('keydown',recordingKeydown,true);
+});
+onUnmounted(()=>{disposed=true;clearTimeout(checkTimer);checkSequence++;recordStop?.();window.removeEventListener('blur',blurRecording);window.removeEventListener('keydown',recordingKeydown,true);void stopRecording();emit('recording',false);});
 </script>
 
 <template>
   <section class="settings-view" aria-label="设置" :aria-busy="busy">
-    <div v-if="error" class="error" role="alert">{{ error }} <button v-if="!draft" type="button" @click="load">重试</button></div>
     <form v-if="draft && options" @submit.prevent="save" novalidate>
-      <fieldset :disabled="busy">
+      <div class="settings-body">
+      <nav class="settings-nav" aria-label="设置分类"><button v-for="entry in categories" :key="entry.id" type="button" :aria-current="category === entry.id ? 'page' : undefined" @click="category = entry.id">{{ entry.label }}</button><button type="button" class="settings-toggle settings-back" :disabled="busy" @click="cancel(true)">返回列表</button></nav>
+      <label class="settings-category">设置分类<select v-model="category" aria-label="设置分类"><option v-for="entry in categories" :key="entry.id" :value="entry.id">{{ entry.label }}</option></select></label>
+      <div class="settings-content">
+      <fieldset :disabled="busy" v-show="category === 'general'" data-category="general">
         <legend>通用</legend>
+        <label class="check"><input v-model="draft.hide_on_blur" type="checkbox">主窗口失去焦点时自动隐藏</label>
         <label class="check"><input v-model="draft.autostart" type="checkbox">开机自启</label>
         <label class="check"><input v-model="draft.pause_on_start" type="checkbox">启动时暂停监听（下次启动生效）</label>
+      <label class="check"><input v-model="draft.select_first_on_show" type="checkbox">每次唤出主窗口时选中第一条记录</label>
+      <p class="detail-note">包含紧凑模式，按当前筛选结果选择；关闭时记忆上次选中记录。</p>
+      <label class="number-field"><span>主窗口唤出位置</span><select v-model="draft.main_position" aria-label="主窗口唤出位置"><option value="remember">记忆上次位置</option><option value="mouse">鼠标光标附近</option></select></label>
+      <p class="detail-note">普通与紧凑模式共用；只在唤出时定位。空间不足时约束在当前屏幕工作区内。</p>
       </fieldset>
-      <fieldset :disabled="busy">
-        <legend>历史</legend>
-        <p class="detail-note">空间按 1 MB = {{ options.bytes_per_mb }} 字节计。保存后立即清理；置顶、收藏、分组记录受保护，最新一条始终保留。</p>
+      <fieldset :disabled="busy" v-show="category === 'history'" data-category="history">
+        <legend>历史记录</legend>
+        <p class="detail-note">空间按 1 MB = {{ options.bytes_per_mb }} 字节计。保存后立即清理；置顶、分组及旧版保留记录受保护，最新一条始终保留。</p>
         <label v-for="field in fields.filter(f => f.group === 'history')" :key="field.key" class="number-field">
           <span>{{ field.label }}</span><input :value="draft[field.key] / factor(field.key)" type="number" v-bind="range(field.key)" required @input="numeric(field.key, $event)">
           <small>范围 {{ range(field.key).min }}–{{ range(field.key).max }}</small>
         </label>
       </fieldset>
-      <fieldset :disabled="busy">
+      <fieldset :disabled="busy" v-show="category === 'appearance'" data-category="appearance">
+        <legend>外观</legend>
+        <label class="number-field"><span>主题</span><select v-model="draft.theme" aria-label="主题"><option value="light">浅色青绿</option><option value="dark">深色蓝灰</option></select></label>
+        <label class="number-field"><span>常规布局</span><select v-model="draft.layout" aria-label="常规布局"><option value="list">单列列表</option><option value="cards">双列卡片</option></select></label>
+        <label class="check"><input v-model="draft.compact" type="checkbox">紧凑模式（隐藏侧栏与预览）</label>
+        <p class="detail-note">主题与布局独立；退出紧凑模式恢复常规布局。保存后生效。</p>
+      </fieldset>
+      <fieldset :disabled="busy" v-show="category === 'privacy'" data-category="privacy">
         <legend>隐私</legend>
-        <p class="detail-note">忽略列表保存后对后续复制立即生效，不删除已有历史；敏感内容识别及保留时间将在后续版本生效。</p>
+        <p class="detail-note">忽略列表保存后对后续复制立即生效，不删除已有历史；敏感内容识别及保留时间对后续采集生效。</p>
         <label class="check"><input v-model="draft.sensitive_detection" type="checkbox">识别敏感内容</label>
       <label class="check"><input v-model="draft.sensitive_high_entropy" type="checkbox" :disabled="busy">高熵字符串识别（可能误报，默认关闭）</label>
         <label class="number-field"><span>敏感内容保留分钟数</span><input v-model.number="draft.sensitive_ttl_minutes" type="number" v-bind="range('sensitive_ttl_minutes')" required><small>范围 {{ range('sensitive_ttl_minutes').min }}–{{ range('sensitive_ttl_minutes').max }}</small></label>
@@ -105,27 +265,53 @@ onMounted(load);
         <ul class="ignored-apps"><li v-for="(name, index) in draft.ignored_apps" :key="index"><span>{{ name }}</span><button type="button" :aria-label="'删除 ' + name" @click="draft.ignored_apps.splice(index, 1)">删除</button></li></ul>
         <div class="add-app"><input v-model="appName" aria-label="新增忽略程序" placeholder="exe 文件名或路径" @keydown.enter.prevent="addApp"><button type="button" @click="addApp">添加</button></div>
       </fieldset>
-      <fieldset :disabled="busy">
+      <fieldset :disabled="busy" v-show="category === 'hotkeys'" data-category="hotkeys">
         <legend>快捷键</legend>
-        <label class="number-field"><span>主窗口</span><select v-model="draft.main_hotkey"><option v-for="key in options.main_hotkeys" :key="key.id" :value="key.id">{{ key.label }}</option></select></label>
-        <label class="number-field"><span>快速面板</span><select v-model="draft.quick_hotkey"><option v-for="key in options.quick_hotkeys" :key="key.id" :value="key.id">{{ key.label }}</option></select></label>
+        <label class="number-field"><span>主窗口</span><select v-model="draft.main_hotkey" aria-label="主窗口快捷键" @focus="clearRecordIssue('main_hotkey')" @change="presetChanged('main_hotkey')" :disabled="!!recordingField"><option v-for="key in options.main_hotkeys" :key="key.id" :value="key.id">{{ key.label }}</option><option v-if="!options.main_hotkeys.some(k=>k.id===draft?.main_hotkey)" :value="draft.main_hotkey">{{ shortcutLabel(draft.main_hotkey) }}</option></select><span class="hotkey-record"><button type="button" data-hotkey-record="main_hotkey" :data-hotkey-warning="hotkeyWarnings.main_hotkey ? 'main_hotkey' : undefined" :class="{'hotkey-problem':!!hotkeyWarnings.main_hotkey}" :title="hotkeyWarnings.main_hotkey?.detail" :aria-invalid="hotkeyWarnings.main_hotkey ? true : undefined" :aria-label="hotkeyWarnings.main_hotkey ? '主窗口：'+hotkeyWarnings.main_hotkey.text+'，点击重新录制' : undefined" aria-live="polite" :disabled="!!recordingField && recordingField!=='main_hotkey'" @click="record('main_hotkey')">{{ recordingField==='main_hotkey'?'取消录制':hotkeyWarnings.main_hotkey?.text??'录制主窗口快捷键' }}</button></span></label>
+        <label class="number-field"><span>快速面板</span><select v-model="draft.quick_hotkey" aria-label="快速面板快捷键" @focus="clearRecordIssue('quick_hotkey')" @change="presetChanged('quick_hotkey')" :disabled="!!recordingField"><option v-for="key in options.quick_hotkeys" :key="key.id" :value="key.id">{{ key.label }}</option><option v-if="!options.quick_hotkeys.some(k=>k.id===draft?.quick_hotkey)" :value="draft.quick_hotkey">{{ shortcutLabel(draft.quick_hotkey) }}</option></select><span class="hotkey-record"><button type="button" data-hotkey-record="quick_hotkey" :data-hotkey-warning="hotkeyWarnings.quick_hotkey ? 'quick_hotkey' : undefined" :class="{'hotkey-problem':!!hotkeyWarnings.quick_hotkey}" :title="hotkeyWarnings.quick_hotkey?.detail" :aria-invalid="hotkeyWarnings.quick_hotkey ? true : undefined" :aria-label="hotkeyWarnings.quick_hotkey ? '快速面板：'+hotkeyWarnings.quick_hotkey.text+'，点击重新录制' : undefined" aria-live="polite" :disabled="!!recordingField && recordingField!=='quick_hotkey'" @click="record('quick_hotkey')">{{ recordingField==='quick_hotkey'?'取消录制':hotkeyWarnings.quick_hotkey?.text??'录制快速面板快捷键' }}</button></span></label>
+        <p class="detail-note">点录制后按下组合键，Esc取消，30秒自动结束；保存后生效，冲突或保存失败时保留旧设置。</p>
         <label class="number-field"><span>快速面板可见条数（仅存储）</span><input v-model.number="draft.quick_visible_count" type="number" v-bind="range('quick_visible_count')" required><small>范围 {{ range('quick_visible_count').min }}–{{ range('quick_visible_count').max }}</small></label>
         <p class="detail-note">面板激活期间不能修改快捷键。保存失败时保留原设置。</p>
       </fieldset>
+      </div>
+      </div>
       <div class="settings-actions">
-        <p v-if="validation" class="error" role="alert">{{ validation }}</p>
+        <div class="settings-feedback">
+        <div v-if="error" class="error" role="alert">{{ error }}</div>
+        <p v-if="validation && (!hotkeyValidation || recordingField || recordOperations)" class="error" role="alert">{{ validation }}</p>
         <div v-if="pending" class="delete-confirm" role="alertdialog" aria-label="确认立即清理">
           <span>将立即删除 {{ pending.count }} 条记录。预估后新增或到期的记录可能使实际数量变化。</span>
           <button type="button" :disabled="busy" @click="confirm">确认保存并清理</button><button type="button" :disabled="busy" @click="pending = undefined">取消</button>
         </div>
         <p v-if="status" role="status">{{ status }}</p>
-        <button type="submit" :disabled="busy || !!validation || !!pending">{{ busy ? '正在处理…' : '保存' }}</button><span class="detail-note">Esc 返回列表，未保存的修改将丢弃</span>
+        <span v-if="!error && !validation && !pending && !status" class="detail-note">Esc 返回列表，未保存的修改将丢弃</span>
+        </div>
+        <div class="settings-buttons">
+        <button type="submit" :disabled="busy || !!validation || !!pending || (hotkeysChanged && checkBlocked)">{{ busy ? '正在处理…' : '保存' }}</button><button type="button" :disabled="busy" class="settings-cancel" @click="cancel()">{{ recordingField || recordOperations ? '取消录制' : '取消' }}</button></div>
       </div>
     </form>
+    <div v-else-if="error" class="error" role="alert">{{ error }} <button type="button" @click="load">重试</button></div>
     <p v-else-if="busy" role="status">正在加载设置…</p>
   </section>
 </template>
 
 <style scoped>
-.settings-view{flex:1;min-height:0;overflow:auto;padding:2px 8px 12px 2px}.settings-view form{max-width:850px;margin:0 auto}.settings-view fieldset{border:1px solid #d8e3e7;background:#fff;border-radius:10px;margin:0 0 16px;padding:16px}.settings-view legend{font-weight:600;padding:0 8px}.settings-view input,.settings-view select{font:inherit;border:1px solid #b8cdd3;border-radius:5px;padding:7px;min-width:0}.settings-view button{border:1px solid #b8cdd3;border-radius:5px;background:#edf5f5;color:#245f69;padding:6px 12px;cursor:pointer}.settings-view button:disabled{opacity:.5;cursor:default}.check{display:flex;align-items:center;gap:8px;margin:8px 0}.number-field{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0;font-size:13px}.number-field>span{width:210px}.number-field input,.number-field select{width:220px}.number-field small{color:#6b7e89}.ignored-apps{list-style:none;padding:0;max-width:600px}.ignored-apps li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:4px 0;overflow-wrap:anywhere}.add-app{display:flex;gap:10px}.settings-actions{position:sticky;bottom:-12px;background:#f4f7f8;padding:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.settings-actions .error,.settings-actions .delete-confirm{width:100%;margin:0}.settings-actions p{margin:0}
+.settings-view{flex:1;min-height:0;overflow:auto;padding:2px 8px 12px 2px}.settings-view form{max-width:850px;margin:0 auto}.settings-view fieldset{border:1px solid var(--line);background:var(--bg);border-radius:10px;margin:0 0 16px;padding:16px}.settings-view legend{font-weight:600;padding:0 8px}.settings-view input,.settings-view select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:7px;min-width:0}.settings-view button{border:1px solid var(--line);border-radius:5px;background:var(--select);color:var(--accent);padding:6px 12px;cursor:pointer}.settings-view button:disabled{opacity:.5;cursor:default}.check{display:flex;align-items:center;gap:8px;margin:8px 0}.number-field{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:12px 0;font-size:13px}.number-field>span{width:210px}.number-field input,.number-field select{width:220px}.number-field small{color:var(--muted)}.ignored-apps{list-style:none;padding:0;max-width:600px}.ignored-apps li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:4px 0;overflow-wrap:anywhere}.add-app{display:flex;gap:10px}.settings-actions{position:sticky;bottom:-12px;background:var(--surface);padding:12px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.settings-actions .error,.settings-actions .delete-confirm{width:100%;margin:0}.settings-actions p{margin:0}
+
+.settings-view{display:flex;flex-direction:column;overflow:hidden;padding:0!important;min-width:0}
+.settings-view form{display:grid;grid-template-columns:150px minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;flex:1;min-height:0;max-width:none;width:100%;margin:0;overflow:hidden}
+.settings-body{display:contents}
+.settings-nav{grid-column:1;grid-row:1 / -1;width:150px;flex-shrink:0;padding:20px 10px;background:var(--surface);border-right:1px solid var(--line);overflow:auto;display:flex;flex-direction:column;gap:6px}
+.settings-nav button{text-align:left;padding:10px;background:transparent;color:var(--muted);border-color:transparent}
+.settings-nav button[aria-current=page]{background:var(--select);color:var(--accent)}
+.settings-category{display:none}
+.settings-content{grid-column:2;grid-row:1;flex:1;min-width:0;overflow:auto;padding:24px}
+.settings-content fieldset{margin:0;border:0!important;padding:0 0 24px!important}
+.settings-content legend{padding:0;font-size:15px!important;margin-bottom:16px}
+.settings-actions{grid-column:2;grid-row:2;display:grid;grid-template-columns:minmax(0,1fr) auto;position:static;flex-shrink:0;padding:16px 24px;gap:12px;border-top:1px solid var(--line);background:var(--bg)}
+.settings-feedback>[role=status]{width:100%;color:var(--accent);font-size:12px}
+.number-field>.hotkey-record{width:auto;max-width:100%;min-width:0;display:inline-flex;align-items:center;gap:10px}.hotkey-record>button{min-width:11em;max-width:100%;flex-shrink:0;white-space:nowrap}.settings-view button.hotkey-problem{color:var(--danger);background:var(--error-bg);border-color:var(--danger);font-weight:600}
+.settings-content input,.settings-content select{max-width:100%}.add-app input{flex:1;width:0}.ignored-apps span{min-width:0}
+.settings-nav .settings-back{margin-top:auto}.settings-feedback{min-width:0;font-size:12px;overflow-wrap:anywhere}.settings-feedback>*+*{margin-top:8px}.settings-buttons{display:flex;align-items:center;gap:10px;align-self:center}.settings-buttons button{white-space:nowrap}.settings-buttons button[type=submit]{background:var(--accent);color:var(--bg)}
+@media(max-width:600px){.settings-view form{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto}.settings-category{grid-column:1;grid-row:1}.settings-content{grid-column:1;grid-row:2}.settings-actions{grid-column:1;grid-row:3}.settings-nav{display:none}.settings-category{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid var(--line);font-size:12px}.settings-category select{flex:1}.settings-content{padding:16px}.settings-actions{padding:12px 16px}.number-field>span{width:100%}}
 </style>

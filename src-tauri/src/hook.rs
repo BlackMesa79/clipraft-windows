@@ -1,18 +1,77 @@
 use anyhow::{anyhow, Result};
 use std::{
     cell::Cell,
-    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU16, AtomicU32, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
-    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+    System::{
+        LibraryLoader::GetModuleHandleW, SystemInformation::GetTickCount64,
+        Threading::GetCurrentThreadId,
+    },
     UI::{Input::KeyboardAndMouse::GetAsyncKeyState, WindowsAndMessaging::*},
 };
 
 // 一次原子读取完整配置，避免触发键与修饰键来自不同版本。
 static SHORTCUT: AtomicU32 = AtomicU32::new(0x56 | (3 << 8));
+pub const RECORD_MESSAGE: u32 = WM_APP + 84;
+static RECORD_OWNER: AtomicIsize = AtomicIsize::new(0);
+static RECORD_UNTIL: AtomicU64 = AtomicU64::new(0);
+pub static RECORD_SESSION: AtomicU64 = AtomicU64::new(0);
+static RECORD_ARMED: AtomicU64 = AtomicU64::new(0);
+pub fn recording() -> bool {
+    let owner = RECORD_OWNER.load(Ordering::Acquire);
+    if owner != 0
+        && unsafe {
+            GetForegroundWindow().0 as isize == owner
+                && GetTickCount64() < RECORD_UNTIL.load(Ordering::Acquire)
+        }
+    {
+        true
+    } else {
+        // 过渡焦点不能撤销新会话；失焦由前端显式停止，超时自然失效。
+        false
+    }
+}
+pub fn set_recording(owner: isize, active: bool) -> u64 {
+    let session = RECORD_SESSION.fetch_add(1, Ordering::AcqRel) + 1;
+    if active {
+        RECORD_UNTIL.store(unsafe { GetTickCount64() } + 30_000, Ordering::Release);
+        RECORD_ARMED.store(session, Ordering::Release);
+        RECORD_OWNER.store(owner, Ordering::Release);
+    } else {
+        RECORD_OWNER.store(0, Ordering::Release);
+        RECORD_ARMED.store(0, Ordering::Release);
+    }
+    session
+}
+fn publish_recording(session: u64, packed: u32) -> bool {
+    if RECORD_ARMED
+        .compare_exchange(session, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let sent = unsafe {
+        PostThreadMessageW(
+            RECEIVER.load(Ordering::Relaxed),
+            RECORD_MESSAGE,
+            WPARAM(packed as usize),
+            LPARAM(session as isize),
+        )
+        .is_ok()
+    };
+    if !sent && RECORD_SESSION.load(Ordering::Acquire) == session {
+        // 投递失败后允许本会话下一次按键重试。
+        let _ = RECORD_ARMED.compare_exchange(0, session, Ordering::AcqRel, Ordering::Acquire);
+    }
+    sent
+}
+pub fn configure_settings(settings: &crate::settings::Settings) {
+    configure(settings.quick_hotkey.shortcut());
+}
 // 0=空闲，1=钩子正在处理/面板激活，2=设置更新保留。回调只做原子操作。
 static CONFIG_GATE: AtomicU32 = AtomicU32::new(0);
 pub struct ConfigGuard<'a>(&'a AtomicU32);
@@ -225,6 +284,32 @@ impl Machine {
         }
         out
     }
+    fn record_event(
+        &mut self,
+        key: u32,
+        down: bool,
+        injected: bool,
+        repeated: bool,
+    ) -> Option<u32> {
+        if injected
+            || !down
+            || repeated
+            || key >= 256
+            || matches!(key,0x10..=0x12|0x5B..=0x5C|0xA0..=0xA5|0x09)
+        {
+            return None;
+        }
+        self.swallowed[key as usize] = true;
+        let bits = self.modifier_bits();
+        let mods = (0..4).fold(0u16, |out, g| {
+            out | (u16::from(bits & (3 << (g * 2)) != 0) << g)
+        });
+        Some(if key == 0x1B {
+            0
+        } else {
+            key | (u32::from(mods) << 8)
+        })
+    }
     pub fn seed(&mut self, bits: u16) {
         for (i, k) in MODIFIER_KEYS.iter().enumerate() {
             self.down[*k as usize] = bits & (1 << i) != 0;
@@ -267,7 +352,7 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         ),
         Ordering::SeqCst,
     );
-    // 线程局部固定大小状态，无分配、锁、IO、UI 或同步等待。
+    // 线程局部固定大小状态，无分配、锁、IO、窗口/焦点修改或同步等待。
     let swallow = MACHINE.with(|slot| {
         let mut state = slot.get();
         if CANCEL_PANEL.swap(false, Ordering::AcqRel) {
@@ -277,13 +362,23 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
         if reserved && !state.active {
             state.shortcut = read_shortcut(&SHORTCUT);
         }
-        let decision = state.step_with_logical(
+        let was_down = data.vkCode < 256 && state.down[data.vkCode as usize];
+        let record_session = RECORD_SESSION.load(Ordering::Acquire);
+        let recording = recording() && record_session == RECORD_SESSION.load(Ordering::Acquire);
+        let mut decision = state.step_with_logical(
             data.vkCode,
             down,
             injected,
-            reserved && READY.load(Ordering::Relaxed),
+            reserved && !recording && READY.load(Ordering::Relaxed),
             logical,
         );
+        if recording {
+            if let Some(packed) = state.record_event(data.vkCode, down, injected, was_down) {
+                decision.swallow = true;
+                decision.action = None;
+                publish_recording(record_session, packed);
+            }
+        }
         let mut swallow = decision.swallow;
         crate::diag::panel(true, state.active);
         if let Some(action) = decision.action {
@@ -310,7 +405,14 @@ unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
             }
         }
         crate::diag::panel(true, state.active);
-        crate::diag::keyboard(data.vkCode, down, injected, swallow, decision.action);
+        crate::diag::keyboard(
+            data.vkCode,
+            data.scanCode,
+            down,
+            injected,
+            swallow,
+            decision.action,
+        );
         if reserved && !state.active {
             CONFIG_GATE.store(0, Ordering::Release);
         }
@@ -392,6 +494,57 @@ pub fn move_selection(index: usize, len: usize, forward: bool) -> usize {
 mod tests {
     use super::*;
     const TRIGGER_VK: u32 = 0x56;
+    #[test]
+    fn recording_posts_one_result_with_session_to_real_thread_queue() {
+        let _lock = CONFIG_TEST_LOCK.lock().unwrap();
+        // 只投递应用私有线程消息，不安装钩子、不向系统发送键盘输入。
+        unsafe {
+            let mut message = MSG::default();
+            let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+            let previous_receiver = RECEIVER.swap(GetCurrentThreadId(), Ordering::AcqRel);
+            let previous_armed = RECORD_ARMED.swap(123, Ordering::AcqRel);
+            assert!(!publish_recording(122, 4 << 8 | 0x43));
+            assert!(publish_recording(123, 4 << 8 | 0x43));
+            assert!(!publish_recording(123, 0));
+            assert!(PeekMessageW(
+                &mut message,
+                None,
+                RECORD_MESSAGE,
+                RECORD_MESSAGE,
+                PM_REMOVE
+            )
+            .as_bool());
+            assert_eq!(message.message, RECORD_MESSAGE);
+            assert_eq!(message.wParam.0, 4 << 8 | 0x43);
+            assert_eq!(message.lParam.0, 123);
+            assert!(!PeekMessageW(
+                &mut message,
+                None,
+                RECORD_MESSAGE,
+                RECORD_MESSAGE,
+                PM_REMOVE
+            )
+            .as_bool());
+            RECEIVER.store(previous_receiver, Ordering::Release);
+            RECORD_ARMED.store(previous_armed, Ordering::Release);
+        }
+    }
+    #[test]
+    fn recorded_chord_ignores_injection_and_pairs_the_swallowed_trigger_release() {
+        let mut m = Machine::default();
+        m.step(0xA4, true, false, false);
+        m.step(0x43, true, false, false);
+        assert_eq!(
+            m.record_event(0x43, true, false, false),
+            Some(4 << 8 | 0x43)
+        );
+        assert_eq!(m.record_event(0x43, true, false, true), None);
+        assert_eq!(m.record_event(0x56, true, true, false), None);
+        assert!(m.step(0x43, false, false, true).swallow);
+        assert_eq!(m.step(0xA4, false, false, true).action, None);
+        assert_eq!(m.record_event(0x1B, true, false, false), Some(0));
+        assert!(m.step(0x1B, false, false, true).swallow);
+    }
     // T3-2：独立列出候选的修饰键组，避免从实现配置推导期望值。
     fn quick_candidates() -> [(crate::settings::Hotkey, u16); 3] {
         use crate::settings::Hotkey;

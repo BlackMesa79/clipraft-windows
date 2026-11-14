@@ -190,7 +190,7 @@ try {
   await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
   await count(200);assert.equal(await evaluate('window.pastes.length'),0);
   checks.push('分页失败且有选中项时，重试按钮 Enter/Space 不被拦截，原生 Enter 激活重试且不粘贴');
-  for (const selector of ['.settings-toggle','.kind-filters button','.item','.detail-header button','footer button']) {
+  for (const selector of ['.settings-toggle','.kind-filters button','.detail-header button','.detail-actions .paste-primary']) {
     await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
     for (const key of ['Enter',' ']) assert.equal(await press(key,{},'document.activeElement'),true,selector);
   }
@@ -200,18 +200,25 @@ try {
     await evaluate("document.querySelector('#native-control').remove()");
   }
   assert.equal(await evaluate('window.pastes.length'),0);
+  await evaluate("document.querySelector('.item').focus()");
+  const focusedId=await evaluate('document.activeElement.dataset.id');
+  assert.equal(await press(' ',{},'document.activeElement'),true);
+  assert.equal(await press('Enter',{},'document.activeElement'),false);
+  assert.equal(await evaluate('window.pastes.length'),1);
+  assert.equal(await evaluate('window.pastes.at(-1).id'),focusedId);
+  checks.push('记录按钮Space保留原生行为，Enter粘贴所聚焦记录且不触发重复原生点击');
   await evaluate("document.querySelector('.settings-toggle').click()");
   await until(()=>evaluate("!!document.querySelector('.settings-view input')"),'设置输入框未出现');
   await evaluate("document.querySelector('.settings-view input').focus()");
   for (const key of ['Enter',' ']) assert.equal(await press(key,{},'document.activeElement'),true);
-  assert.equal(await evaluate('window.pastes.length'),0);
+  assert.equal(await evaluate('window.pastes.length'),1);
   await press('Escape',{},'window');
   await evaluate("document.activeElement.blur()");
   assert.equal(await press('Enter',{},'window'),false);
-  assert.equal(await evaluate('window.pastes.length'),1);
+  assert.equal(await evaluate('window.pastes.length'),2);
   await evaluate("const list=document.querySelector('.list');list.tabIndex=0;list.focus()");
   assert.equal(await press('Enter',{},'document.activeElement'),false);
-  assert.equal(await evaluate('window.pastes.length'),2);
+  assert.equal(await evaluate('window.pastes.length'),3);
   checks.push('按钮/select/a/textarea/设置输入框保留 Enter/Space；列表容器和无焦点 Enter 仍粘贴');
   const shot=await send('Page.captureScreenshot',{format:'jpeg',quality:65});await writeFile(path.join(out,'search.jpg'),Buffer.from(shot.data,'base64'));
   await send('Emulation.setDeviceMetricsOverride',{width:680,height:620,deviceScaleFactor:1,mobile:false});

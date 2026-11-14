@@ -1216,3 +1216,88 @@ fn v4_link_backfill_uses_full_inline_and_blob_with_safe_fallback() {
     }
     check(&s);
 }
+
+#[test]
+fn image_filter_includes_any_image_path_without_changing_file_payload_or_paging() {
+    let f = Fixture::new();
+    let mut s = f.open();
+    let paths = [
+        vec![r"C:\missing\photo.PNG"],
+        vec![r"C:\missing\notes.txt", r"C:\missing\second.JpEg"],
+        vec![r"C:\missing\first.webp", r"C:\missing\other.bmp"],
+        vec![r"C:\missing\fake.png.txt"],
+    ];
+    let mut expected = BTreeSet::new();
+    for (i, paths) in paths.iter().enumerate() {
+        let clip = Clip {
+            formats: vec![model::FormatData {
+                name: "CF_HDROP".into(),
+                bytes: model::encode_hdrop(
+                    &paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                ),
+            }],
+        };
+        s.save(&clip).unwrap();
+        if i < 3 {
+            expected.insert(clip.hash());
+        }
+        assert_eq!(
+            s.load(&clip.hash()).unwrap().formats[0].bytes,
+            clip.formats[0].bytes
+        );
+    }
+    let filter = ListFilter {
+        kind: Some("image".into()),
+        ..Default::default()
+    };
+    let matches = s.list_page(&filter, 0, 100).unwrap();
+    assert_eq!(
+        matches
+            .iter()
+            .map(|i| i.id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected
+    );
+    assert!(matches.iter().all(|i| i.kind == "files"));
+    let mut paged = BTreeSet::new();
+    for offset in 0..4 {
+        for item in s.list_page(&filter, offset, 1).unwrap() {
+            assert!(paged.insert(item.id));
+        }
+    }
+    assert_eq!(paged, expected);
+    assert_eq!(
+        s.list_page(
+            &ListFilter {
+                kind: Some("files".into()),
+                ..Default::default()
+            },
+            0,
+            100
+        )
+        .unwrap()
+        .len(),
+        4
+    );
+    let group = s.create_group("图片分组").unwrap();
+    let id = matches[0].id.clone();
+    s.conn
+        .execute(
+            "UPDATE items SET group_id=?1 WHERE id=?2",
+            params![group.id, id],
+        )
+        .unwrap();
+    let scoped = ListFilter {
+        group_id: Some(group.id),
+        query: Some("missing".into()),
+        ..filter.clone()
+    };
+    assert_eq!(s.list_page(&scoped, 0, 100).unwrap().len(), 1);
+    s.set_sensitive(std::slice::from_ref(&id), true, 10)
+        .unwrap();
+    assert!(s.list_page(&scoped, 0, 100).unwrap().is_empty());
+    assert_eq!(s.list_page(&filter, 0, 100).unwrap().len(), 3);
+    drop(s);
+    let s = f.open();
+    assert_eq!(s.list_page(&filter, 0, 100).unwrap().len(), 3);
+}

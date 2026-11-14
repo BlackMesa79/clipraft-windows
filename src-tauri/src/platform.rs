@@ -54,6 +54,21 @@ pub fn hwnd(raw: isize) -> HWND {
 pub fn foreground() -> isize {
     unsafe { GetForegroundWindow().0 as isize }
 }
+pub fn main_has_foreground(raw: isize) -> bool {
+    belongs_to_main(raw, foreground())
+}
+fn belongs_to_main(raw: isize, foreground: isize) -> bool {
+    let front = hwnd(foreground);
+    raw != 0
+        && unsafe {
+            front == hwnd(raw)
+                || GetAncestor(front, GA_ROOT) == hwnd(raw)
+                || GetAncestor(front, GA_ROOTOWNER) == hwnd(raw)
+        }
+}
+pub fn should_hide_main(enabled: bool, main_in_foreground: bool) -> bool {
+    enabled && !main_in_foreground
+}
 pub fn valid_external(raw: isize) -> bool {
     unsafe {
         if raw == 0 || !IsWindow(Some(hwnd(raw))).as_bool() {
@@ -165,6 +180,13 @@ unsafe extern "system" fn main_menu_subclass(
     _data: usize,
 ) -> LRESULT {
     let elapsed = MAIN_MENU_SHOWN_AT.with(|shown| shown.get().map(|time| time.elapsed()));
+    if message == WM_SYSCOMMAND
+        && w.0 & 0xFFF0 == SC_KEYMENU as usize
+        && l.0 == 0
+        && crate::hook::recording()
+    {
+        return LRESULT(0);
+    }
     if message == WM_SYSCOMMAND && suppress_alt_menu(w.0, l.0, elapsed) {
         crate::diag::write("toggle alt_menu_suppressed=true".into());
         return LRESULT(0);
@@ -206,6 +228,53 @@ pub fn prepare_quick(raw: isize) -> Result<()> {
         )?;
         Ok(())
     }
+}
+pub fn prepare_preview(raw: isize) -> Result<()> {
+    unsafe {
+        let h = hwnd(raw);
+        let style = GetWindowLongPtrW(h, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            h,
+            GWL_EXSTYLE,
+            (style | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0) as isize,
+        );
+    }
+    Ok(())
+}
+fn preview_position_flags(
+    moved: bool,
+    resized: bool,
+    visible: bool,
+) -> Option<SET_WINDOW_POS_FLAGS> {
+    if !moved && !resized && visible {
+        return None;
+    }
+    let mut flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
+    if !moved {
+        flags |= SWP_NOMOVE;
+    }
+    if !resized {
+        flags |= SWP_NOSIZE;
+    }
+    if !visible {
+        flags |= SWP_SHOWWINDOW;
+    }
+    Some(flags)
+}
+/// 显示与定位使用同一次不激活的原生调用；相同几何不重复触发窗口消息。
+pub fn position_preview(raw: isize, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+    unsafe {
+        let h = hwnd(raw);
+        let mut current = Default::default();
+        GetWindowRect(h, &mut current)?;
+        let moved = current.left != x || current.top != y;
+        let resized = current.right - current.left != width as i32
+            || current.bottom - current.top != height as i32;
+        if let Some(flags) = preview_position_flags(moved, resized, IsWindowVisible(h).as_bool()) {
+            SetWindowPos(h, None, x, y, width as i32, height as i32, flags)?;
+        }
+    }
+    Ok(())
 }
 pub fn show_quick(raw: isize, target: isize) -> Result<()> {
     if foreground() != target {
@@ -341,6 +410,71 @@ pub fn hide(raw: isize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_position_is_idempotent_and_never_activates_owner() {
+        assert!(preview_position_flags(false, false, true).is_none());
+        for moved in [false, true] {
+            for resized in [false, true] {
+                for visible in [false, true] {
+                    if let Some(flags) = preview_position_flags(moved, resized, visible) {
+                        assert!(flags.contains(SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER));
+                        assert_eq!(flags.contains(SWP_SHOWWINDOW), !visible);
+                        assert_eq!(flags.contains(SWP_NOMOVE), !moved);
+                        assert_eq!(flags.contains(SWP_NOSIZE), !resized);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn main_foreground_includes_host_children_and_owned_windows_only() {
+        // 都是本测试创建的隐藏窗口；不激活、不调用 SetFocus/SetForegroundWindow。
+        struct Hidden(HWND);
+        impl Drop for Hidden {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        fn hidden(parent: Option<HWND>, style: WINDOW_STYLE) -> Hidden {
+            Hidden(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!("focus-policy-test"),
+                    style,
+                    0,
+                    0,
+                    0,
+                    0,
+                    parent,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        }
+        let main = hidden(None, WINDOW_STYLE(0));
+        let external = hidden(None, WINDOW_STYLE(0));
+        let child = hidden(Some(main.0), WS_CHILD);
+        let owned = hidden(Some(main.0), WS_POPUP);
+        let raw = main.0 .0 as isize;
+        for window in [main.0, child.0, owned.0] {
+            assert!(belongs_to_main(raw, window.0 as isize));
+        }
+        assert!(!belongs_to_main(raw, external.0 .0 as isize));
+        assert!(!belongs_to_main(raw, 0));
+        assert!(!belongs_to_main(0, 0));
+    }
+    #[test]
+    fn main_blur_only_hides_when_enabled_and_foreground_has_left() {
+        assert!(!should_hide_main(false, false));
+        assert!(!should_hide_main(false, true));
+        assert!(!should_hide_main(true, true));
+        assert!(should_hide_main(true, false));
+    }
     #[test]
     fn unattended_environment_never_prompts() {
         for bits in 0..8 {

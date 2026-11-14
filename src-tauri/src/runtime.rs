@@ -28,29 +28,36 @@ use windows::{
 };
 
 const SETTINGS_MESSAGE: u32 = WM_APP + 81;
-struct BrokerRequest {
-    hotkey: Hotkey,
-    reply: Sender<Result<(), String>>,
-    cancelled: Arc<AtomicBool>,
+enum BrokerRequest {
+    Replace {
+        hotkey: Hotkey,
+        reply: Sender<Result<(), String>>,
+        cancelled: Arc<AtomicBool>,
+    },
+    Check {
+        main: Hotkey,
+        quick: Hotkey,
+        reply: Sender<Result<crate::hotkey_check::Report, String>>,
+    },
 }
 static HOTKEY_REQUESTS: OnceLock<Sender<BrokerRequest>> = OnceLock::new();
 struct NativeRegistrar(HWND);
 impl HotkeyRegistrar for NativeRegistrar {
     fn unregister(&mut self) -> Result<()> {
         unsafe {
-            UnregisterHotKey(Some(self.0), 1).map_err(|e| anyhow!("旧快捷键注销失败：{e}"))
+            UnregisterHotKey(Some(self.0), 1).map_err(|e| anyhow!("旧快捷键注销失败：{e}"))?;
+            Ok(())
         }
     }
     fn register(&mut self, hotkey: Hotkey) -> Result<()> {
         let shortcut = hotkey.shortcut();
-        let mut flags = MOD_NOREPEAT.0;
-        for (bit, flag) in [(1, MOD_CONTROL), (2, MOD_SHIFT), (4, MOD_ALT), (8, MOD_WIN)] {
-            if shortcut.modifiers & bit != 0 {
-                flags |= flag.0;
-            }
-        }
         unsafe {
-            RegisterHotKey(Some(self.0), 1, HOT_KEY_MODIFIERS(flags), shortcut.key)?;
+            RegisterHotKey(
+                Some(self.0),
+                1,
+                crate::hotkey_check::flags(shortcut),
+                shortcut.key,
+            )?;
         }
         Ok(())
     }
@@ -61,7 +68,7 @@ fn change_main_hotkey(hotkey: Hotkey) -> Result<()> {
     HOTKEY_REQUESTS
         .get()
         .ok_or_else(|| anyhow!("热键线程未启动"))?
-        .send(BrokerRequest {
+        .send(BrokerRequest::Replace {
             hotkey,
             reply,
             cancelled: cancelled.clone(),
@@ -83,6 +90,25 @@ fn change_main_hotkey(hotkey: Hotkey) -> Result<()> {
         .map_err(anyhow::Error::msg)
 }
 static BROKER: AtomicU32 = AtomicU32::new(0);
+pub fn check_hotkeys(main: Hotkey, quick: Hotkey) -> Result<crate::hotkey_check::Report> {
+    let (reply, wait) = mpsc::channel();
+    HOTKEY_REQUESTS
+        .get()
+        .ok_or_else(|| anyhow!("热键线程未启动"))?
+        .send(BrokerRequest::Check { main, quick, reply })
+        .map_err(|_| anyhow!("热键线程已退出"))?;
+    unsafe {
+        PostThreadMessageW(
+            BROKER.load(Ordering::Acquire),
+            SETTINGS_MESSAGE,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    }?;
+    wait.recv_timeout(Duration::from_secs(2))
+        .map_err(|_| anyhow!("热键检测未完成，请重试"))?
+        .map_err(anyhow::Error::msg)
+}
 static LISTENER: AtomicIsize = AtomicIsize::new(0);
 static WORK: OnceLock<SyncSender<Job>> = OnceLock::new();
 static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
@@ -116,6 +142,7 @@ pub enum Job {
 pub enum Control {
     Hook(Action, u64),
     Toggle,
+    RecordedHotkey(u32, u64),
     OpenSettings,
     TogglePause,
     Hide,
@@ -139,6 +166,7 @@ pub struct State {
     // 删除、保存与清理统一先锁此上下文，再锁 storage。
     pub capture_context: Mutex<Option<crate::owner_flush::CaptureContext>>,
     pub retention_policy: Mutex<RetentionPolicy>,
+    pub hide_on_blur: AtomicBool,
     pub settings: Mutex<Settings>,
     pub startup_error: Mutex<Option<String>>,
     pub jobs: SyncSender<Job>,
@@ -194,6 +222,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LR
             LRESULT(0)
         }
         WM_HOTKEY => {
+            // 检测使用独立ID，即使临时注册期间产生消息也不得唤出主面板。
+            if w.0 != 1 {
+                return LRESULT(0);
+            }
+            if hook::recording() {
+                return LRESULT(0);
+            }
             // 先掩码再调度 Toggle，避免 Alt 松开后进入菜单模式。
             let masked = paster::mask_shortcut();
             diag::write(format!("hotkey mask_ok={}", masked.is_ok()));
@@ -270,20 +305,64 @@ fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
                         diag::write(format!("startup hotkey: {error}"));
                     }
                     let _ = tx.send(Ok((id, startup_error)));
+                    let mut probe = crate::hotkey_check::native(h);
                     let mut msg = MSG::default();
                     while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                         if msg.message == SETTINGS_MESSAGE {
                             while let Ok(request) = pending.try_recv() {
-                                if request.cancelled.load(Ordering::Acquire) {
-                                    continue;
+                                match request {
+                                    BrokerRequest::Replace {
+                                        hotkey,
+                                        reply,
+                                        cancelled,
+                                    } => {
+                                        if cancelled.load(Ordering::Acquire) {
+                                            continue;
+                                        }
+                                        let result = settings::replace_hotkey(
+                                            &mut registrar,
+                                            &mut registered,
+                                            hotkey,
+                                        )
+                                        .map_err(|e| e.to_string());
+                                        let _ = reply.send(result);
+                                    }
+                                    BrokerRequest::Check { main, quick, reply } => {
+                                        let result = crate::hotkey_check::check_pair(
+                                            main,
+                                            quick,
+                                            registered,
+                                            |key| probe.check(key),
+                                        )
+                                        .map_err(|e| e.to_string());
+                                        let _ = reply.send(result);
+                                    }
                                 }
-                                let result = settings::replace_hotkey(
-                                    &mut registrar,
-                                    &mut registered,
-                                    request.hotkey,
-                                )
-                                .map_err(|e| e.to_string());
-                                let _ = request.reply.send(result);
+                            }
+                        } else if msg.message == hook::RECORD_MESSAGE {
+                            let session = msg.lParam.0 as u64;
+                            if session != hook::RECORD_SESSION.load(Ordering::Acquire)
+                                || !hook::recording()
+                            {
+                                diag::write(format!(
+                                    "hotkey_record stage=discard session={session}"
+                                ));
+                                continue;
+                            }
+                            diag::write(format!("hotkey_record stage=captured session={session}"));
+                            let masked = paster::mask_shortcut();
+                            if let Some(tx) = CONTROL.get() {
+                                let _ = tx.send(Control::RecordedHotkey(
+                                    if masked.is_ok() {
+                                        msg.wParam.0 as u32
+                                    } else {
+                                        0
+                                    },
+                                    session,
+                                ));
+                                if let Err(error) = masked {
+                                    let _ = tx.send(Control::Report(error.to_string()));
+                                }
                             }
                         } else if msg.message == hook::ACTION_MESSAGE {
                             if let Some(action) = Action::from_raw(msg.wParam.0) {
@@ -291,6 +370,9 @@ fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
                                 if generation != paste_generation() {
                                     continue;
                                 }
+                                diag::write(format!(
+                                    "hotkey_action action={action:?} generation={generation}"
+                                ));
                                 // 掩码必须先于 UI 调度，由 broker 尽快注入。
                                 if action == Action::Open {
                                     if let Err(error) = paster::mask_shortcut() {
@@ -311,6 +393,7 @@ fn start_broker(initial: Hotkey) -> Result<(u32, Option<String>)> {
                             DispatchMessageW(&msg);
                         }
                     }
+                    drop(probe);
                     let _ = RemoveClipboardFormatListener(h);
                     let _ = UnregisterHotKey(Some(h), 1);
                     let _ = KillTimer(Some(h), 1);
@@ -424,7 +507,7 @@ pub(crate) fn save_capture(
 pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<State>> {
     let settings = storage.load_settings()?;
     let policy = settings.retention_policy();
-    hook::configure(settings.quick_hotkey.shortcut());
+    hook::configure_settings(&settings);
     let vacuumed = match storage.cleanup(&policy, crate::storage::unix_millis()) {
         Ok(report) => report.vacuumed,
         Err(e) => {
@@ -451,6 +534,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         storage: Mutex::new(storage),
         capture_context: Mutex::new(None),
         retention_policy: Mutex::new(policy),
+        hide_on_blur: AtomicBool::new(settings.hide_on_blur),
         settings: Mutex::new(settings.clone()),
         startup_error: Mutex::new(None),
         jobs: jobs.clone(),
@@ -690,6 +774,13 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 match event {
+                    Control::RecordedHotkey(packed, session) => {
+                        if session!=hook::RECORD_SESSION.load(Ordering::Acquire){continue;}
+                        if let Some(main)=a.get_webview_window("main") {
+                            let value=if packed==0 {None}else{Some(format!("custom:{}:{}",(packed>>8)&15,packed&255))};
+                            let _=main.emit("hotkey-recorded",serde_json::json!({"session":session,"hotkey":value}));
+                        }
+                    }
                     Control::UpdateSettings(settings, reply) => {
                         let result = apply_settings(&a, &s, settings, panel.visible).map_err(|e| e.to_string());
                         let _ = reply.send(result);
@@ -762,6 +853,8 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                         } else {
                             LAST_EXTERNAL.load(Ordering::Acquire)
                         };
+                        let mode = s.settings.lock().unwrap().main_position;
+                        let location = if current == s.main.load(Ordering::Acquire) { None } else { crate::main_position::capture(mode, external) };
                         let app = a.clone();
                         let shared = s.clone();
                         on_main(&a, move || {
@@ -784,6 +877,9 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
                                     diag::modifier_snapshot("toggle", "before_show");
                                     platform::arm_main_menu_guard();
                                     let restored = window.unminimize();
+                                    if let Some(location) = location {
+                                        if let Err(error) = crate::main_position::apply(&window, location) { diag::write(format!("main_position failed={error}")); }
+                                    }
                                     let shown = window.show();
                                     let raised = unsafe { SetWindowPos(platform::hwnd(shared.main.load(Ordering::Acquire)), Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
                                     // tao 的 set_focus 失败回退会注入 Alt，这里只使用原生激活。
@@ -919,6 +1015,9 @@ fn apply_settings(
     next: Settings,
     panel_visible: bool,
 ) -> Result<Settings> {
+    if hook::recording() {
+        return Err(anyhow!("请先结束快捷键录制"));
+    }
     let next = next.normalized()?;
     let mut current = state.settings.lock().unwrap();
     let hotkeys_changed =
@@ -933,6 +1032,9 @@ fn apply_settings(
         None
     };
     let change_main = current.main_hotkey != next.main_hotkey || retry_hotkey;
+    if hotkeys_changed || retry_hotkey {
+        check_hotkeys(next.main_hotkey, next.quick_hotkey)?.validate()?;
+    }
     if change_main {
         if let Err(error) = change_main_hotkey(next.main_hotkey) {
             if error.to_string().contains("旧快捷键恢复失败") {
@@ -977,7 +1079,10 @@ fn apply_settings(
         return Err(anyhow!("设置未保存：{error}"));
     }
     *policy = next.retention_policy();
-    hook::configure(next.quick_hotkey.shortcut());
+    hook::configure_settings(&next);
+    state
+        .hide_on_blur
+        .store(next.hide_on_blur, Ordering::Release);
     *current = next.clone();
     drop(current);
     drop(reservation);
@@ -1332,6 +1437,7 @@ mod settings_tests {
         calls: Vec<Option<Hotkey>>,
         fail: Vec<Hotkey>,
         unregister_fails: bool,
+        probe_conflict: bool,
     }
     impl HotkeyRegistrar for FakeRegistrar {
         fn unregister(&mut self) -> Result<()> {
@@ -1389,20 +1495,44 @@ mod settings_tests {
                 ready.send(()).unwrap();
                 while !quit.load(Ordering::Acquire) {
                     match pending.recv_timeout(Duration::from_millis(20)) {
-                        Ok(request) => {
-                            if request.cancelled.load(Ordering::Acquire) {
+                        Ok(BrokerRequest::Replace {
+                            hotkey,
+                            reply,
+                            cancelled,
+                        }) => {
+                            if cancelled.load(Ordering::Acquire) {
                                 continue;
                             }
                             let mut registrar = fake.lock().unwrap();
                             let mut current = registrar.current;
-                            let result = settings::replace_hotkey(
-                                &mut *registrar,
-                                &mut current,
-                                request.hotkey,
-                            )
-                            .map_err(|e| e.to_string());
+                            let result =
+                                settings::replace_hotkey(&mut *registrar, &mut current, hotkey)
+                                    .map_err(|e| e.to_string());
                             registrar.current = current;
-                            let _ = request.reply.send(result);
+                            let _ = reply.send(result);
+                        }
+                        Ok(BrokerRequest::Check { main, quick, reply }) => {
+                            let current = fake.lock().unwrap();
+                            let registered = current.current;
+                            let conflict = current.probe_conflict;
+                            drop(current);
+                            let result =
+                                crate::hotkey_check::check_pair(main, quick, registered, |_| {
+                                    crate::hotkey_check::Finding {
+                                        status: if conflict {
+                                            crate::hotkey_check::Status::Conflict
+                                        } else {
+                                            crate::hotkey_check::Status::Available
+                                        },
+                                        message: if conflict {
+                                            "系统已占用".into()
+                                        } else {
+                                            String::new()
+                                        },
+                                    }
+                                })
+                                .map_err(|e| e.to_string());
+                            let _ = reply.send(result);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1422,6 +1552,7 @@ mod settings_tests {
                 storage: Mutex::new(storage),
                 capture_context: Mutex::new(None),
                 retention_policy: Mutex::new(old.retention_policy()),
+                hide_on_blur: AtomicBool::new(old.hide_on_blur),
                 settings: Mutex::new(old),
                 startup_error: Mutex::new(None),
                 jobs: mpsc::sync_channel(1).0,
@@ -1505,6 +1636,14 @@ mod settings_tests {
         drop(reservation);
         assert_unchanged();
 
+        fixture.fake.lock().unwrap().probe_conflict = true;
+        assert!(apply_settings(app.handle(), &state, next.clone(), false)
+            .unwrap_err()
+            .to_string()
+            .contains("系统已占用"));
+        assert!(fixture.fake.lock().unwrap().calls.is_empty());
+        fixture.fake.lock().unwrap().probe_conflict = false;
+        assert_unchanged();
         fixture.fake.lock().unwrap().fail = vec![Hotkey::CtrlAltV];
         assert!(apply_settings(app.handle(), &state, next.clone(), false).is_err());
         {
@@ -1546,6 +1685,21 @@ mod settings_tests {
             );
             assert_eq!(fake.current, Some(Hotkey::AltV));
         }
+        assert_unchanged();
+        fixture.fake.lock().unwrap().calls.clear();
+        assert!(apply_settings(
+            app.handle(),
+            &state,
+            Settings {
+                quick_hotkey: Hotkey::CtrlAltShiftV,
+                ..old.clone()
+            },
+            false
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("设置未保存"));
+        assert!(fixture.fake.lock().unwrap().calls.is_empty());
         assert_unchanged();
         // AC-6/7：复用本进程唯一的 Tauri 测试应用；不新建窗口或启动监听。
         // 持有存储及采集上下文时，真实 publish / panel_state 仍须完成。

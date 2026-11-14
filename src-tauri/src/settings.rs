@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 
 pub const MB: u64 = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(try_from = "String", into = "String")]
 pub enum Hotkey {
     AltV,
     CtrlAltV,
@@ -14,6 +14,7 @@ pub enum Hotkey {
     CtrlShiftV,
     CtrlAltShiftV,
     AltShiftV,
+    Custom { key: u32, modifiers: u16 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shortcut {
@@ -30,28 +31,101 @@ impl Hotkey {
             Self::CtrlShiftV => (0x56, 3),
             Self::CtrlAltShiftV => (0x56, 7),
             Self::AltShiftV => (0x56, 6),
+            Self::Custom { key, modifiers } => (key, modifiers),
         };
         Shortcut { key, modifiers }
     }
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::AltV => "Alt + V",
-            Self::CtrlAltV => "Ctrl + Alt + V",
-            Self::WinAltV => "Win + Alt + V",
-            Self::CtrlBacktick => "Ctrl + `",
-            Self::CtrlShiftV => "Ctrl + Shift + V",
-            Self::CtrlAltShiftV => "Ctrl + Alt + Shift + V",
-            Self::AltShiftV => "Alt + Shift + V",
+    pub fn label(self) -> String {
+        self.shortcut().label(false)
+    }
+    pub fn hold_label(self) -> String {
+        self.shortcut().label(true)
+    }
+}
+impl Shortcut {
+    pub fn label(self, modifiers_only: bool) -> String {
+        let mut parts: Vec<String> = [(8, "Win"), (1, "Ctrl"), (4, "Alt"), (2, "Shift")]
+            .into_iter()
+            .filter(|(bit, _)| self.modifiers & bit != 0)
+            .map(|(_, name)| name.into())
+            .collect();
+        if !modifiers_only {
+            parts.push(match self.key {
+                0x30..=0x39 | 0x41..=0x5A => char::from_u32(self.key).unwrap().to_string(),
+                0x70..=0x87 => format!("F{}", self.key - 0x6f),
+                0x20 => "Space".into(),
+                0xC0 => "`".into(),
+                0xBD => "-".into(),
+                0xBB => "=".into(),
+                0xBA => ";".into(),
+                0xBC => ",".into(),
+                0xBE => ".".into(),
+                0xBF => "/".into(),
+                0xDB => "[".into(),
+                0xDD => "]".into(),
+                0xDC => "\\".into(),
+                0xDE => "'".into(),
+                _ => format!("VK{:02X}", self.key),
+            });
+        }
+        parts.join(" + ")
+    }
+}
+impl From<Hotkey> for String {
+    fn from(value: Hotkey) -> Self {
+        match value {
+            Hotkey::AltV => "alt_v".into(),
+            Hotkey::CtrlAltV => "ctrl_alt_v".into(),
+            Hotkey::WinAltV => "win_alt_v".into(),
+            Hotkey::CtrlBacktick => "ctrl_backtick".into(),
+            Hotkey::CtrlShiftV => "ctrl_shift_v".into(),
+            Hotkey::CtrlAltShiftV => "ctrl_alt_shift_v".into(),
+            Hotkey::AltShiftV => "alt_shift_v".into(),
+            Hotkey::Custom { key, modifiers } => format!("custom:{modifiers}:{key}"),
         }
     }
-    pub fn hold_label(self) -> &'static str {
-        match self {
-            Self::CtrlShiftV => "Ctrl + Shift",
-            Self::CtrlAltShiftV => "Ctrl + Alt + Shift",
-            Self::AltShiftV => "Alt + Shift",
-            _ => self.label(),
+}
+impl TryFrom<String> for Hotkey {
+    type Error = String;
+    fn try_from(value: String) -> std::result::Result<Self, String> {
+        let preset = match value.as_str() {
+            "alt_v" => Some(Self::AltV),
+            "ctrl_alt_v" => Some(Self::CtrlAltV),
+            "win_alt_v" => Some(Self::WinAltV),
+            "ctrl_backtick" => Some(Self::CtrlBacktick),
+            "ctrl_shift_v" => Some(Self::CtrlShiftV),
+            "ctrl_alt_shift_v" => Some(Self::CtrlAltShiftV),
+            "alt_shift_v" => Some(Self::AltShiftV),
+            _ => None,
+        };
+        if let Some(preset) = preset {
+            return Ok(preset);
         }
+        let parts: Vec<_> = value.split(':').collect();
+        if parts.len() != 3 || parts[0] != "custom" {
+            return Err("快捷键格式无效".into());
+        }
+        let modifiers = parts[1].parse().map_err(|_| "修饰键无效")?;
+        let key = parts[2].parse().map_err(|_| "触发键无效")?;
+        let shortcut = Shortcut { key, modifiers };
+        validate_shortcut(shortcut).map_err(|e| e.to_string())?;
+        Ok(Self::Custom { key, modifiers })
     }
+}
+pub fn validate_shortcut(s: Shortcut) -> Result<()> {
+    if s.modifiers == 0 || s.modifiers & !15 != 0 || s.modifiers & 13 == 0 {
+        bail!("快捷键至少包含 Ctrl、Alt 或 Win，不能只使用 Shift");
+    }
+    if !matches!(s.key,0x30..=0x39|0x41..=0x5A|0x70..=0x87|0x20|0xBA..=0xC0|0xDB..=0xDE) {
+        bail!("请使用字母、数字、F1–F24、空格或常用标点作为触发键");
+    }
+    if (s.modifiers == 1 && matches!(s.key, 0x41 | 0x43 | 0x56 | 0x58 | 0x59 | 0x5A))
+        || (s.modifiers & 8 != 0 && s.key == 0x4C)
+        || s.key == 0x7B
+    {
+        bail!("此组合保留给系统或基础编辑操作，请换一个快捷键");
+    }
+    Ok(())
 }
 pub const MAIN_HOTKEYS: [Hotkey; 4] = [
     Hotkey::AltV,
@@ -61,8 +135,42 @@ pub const MAIN_HOTKEYS: [Hotkey; 4] = [
 ];
 pub const QUICK_HOTKEYS: [Hotkey; 3] =
     [Hotkey::CtrlShiftV, Hotkey::CtrlAltShiftV, Hotkey::AltShiftV];
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    #[default]
+    List,
+    Cards,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MainPosition {
+    #[default]
+    Remember,
+    #[serde(alias = "input")]
+    Mouse,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub layout: Layout,
+    #[serde(default)]
+    pub compact: bool,
+    #[serde(default)]
+    pub hide_on_blur: bool,
+    #[serde(default)]
+    pub select_first_on_show: bool,
+    #[serde(default)]
+    pub main_position: MainPosition,
     pub autostart: bool,
     pub pause_on_start: bool,
     pub max_items: u32,
@@ -81,6 +189,12 @@ impl Default for Settings {
     fn default() -> Self {
         let policy = RetentionPolicy::default();
         Self {
+            theme: Theme::Light,
+            layout: Layout::List,
+            compact: false,
+            hide_on_blur: false,
+            select_first_on_show: false,
+            main_position: MainPosition::Remember,
             autostart: false,
             pause_on_start: false,
             max_items: policy.max_items,
@@ -128,9 +242,8 @@ pub fn validate_hotkeys(main: Hotkey, quick: Hotkey) -> Result<()> {
     if shortcuts_conflict(main.shortcut(), quick.shortcut()) {
         bail!("主窗口和快速面板快捷键不能相同或使用完全相同的修饰键");
     }
-    if !MAIN_HOTKEYS.contains(&main) || !QUICK_HOTKEYS.contains(&quick) {
-        bail!("请选择支持的快捷键候选项");
-    }
+    validate_shortcut(main.shortcut())?;
+    validate_shortcut(quick.shortcut())?;
     Ok(())
 }
 // 纯函数：同时识别 Windows/斜杠路径，空白项直接丢弃。
@@ -174,7 +287,7 @@ impl Settings {
             max_days: self.max_days,
         }
     }
-    pub fn validate(&self) -> Result<()> {
+    fn validate_fields(&self) -> Result<()> {
         validate_retention_policy(&self.retention_policy())?;
         let values = serde_json::to_value(self)?;
         for (key, range) in ranges() {
@@ -189,6 +302,11 @@ impl Settings {
             }
         }
         normalize_ignored_apps(&self.ignored_apps)?;
+        validate_shortcut(self.main_hotkey.shortcut())?;
+        validate_shortcut(self.quick_hotkey.shortcut())
+    }
+    pub fn validate(&self) -> Result<()> {
+        self.validate_fields()?;
         validate_hotkeys(self.main_hotkey, self.quick_hotkey)
     }
     pub fn normalized(mut self) -> Result<Self> {
@@ -232,7 +350,7 @@ impl Settings {
                 json[key] = value;
                 serde_json::from_value::<Self>(json)
                     .ok()
-                    .filter(|s| s.validate().is_ok())
+                    .filter(|s| s.validate_fields().is_ok())
             });
             if let Some(candidate) = candidate {
                 let mut json = serde_json::to_value(&result).unwrap();
@@ -245,9 +363,22 @@ impl Settings {
             }
         }
         if validate_hotkeys(result.main_hotkey, result.quick_hotkey).is_err() {
-            result.main_hotkey = defaults.main_hotkey;
-            result.quick_hotkey = defaults.quick_hotkey;
-            warn("settings fallback key=main_hotkey,quick_hotkey reason=conflict".into());
+            if rows
+                .get("unified_hotkey")
+                .and_then(|raw| serde_json::from_str::<bool>(raw).ok())
+                == Some(true)
+            {
+                // 删除合并模式后优先保留用户主热键，只调整失效的快速面板组合。
+                result.quick_hotkey = QUICK_HOTKEYS
+                    .into_iter()
+                    .find(|key| validate_hotkeys(result.main_hotkey, *key).is_ok())
+                    .unwrap();
+                warn("settings fallback key=quick_hotkey reason=removed_unified_mode".into());
+            } else {
+                result.main_hotkey = defaults.main_hotkey;
+                result.quick_hotkey = defaults.quick_hotkey;
+                warn("settings fallback key=main_hotkey,quick_hotkey reason=conflict".into());
+            }
         }
         result
     }
@@ -265,8 +396,8 @@ fn field_label(key: &str) -> &str {
 #[derive(Serialize)]
 pub struct HotkeyOption {
     id: Hotkey,
-    label: &'static str,
-    hold_label: &'static str,
+    label: String,
+    hold_label: String,
 }
 #[derive(Serialize)]
 pub struct SettingOptions {
@@ -343,6 +474,7 @@ mod tests {
             main_hotkey: Hotkey::CtrlBacktick,
             quick_hotkey: Hotkey::AltShiftV,
             quick_visible_count: 9,
+            ..Settings::default()
         };
         for (key, range) in ranges() {
             let mut invalid = vec![
@@ -378,9 +510,9 @@ mod tests {
         }
     }
 
-    // T3-2：用独立的键值表校验全部 49 对候选，区分冲突与候选分组限制。
+    // T3-2：49对预设仍验证冲突；R19录制后不再限制预设只能用于某一角色。
     #[test]
-    fn all_candidate_pairs_have_expected_conflict_and_role_validation() {
+    fn all_candidate_pairs_keep_conflict_checks_without_preset_role_restrictions() {
         let candidates = [
             (Hotkey::AltV, 0x56, 4),
             (Hotkey::CtrlAltV, 0x56, 5),
@@ -394,7 +526,7 @@ mod tests {
             assert_eq!(a.shortcut(), Shortcut { key, modifiers });
             for (j, &(b, _, _)) in candidates.iter().enumerate() {
                 assert_eq!(shortcuts_conflict(a.shortcut(), b.shortcut()), i == j);
-                assert_eq!(validate_hotkeys(a, b).is_ok(), i < 4 && j >= 4);
+                assert_eq!(validate_hotkeys(a, b).is_ok(), i != j);
             }
         }
     }
@@ -643,6 +775,73 @@ mod tests {
         ));
     }
     #[test]
+    fn recorded_shortcuts_roundtrip_and_keep_old_settings_compatible() {
+        for (wire, label) in [
+            ("custom:4:67", "Alt + C"),
+            ("custom:3:67", "Ctrl + Shift + C"),
+            ("custom:1:112", "Ctrl + F1"),
+        ] {
+            let key = Hotkey::try_from(wire.to_string()).unwrap();
+            assert_eq!(key.label(), label);
+            assert_eq!(String::from(key), wire);
+        }
+        for wire in [
+            "custom:0:67",
+            "custom:2:67",
+            "custom:16:67",
+            "custom:4:256",
+            "custom:1:67",
+            "custom:8:76",
+            "custom:4:27",
+            "custom:4:123",
+        ] {
+            assert!(Hotkey::try_from(wire.to_string()).is_err(), "{wire}");
+        }
+        let combo = Hotkey::try_from("custom:4:67".to_string()).unwrap();
+        let settings = Settings {
+            main_hotkey: combo,
+            ..Settings::default()
+        };
+        settings.validate().unwrap();
+        let rows = rows(&settings);
+        assert_eq!(Settings::from_rows(&rows, |_| {}), settings);
+        assert!(Settings {
+            quick_hotkey: combo,
+            ..settings
+        }
+        .validate()
+        .is_err());
+        assert!(serde_json::to_value(Settings::default())
+            .unwrap()
+            .get("unified_hotkey")
+            .is_none());
+        assert_eq!(
+            serde_json::from_str::<MainPosition>("\"input\"").unwrap(),
+            MainPosition::Mouse
+        );
+    }
+    #[test]
+    fn removed_unified_mode_preserves_main_and_repairs_only_conflicting_quick_key() {
+        let main = Hotkey::Custom {
+            key: 67,
+            modifiers: 3,
+        };
+        let mut data = rows(&Settings {
+            main_hotkey: main,
+            quick_hotkey: main,
+            ..Settings::default()
+        });
+        data.insert("unified_hotkey".into(), "true".into());
+        let loaded = Settings::from_rows(&data, |_| {});
+        assert_eq!(loaded.main_hotkey, main);
+        assert_eq!(loaded.quick_hotkey, Hotkey::CtrlAltShiftV);
+        loaded.validate().unwrap();
+        assert!(serde_json::to_value(loaded)
+            .unwrap()
+            .get("unified_hotkey")
+            .is_none());
+    }
+    #[test]
     fn candidate_matrix_and_conflicts() {
         for main in MAIN_HOTKEYS {
             for quick in QUICK_HOTKEYS {
@@ -652,7 +851,7 @@ mod tests {
         for key in MAIN_HOTKEYS.into_iter().chain(QUICK_HOTKEYS) {
             assert!(validate_hotkeys(key, key).is_err());
         }
-        assert!(validate_hotkeys(Hotkey::CtrlShiftV, Hotkey::AltV).is_err());
+        assert!(validate_hotkeys(Hotkey::CtrlShiftV, Hotkey::AltV).is_ok());
         assert_eq!(MAIN_HOTKEYS.len(), 4);
         assert_eq!(QUICK_HOTKEYS.len(), 3);
     }

@@ -109,11 +109,11 @@ try {
   const input = (index,value) => evaluate(`(()=>{const n=document.querySelectorAll('.settings-view input[type=number]')[${index}];n.value=${JSON.stringify(String(value))};n.dispatchEvent(new Event('input',{bubbles:true}));})()`);
   const save = () => evaluate(`document.querySelector('.settings-view button[type=submit]').click()`);
   await open();
-  assert.equal(await evaluate(`document.querySelectorAll('.settings-view fieldset').length`),4);
-  assert.equal(await evaluate(`document.querySelectorAll('.settings-view select')[0].options.length`),4);
-  assert.equal(await evaluate(`document.querySelectorAll('.settings-view select')[1].options.length`),3);
+  assert.equal(await evaluate(`document.querySelectorAll('.settings-view fieldset').length`),5);
+  assert.equal(await evaluate(`[...document.querySelectorAll('.settings-view select')].find(n=>n.querySelector('option[value=alt_v]')).options.length`),4);
+  assert.equal(await evaluate(`[...document.querySelectorAll('.settings-view select')].find(n=>n.querySelector('option[value=ctrl_shift_v]')).options.length`),3);
   assert.equal(await evaluate(`document.querySelectorAll('.settings-view input[type=number]')[1].value`),'1024');
-  checks.push('四组设置、后端候选及 MB 单位正确显示');
+  checks.push('五组设置（含外观）、后端候选及 MB 单位正确显示');
   await press('Delete'); await press('Enter');
   assert.equal(await evaluate('window.deletes.length+window.pastes.length'),0);
   await press('Escape'); await count(100);
@@ -158,7 +158,7 @@ try {
   assert.equal(await evaluate('window.settings.max_days'),0);
   await evaluate('window.failPreview=false'); await input(2,0);
   checks.push('放宽及改为不限不确认，预估失败不写入');
-  await evaluate(`(()=>{const n=document.querySelectorAll('.settings-view select')[0];n.value='ctrl_alt_v';n.dispatchEvent(new Event('change',{bubbles:true}));window.failSettings=true})()`);
+  await evaluate(`(()=>{const n=[...document.querySelectorAll('.settings-view select')].find(n=>n.querySelector('option[value=alt_v]'));n.value='ctrl_alt_v';n.dispatchEvent(new Event('change',{bubbles:true}));window.failSettings=true})()`);
   await save(); await until(()=>evaluate(`document.querySelector('.settings-view .error')?.textContent.includes('快捷键已被其他程序占用')`),'占用错误缺失');
   assert.equal(await evaluate('window.settings.main_hotkey'),'alt_v');
   await evaluate('window.failSettings=false;window.holdSettings=true'); await save();
@@ -167,7 +167,7 @@ try {
   await evaluate('window.releaseSettings()'); await until(()=>evaluate('window.settings.main_hotkey==="ctrl_alt_v"'),'切换未保存');
   await until(()=>evaluate(`document.querySelector('header p').textContent.includes('Ctrl + Alt + V')`),'提示未更新');
   await press('Escape'); await open();
-  assert.equal(await evaluate(`document.querySelector('.settings-view select').value`),'ctrl_alt_v');
+  assert.equal(await evaluate(`[...document.querySelectorAll('.settings-view select')].find(n=>n.querySelector('option[value=alt_v]')).value`),'ctrl_alt_v');
   checks.push('占用错误保留设置；保存期间防止重复操作；保存后提示同步及重新加载');
   await send('Emulation.setDeviceMetricsOverride',{width:680,height:620,deviceScaleFactor:1,mobile:false});
   assert(await evaluate('document.documentElement.scrollWidth<=680'));
