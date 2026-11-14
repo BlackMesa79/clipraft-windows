@@ -803,3 +803,10 @@ fmt/clippy/build、Rust642通过/3 ignored、T1～T8离屏113项、U1 20项、U2
 ## lint 与结构优化最终回归（2026-11-14）
 
 计划内职责拆分、错误路径复核和自动回归已收口。fmt、全目标 clippy、ESLint 零警告、类型检查/构建及差异检查通过；Rust 702 通过、0 失败、3 ignored；T1～T8 离屏 113 项、U1/U2 20/104 项、详情与录制状态 9/11 项通过。本轮未修改产品代码；原生录制、焦点、DPI、外部粘贴与 ignored 大图性能未重跑，B-01/B-02 不变，尚未提交。复跑入口、证据路径和覆盖边界见 [最终回归记录](docs/lint优化进度.md) 第二十三批及 [handoff](docs/handoff.md)。
+
+## 前端与脚本格式化
+
+项目固定使用 Prettier 3.10.1，配合 eslint-config-prettier 10.1.8。运行 `npm run format:check` 只检查，`npm run format` 写入格式化结果；范围限定为 `src/**/*.{vue,ts,js,css}`、`scripts/**/*.{mjs,js,ts}`、`vite.config.ts` 和 `eslint.config.js`。Rust 继续使用 cargo fmt，PowerShell、文档、生成文件及测试数据不在格式化范围内。
+
+规则见 `.prettierrc.json`：单引号、100 列目标宽度、LF、严格模板空白策略。Vue script/template/style 均参与格式化。分组名称与数量之间用显式空格插值保留原有文本；不要删除该间隔。两个状态工厂与主窗口初始化入口保留有说明的函数总行数例外，其他 lint 规则和阈值不变。日常仅格式化本次修改的文件；全范围 format 用于明确授权的统一排版。
+2026-11-14：Prettier 版本已获用户打包验收通过，按授权提交。下一阶段进入 U3 全历史选择，产品代码尚未开始；新对话从 [handoff](docs/handoff.md) 与 [U3开发准备](docs/U3全历史选择开发准备.md) 接续。

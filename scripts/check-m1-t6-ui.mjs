@@ -14,42 +14,82 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const file = path.join(root, 'dist', url.pathname === '/' ? 'index.html' : url.pathname);
     const content = await readFile(file);
-    res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html' });
+    res.writeHead(200, {
+      'Content-Type': file.endsWith('.js')
+        ? 'text/javascript'
+        : file.endsWith('.css')
+          ? 'text/css'
+          : 'text/html',
+    });
     res.end(content);
-  } catch { res.writeHead(404); res.end(); }
+  } catch {
+    res.writeHead(404);
+    res.end();
+  }
 });
-await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
-const browser = spawn('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', [
-  '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0',
-  `--user-data-dir=${profile}`, 'about:blank',
-], { windowsHide: true, stdio: 'ignore' });
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const browser = spawn(
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  [
+    '--headless=new',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`,
+    'about:blank',
+  ],
+  { windowsHide: true, stdio: 'ignore' },
+);
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, message) {
-  for (let n = 0; n < 150; n++) { if (await check()) return; await pause(40); }
+  for (let n = 0; n < 150; n++) {
+    if (await check()) return;
+    await pause(40);
+  }
   throw Error(message);
 }
 let ws;
 try {
   let port;
-  await until(async () => { try { port = (await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; return !!port; } catch { return false; } }, '浏览器未启动');
+  await until(async () => {
+    try {
+      port = (await readFile(path.join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+      return !!port;
+    } catch {
+      return false;
+    }
+  }, '浏览器未启动');
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  ws = new WebSocket(targets.find(target => target.type === 'page').webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+  ws = new WebSocket(targets.find((target) => target.type === 'page').webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = reject;
+  });
   let seq = 0;
   const pending = new Map();
-  ws.onmessage = event => {
+  ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
     if (message.id) {
-      const pair = pending.get(message.id); pending.delete(message.id);
-      if (message.error) pair?.reject(message.error); else pair?.resolve(message.result);
+      const pair = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) pair?.reject(message.error);
+      else pair?.resolve(message.result);
     }
   };
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++seq; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params }));
-  });
-  const evaluate = async expression => {
-    const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  const send = (method, params = {}) =>
+    new Promise((resolve, reject) => {
+      const id = ++seq;
+      pending.set(id, { resolve, reject });
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  const evaluate = async (expression) => {
+    const result = await send('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    });
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
@@ -120,49 +160,126 @@ try {
       }
     };
   })();`;
-  await send('Page.enable'); await send('Runtime.enable');
+  await send('Page.enable');
+  await send('Runtime.enable');
   await send('Page.addScriptToEvaluateOnNewDocument', { source: mock + settingsMock });
-  await send('Emulation.setDeviceMetricsOverride', { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
-  const checks=[];
-  const ready=()=>until(()=>evaluate('window.ready===true'),'前端未就绪');
-  const count=n=>until(()=>evaluate(`document.querySelectorAll('.item').length===${n}`),'条目数错误 '+n);
-  const settled=()=>until(()=>evaluate("document.querySelector('.list')?.getAttribute('aria-busy')==='false' || (!!document.querySelector('.empty') && !document.querySelector('.empty').textContent.includes('正在搜索'))"),'刷新未完成');
-  const click=(i,extras={})=>evaluate(`document.querySelectorAll('.item')[${i}].dispatchEvent(new MouseEvent('click',{bubbles:true,...${JSON.stringify(extras)}}))`);
-  const fresh=async()=>{await send('Page.navigate',{url:origin});await ready();await count(100);};
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1000,
+    height: 700,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  const checks = [];
+  const ready = () => until(() => evaluate('window.ready===true'), '前端未就绪');
+  const count = (n) =>
+    until(() => evaluate(`document.querySelectorAll('.item').length===${n}`), '条目数错误 ' + n);
+  const settled = () =>
+    until(
+      () =>
+        evaluate(
+          "document.querySelector('.list')?.getAttribute('aria-busy')==='false' || (!!document.querySelector('.empty') && !document.querySelector('.empty').textContent.includes('正在搜索'))",
+        ),
+      '刷新未完成',
+    );
+  const click = (i, extras = {}) =>
+    evaluate(
+      `document.querySelectorAll('.item')[${i}].dispatchEvent(new MouseEvent('click',{bubbles:true,...${JSON.stringify(extras)}}))`,
+    );
+  const fresh = async () => {
+    await send('Page.navigate', { url: origin });
+    await ready();
+    await count(100);
+  };
   await fresh();
-  await evaluate(`window.rows[0].source_exe='notepad.exe';window.rows[0].source_title='合成标题';window.rows[1].source_exe=null;window.rows[2].source_exe='browser.exe';window.changed()`);
+  await evaluate(
+    `window.rows[0].source_exe='notepad.exe';window.rows[0].source_title='合成标题';window.rows[1].source_exe=null;window.rows[2].source_exe='browser.exe';window.changed()`,
+  );
   await settled();
-  await until(()=>evaluate("document.querySelector('.item .source-name')?.textContent==='来源：notepad.exe'"),'列表来源未更新');
-  assert.equal(await evaluate("document.querySelector('.detail .source-name').textContent"),'来源：notepad.exe');
+  await until(
+    () =>
+      evaluate("document.querySelector('.item .source-name')?.textContent==='来源：notepad.exe'"),
+    '列表来源未更新',
+  );
+  assert.equal(
+    await evaluate("document.querySelector('.detail .source-name').textContent"),
+    '来源：notepad.exe',
+  );
   checks.push('主窗口列表与详情统一显示完整 exe 文件名');
-  assert.equal(await evaluate("document.querySelectorAll('.item')[1].querySelector('.source-name')"),null);
-  await click(1); await until(()=>evaluate("document.querySelector('.detail .source-name')===null"),'无来源详情仍有标记');
+  assert.equal(
+    await evaluate("document.querySelectorAll('.item')[1].querySelector('.source-name')"),
+    null,
+  );
+  await click(1);
+  await until(
+    () => evaluate("document.querySelector('.detail .source-name')===null"),
+    '无来源详情仍有标记',
+  );
   checks.push('NULL 来源在列表与详情均不显示');
-  await click(2);await until(()=>evaluate("document.querySelector('.detail .source-name')?.textContent==='来源：browser.exe'"),'详情来源未随选择切换');
+  await click(2);
+  await until(
+    () =>
+      evaluate("document.querySelector('.detail .source-name')?.textContent==='来源：browser.exe'"),
+    '详情来源未随选择切换',
+  );
   checks.push('切换选中记录后详情来源同步');
-  await click(3);assert.equal(await evaluate("document.querySelector('.detail .source-name')"),null);
+  await click(3);
+  assert.equal(await evaluate("document.querySelector('.detail .source-name')"), null);
   checks.push('兼容没有来源字段的旧记录');
-  await evaluate(`window.rows[0].source_exe='x'.repeat(240)+'.exe';window.changed()`); await settled();await click(0);
-  await send('Emulation.setDeviceMetricsOverride',{width:680,height:620,deviceScaleFactor:1,mobile:false});
+  await evaluate(`window.rows[0].source_exe='x'.repeat(240)+'.exe';window.changed()`);
+  await settled();
+  await click(0);
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 680,
+    height: 620,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await pause(100);
-  assert(await evaluate("document.documentElement.scrollWidth<=680 && [...document.querySelectorAll('.workspace,.list,.detail,.item')].every(el=>el.scrollWidth<=el.clientWidth+1)"));
-  assert(await evaluate("[...document.querySelectorAll('.source-name')].every(el=>el.getBoundingClientRect().right<=680)"));
+  assert(
+    await evaluate(
+      "document.documentElement.scrollWidth<=680 && [...document.querySelectorAll('.workspace,.list,.detail,.item')].every(el=>el.scrollWidth<=el.clientWidth+1)",
+    ),
+  );
+  assert(
+    await evaluate(
+      "[...document.querySelectorAll('.source-name')].every(el=>el.getBoundingClientRect().right<=680)",
+    ),
+  );
   checks.push('680px 窄窗口长来源名省略，页面/列表/详情无横向溢出');
-  const image=await send('Page.captureScreenshot',{format:'jpeg',quality:65});
-  await writeFile(path.join(out,'narrow-preview.jpg'),Buffer.from(image.data,'base64'));
-  await evaluate(`window.rows[0].source_exe='合成程序.EXE';window.changed()`);await settled();
-  assert.equal(await evaluate("document.querySelector('.item .source-name').textContent"),'来源：合成程序.EXE');
-  assert.equal(await evaluate("document.querySelector('.detail .source-name').textContent"),'来源：合成程序.EXE');
+  const image = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
+  await writeFile(path.join(out, 'narrow-preview.jpg'), Buffer.from(image.data, 'base64'));
+  await evaluate(`window.rows[0].source_exe='合成程序.EXE';window.changed()`);
+  await settled();
+  assert.equal(
+    await evaluate("document.querySelector('.item .source-name').textContent"),
+    '来源：合成程序.EXE',
+  );
+  assert.equal(
+    await evaluate("document.querySelector('.detail .source-name').textContent"),
+    '来源：合成程序.EXE',
+  );
   checks.push('来源名保留 Unicode 与原始大小写');
-  const hostileSource='<img src=x onerror=alert(1)>.exe';
-  await evaluate(`window.rows[0].source_exe=${JSON.stringify(hostileSource)};window.changed()`);await settled();
-  assert.equal(await evaluate("document.querySelector('.item .source-name').textContent"),`来源：${hostileSource}`);
-  assert.equal(await evaluate("document.querySelector('.item .source-name img')"),null);
+  const hostileSource = '<img src=x onerror=alert(1)>.exe';
+  await evaluate(`window.rows[0].source_exe=${JSON.stringify(hostileSource)};window.changed()`);
+  await settled();
+  assert.equal(
+    await evaluate("document.querySelector('.item .source-name').textContent"),
+    `来源：${hostileSource}`,
+  );
+  assert.equal(await evaluate("document.querySelector('.item .source-name img')"), null);
   checks.push('来源名中的 HTML 特殊字符按文本转义');
-  await send('Page.navigate',{url:origin+'/?panel=quick'});await ready();await count(200);
-  assert.equal(await evaluate("document.querySelector('.source-name')"),null);
+  await send('Page.navigate', { url: origin + '/?panel=quick' });
+  await ready();
+  await count(200);
+  assert.equal(await evaluate("document.querySelector('.source-name')"), null);
   checks.push('快速面板保持现有紧凑布局');
-  await writeFile(path.join(out,'results.json'),JSON.stringify({passed:checks.length,checks},null,2));console.log(JSON.stringify({passed:checks.length,checks},null,2));
+  await writeFile(
+    path.join(out, 'results.json'),
+    JSON.stringify({ passed: checks.length, checks }, null, 2),
+  );
+  console.log(JSON.stringify({ passed: checks.length, checks }, null, 2));
 } finally {
-  ws?.close();browser.kill();await new Promise(resolve=>server.close(resolve));
+  ws?.close();
+  browser.kill();
+  await new Promise((resolve) => server.close(resolve));
 }

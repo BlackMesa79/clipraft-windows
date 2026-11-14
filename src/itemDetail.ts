@@ -24,38 +24,77 @@ interface ItemDetailController {
 }
 
 // 调用方保留列表/窗口生命周期；代号只在本记录详情控制器内递增。
+// 工厂统一持有实例状态；行数包含独立闭包，拆开会分散状态所有权。
+// eslint-disable-next-line max-lines-per-function
 export function createItemDetail(context: DetailContext): ItemDetailController {
-  const detail = ref<Detail | null>(null), detailError = ref(''), detailLoading = ref(false);
+  const detail = ref<Detail | null>(null),
+    detailError = ref(''),
+    detailLoading = ref(false);
   const revealed = ref(false);
   let generation = 0;
-  function invalidateDetail(): void { ++generation; }
+  function invalidateDetail(): void {
+    ++generation;
+  }
   function conceal(): void {
-    invalidateDetail(); revealed.value = false; detail.value = null; detailLoading.value = false;
+    invalidateDetail();
+    revealed.value = false;
+    detail.value = null;
+    detailLoading.value = false;
   }
   async function revealDetail(): Promise<void> {
     if (!context.active()?.sensitive || detailLoading.value) return;
-    const id = context.active()!.id, request = ++generation;
-    detailLoading.value = true; detailError.value = '';
+    const id = context.active()!.id,
+      request = ++generation;
+    detailLoading.value = true;
+    detailError.value = '';
     try {
       const result = await invoke<Detail>('reveal_item', { id });
-      if (request === generation && context.active()?.id === id) { detail.value = result; revealed.value = true; }
-    } catch { if (request === generation) detailError.value = '显示原文失败'; }
-    finally { if (request === generation) detailLoading.value = false; }
+      if (request === generation && context.active()?.id === id) {
+        detail.value = result;
+        revealed.value = true;
+      }
+    } catch {
+      if (request === generation) detailError.value = '显示原文失败';
+    } finally {
+      if (request === generation) detailLoading.value = false;
+    }
   }
   async function loadDetail(): Promise<void> {
-    if (context.compact()) { conceal(); return; }
-    const id = context.active()?.id, request = ++generation;
+    if (context.compact()) {
+      conceal();
+      return;
+    }
+    const id = context.active()?.id,
+      request = ++generation;
     context.resetScroll();
-    revealed.value = false; detail.value = null; detailError.value = ''; detailLoading.value = !!id;
-    if (!id || context.active()?.kind === 'image') { detailLoading.value = false; return; }
+    revealed.value = false;
+    detail.value = null;
+    detailError.value = '';
+    detailLoading.value = !!id;
+    if (!id || context.active()?.kind === 'image') {
+      detailLoading.value = false;
+      return;
+    }
     await fetchDetail(id, request);
   }
   async function fetchDetail(id: string, request: number): Promise<void> {
     try {
       const result = await invoke<Detail>('item_detail', { id });
       if (request === generation) detail.value = result;
-    } catch (error) { if (request === generation) detailError.value = String(error); }
-    finally { if (request === generation) detailLoading.value = false; }
+    } catch (error) {
+      if (request === generation) detailError.value = String(error);
+    } finally {
+      if (request === generation) detailLoading.value = false;
+    }
   }
-  return { detail, detailError, detailLoading, revealed, invalidateDetail, conceal, revealDetail, loadDetail };
+  return {
+    detail,
+    detailError,
+    detailLoading,
+    revealed,
+    invalidateDetail,
+    conceal,
+    revealDetail,
+    loadDetail,
+  };
 }

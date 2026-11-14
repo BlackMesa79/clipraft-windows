@@ -14,10 +14,31 @@ const paths: Record<string, string> = {
   refresh: 'M20 7v5h-5 M4 17v-5h5 M6 7a7 7 0 0 1 12-1l2 3 M4 15l2 3a7 7 0 0 0 12-1',
   compact: 'M3 4h18v16H3z M8 4v16 M12 9h5 M12 13h5 M12 17h5',
   expand: 'M3 4h18v16H3z M9 4v16 M13 8h5v8h-5z',
-  settings: 'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',
+  settings:
+    'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',
 };
 </script>
 
-<template><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path :d="paths[name] ?? paths.text" /></svg></template>
+<template>
+  <svg
+    class="ui-icon"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    <path :d="paths[name] ?? paths.text" />
+  </svg>
+</template>
 
-<style>.ui-icon{width:18px;height:18px;flex-shrink:0;vertical-align:middle}</style>
+<style>
+.ui-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+</style>

@@ -3,8 +3,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { shortcutError, shortcutFromKeyboard, type Settings } from './settings';
 
 export type HotkeyField = 'main_hotkey' | 'quick_hotkey';
-interface RecordIssue { conflict: boolean; detail: string }
-interface RecordedHotkey { session: number; hotkey: string | null }
+interface RecordIssue {
+  conflict: boolean;
+  detail: string;
+}
+interface RecordedHotkey {
+  session: number;
+  hotkey: string | null;
+}
 interface RecordingContext {
   draft: Ref<Settings | undefined>;
   scheduleHotkeyCheck(): void;
@@ -38,17 +44,30 @@ interface HotkeyRecordingController {
 // 监听、watch 和卸载顺序由设置页编排；所有会话和修订状态仅属于本实例。
 export function createHotkeyRecording(context: RecordingContext): HotkeyRecordingController {
   const state: RecordingState = {
-    context, recordingField: ref(null), recordOperations: ref(0), recordIssues: ref({}),
+    context,
+    recordingField: ref(null),
+    recordOperations: ref(0),
+    recordIssues: ref({}),
     hotkeyRevisions: { main_hotkey: 0, quick_hotkey: 0 },
-    disposed: false, recordSession: 0, recordEpoch: 0, earlyRecordings: new Map(),
+    disposed: false,
+    recordSession: 0,
+    recordEpoch: 0,
+    earlyRecordings: new Map(),
   };
   return {
-    recordingField: state.recordingField, recordOperations: state.recordOperations, recordIssues: state.recordIssues,
-    clearRecordIssue: field => clearRecordIssue(state, field),
-    record: field => record(state, field), stopRecording: () => stopRecording(state),
-    blurRecording: () => blurRecording(state), recordingKeydown: event => recordingKeydown(state, event),
-    receiveRecording: payload => receiveRecording(state, payload),
-    isDisposed: () => state.disposed, markDisposed: () => { state.disposed = true; },
+    recordingField: state.recordingField,
+    recordOperations: state.recordOperations,
+    recordIssues: state.recordIssues,
+    clearRecordIssue: (field) => clearRecordIssue(state, field),
+    record: (field) => record(state, field),
+    stopRecording: () => stopRecording(state),
+    blurRecording: () => blurRecording(state),
+    recordingKeydown: (event) => recordingKeydown(state, event),
+    receiveRecording: (payload) => receiveRecording(state, payload),
+    isDisposed: () => state.disposed,
+    markDisposed: () => {
+      state.disposed = true;
+    },
   };
 }
 
@@ -59,22 +78,36 @@ function clearRecordIssue(state: RecordingState, field: HotkeyField): void {
 
 async function stopRecording(state: RecordingState): Promise<boolean> {
   const epoch = ++state.recordEpoch;
-  const field = state.recordingField.value, revision = field ? state.hotkeyRevisions[field] : 0;
+  const field = state.recordingField.value,
+    revision = field ? state.hotkeyRevisions[field] : 0;
   clearTimeout(state.recordingTimer);
-  state.recordingField.value = null; state.recordSession = 0; state.earlyRecordings.clear();
+  state.recordingField.value = null;
+  state.recordSession = 0;
+  state.earlyRecordings.clear();
   state.recordOperations.value++;
   try {
     await invoke('set_hotkey_recording', { active: false });
     return true;
   } catch (error) {
-    if (!state.disposed && epoch === state.recordEpoch && field && revision === state.hotkeyRevisions[field]) {
+    if (
+      !state.disposed &&
+      epoch === state.recordEpoch &&
+      field &&
+      revision === state.hotkeyRevisions[field]
+    ) {
       state.recordIssues.value[field] = { conflict: false, detail: String(error) };
     }
     return false;
-  } finally { state.recordOperations.value--; }
+  } finally {
+    state.recordOperations.value--;
+  }
 }
 
-interface RecordingAttempt { field: HotkeyField; epoch: number; revision: number }
+interface RecordingAttempt {
+  field: HotkeyField;
+  epoch: number;
+  revision: number;
+}
 function recordFailed(state: RecordingState, attempt: RecordingAttempt, error: unknown): void {
   if (state.disposed || attempt.epoch !== state.recordEpoch) return;
   if (attempt.revision === state.hotkeyRevisions[attempt.field]) {
@@ -87,11 +120,16 @@ function recordFailed(state: RecordingState, attempt: RecordingAttempt, error: u
 const RECORD_TIMEOUT_MS = 30_000;
 async function record(state: RecordingState, field: HotkeyField): Promise<void> {
   if (state.recordOperations.value || state.disposed) return;
-  if (state.recordingField.value) { await stopRecording(state); return; }
+  if (state.recordingField.value) {
+    await stopRecording(state);
+    return;
+  }
   const epoch = ++state.recordEpoch;
   clearRecordIssue(state, field);
   const revision = state.hotkeyRevisions[field];
-  state.earlyRecordings.clear(); state.recordingField.value = field; state.recordOperations.value++;
+  state.earlyRecordings.clear();
+  state.recordingField.value = field;
+  state.recordOperations.value++;
   try {
     const session = await invoke<number>('set_hotkey_recording', { active: true });
     if (state.disposed || epoch !== state.recordEpoch) {
@@ -99,11 +137,21 @@ async function record(state: RecordingState, field: HotkeyField): Promise<void> 
       return;
     }
     state.recordSession = session;
-    const early = state.earlyRecordings.get(session); state.earlyRecordings.clear();
-    if (early !== undefined) { void finishRecording(state, early); return; }
-    state.recordingTimer = setTimeout(() => expireRecording(state, field, revision), RECORD_TIMEOUT_MS);
-  } catch (error) { recordFailed(state, { field, epoch, revision }, error); }
-  finally { state.recordOperations.value--; }
+    const early = state.earlyRecordings.get(session);
+    state.earlyRecordings.clear();
+    if (early !== undefined) {
+      void finishRecording(state, early);
+      return;
+    }
+    state.recordingTimer = setTimeout(
+      () => expireRecording(state, field, revision),
+      RECORD_TIMEOUT_MS,
+    );
+  } catch (error) {
+    recordFailed(state, { field, epoch, revision }, error);
+  } finally {
+    state.recordOperations.value--;
+  }
 }
 
 function expireRecording(state: RecordingState, field: HotkeyField, revision: number): void {
@@ -122,9 +170,19 @@ async function finishRecording(state: RecordingState, hotkey: string | null): Pr
   if (!field) return;
   const revision = state.hotkeyRevisions[field];
   const stopped = await stopRecording(state);
-  if (!stopped || state.disposed || !hotkey || !state.context.draft.value || revision !== state.hotkeyRevisions[field]) return;
+  if (
+    !stopped ||
+    state.disposed ||
+    !hotkey ||
+    !state.context.draft.value ||
+    revision !== state.hotkeyRevisions[field]
+  )
+    return;
   const reason = shortcutError(hotkey);
-  if (reason) { state.recordIssues.value[field] = { conflict: true, detail: reason }; return; }
+  if (reason) {
+    state.recordIssues.value[field] = { conflict: true, detail: reason };
+    return;
+  }
   clearRecordIssue(state, field);
   const unchanged = state.context.draft.value[field] === hotkey;
   state.context.draft.value[field] = hotkey;
@@ -134,9 +192,13 @@ async function finishRecording(state: RecordingState, hotkey: string | null): Pr
 function recordingKeydown(state: RecordingState, event: KeyboardEvent): void {
   if (!state.recordingField.value && !state.recordOperations.value) return;
   // 在窗口捕获阶段处理，不能把 Esc/Enter/Space 交给主面板或当前按钮。
-  event.preventDefault(); event.stopImmediatePropagation();
+  event.preventDefault();
+  event.stopImmediatePropagation();
   if (!state.recordingField.value || event.repeat) return;
-  if (event.key === 'Escape') { void stopRecording(state); return; }
+  if (event.key === 'Escape') {
+    void stopRecording(state);
+    return;
+  }
   if (event.isComposing || event.keyCode === 229) return;
   const hotkey = shortcutFromKeyboard(event);
   if (hotkey) void finishRecording(state, hotkey);

@@ -2,12 +2,14 @@ import js from '@eslint/js';
 import ts from 'typescript-eslint';
 import vue from 'eslint-plugin-vue';
 import globals from 'globals';
+import prettier from 'eslint-config-prettier/flat';
 
 export default [
   { ignores: ['dist/**', 'node_modules/**', 'src-tauri/**', '.tools/**', '.test-data/**'] },
   js.configs.recommended,
   ...ts.configs.recommended,
   ...vue.configs['flat/essential'],
+  prettier,
   {
     files: ['src/**/*.{ts,vue}', 'vite.config.ts'],
     languageOptions: { globals: globals.browser, parserOptions: { parser: ts.parser } },

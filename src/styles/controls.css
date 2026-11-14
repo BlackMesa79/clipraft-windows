@@ -1,23 +1,111 @@
 /* 共享滚动条与表单样式，保留原生控件语义。 */
-@supports not selector(::-webkit-scrollbar){*{scrollbar-width:thin;scrollbar-color:var(--scroll-thumb) transparent}}
-::-webkit-scrollbar{width:9px;height:9px}
-::-webkit-scrollbar-track{background:transparent;border-radius:8px}
-::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:2px solid transparent;background-clip:padding-box;border-radius:8px;min-height:24px}
-::-webkit-scrollbar-thumb:hover{background:var(--muted)}
-::-webkit-scrollbar-corner{background:transparent}
-:where(button,input,select,textarea):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
-.settings-view input,.settings-view select,.settings-view textarea,.compact-groups select{accent-color:var(--accent);color:var(--text);background-color:var(--bg);border:1px solid var(--line);border-radius:6px;font:inherit}
-.settings-view input:not([type=checkbox]):not([type=radio]),.settings-view select,.settings-view textarea{padding:7px 9px;min-height:32px}
-.settings-view input:is([type=checkbox],[type=radio]){appearance:none;display:inline-grid;place-content:center;width:15px;height:15px;padding:0;flex:0 0 15px;margin:0 6px 0 0;vertical-align:middle;cursor:pointer;border-radius:4px}
-.settings-view input[type=radio]{border-radius:50%}
-.settings-view input:is([type=checkbox],[type=radio]):checked{background:var(--accent);border-color:var(--accent)}
-.settings-view input[type=checkbox]:checked::after{content:'';width:11px;height:11px;background:var(--bg);clip-path:polygon(9% 47%,22% 34%,42% 54%,78% 18%,91% 31%,42% 80%);transform:none}
-.settings-view input[type=radio]:checked::after{content:'';width:5px;height:5px;border-radius:50%;background:var(--bg)}
-.settings-view :is(input,select,textarea):hover:not(:disabled),.compact-groups select:hover:not(:disabled){border-color:var(--muted)}
-.settings-view :is(input,select,textarea):disabled,.compact-groups select:disabled{opacity:.5;cursor:default}
-.settings-view [aria-invalid=true]{border-color:var(--danger)}
-.main-window .settings-view button{border-radius:6px}
-@media(forced-colors:active){.settings-view input:is([type=checkbox],[type=radio]){appearance:auto}}
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+}
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+  min-height: 24px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+:where(button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.settings-view input,
+.settings-view select,
+.settings-view textarea,
+.compact-groups select {
+  accent-color: var(--accent);
+  color: var(--text);
+  background-color: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+.settings-view input:not([type='checkbox']):not([type='radio']),
+.settings-view select,
+.settings-view textarea {
+  padding: 7px 9px;
+  min-height: 32px;
+}
+.settings-view input:is([type='checkbox'], [type='radio']) {
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  flex: 0 0 15px;
+  margin: 0 6px 0 0;
+  vertical-align: middle;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.settings-view input[type='radio'] {
+  border-radius: 50%;
+}
+.settings-view input:is([type='checkbox'], [type='radio']):checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.settings-view input[type='checkbox']:checked::after {
+  content: '';
+  width: 11px;
+  height: 11px;
+  background: var(--bg);
+  clip-path: polygon(9% 47%, 22% 34%, 42% 54%, 78% 18%, 91% 31%, 42% 80%);
+  transform: none;
+}
+.settings-view input[type='radio']:checked::after {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+.settings-view :is(input, select, textarea):hover:not(:disabled),
+.compact-groups select:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+.settings-view :is(input, select, textarea):disabled,
+.compact-groups select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.settings-view [aria-invalid='true'] {
+  border-color: var(--danger);
+}
+.main-window .settings-view button {
+  border-radius: 6px;
+}
+@media (forced-colors: active) {
+  .settings-view input:is([type='checkbox'], [type='radio']) {
+    appearance: auto;
+  }
+}
 
 /* preview 使用透明 WebView，只有轮廓与阴影绘制像素可见。 */
-html[data-panel=preview],html[data-panel=preview] body,html[data-panel=preview] #app{background:transparent}
+html[data-panel='preview'],
+html[data-panel='preview'] body,
+html[data-panel='preview'] #app {
+  background: transparent;
+}
