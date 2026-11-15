@@ -4,6 +4,7 @@ import QuickPanel from './QuickPanel.vue';
 import FloatingPreview from './FloatingPreview.vue';
 const panel = new URLSearchParams(location.search).get('panel');
 const quick = panel === 'quick';
+if (quick) document.documentElement.dataset.panel = 'quick';
 </script>
 
 <template>

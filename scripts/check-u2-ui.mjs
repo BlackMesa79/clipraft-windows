@@ -3428,6 +3428,19 @@ try {
       );
     });
   }
+  await test('U4 移除面板背景设置，旧值不恢复入口', async () => {
+    await metrics(1000);
+    await nav();
+    await appearance({ quick_background: 'native' });
+    await click('.settings-toggle');
+    await until(
+      () => evaluate("!!document.querySelector('select[aria-label=主题]')"),
+      '设置未加载',
+    );
+    await click('.settings-nav button:nth-child(2)');
+    assert.equal(await evaluate("document.querySelector('select[aria-label=快速面板背景]')"), null);
+    await capture('card-shadow-settings');
+  });
   await writeFile(
     path.join(out, 'results.json'),
     JSON.stringify(

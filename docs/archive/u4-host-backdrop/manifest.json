@@ -1,0 +1,37 @@
+[
+  {
+    "source": "src-tauri/src/quick_material.rs",
+    "snapshot": "src-tauri__src__quick_material.rs.txt",
+    "sha256": "ebc5fdb4bbf7d9b7245bea644b4f25fa4be2b6025c1e4249f5100074f6c28d6f"
+  },
+  {
+    "source": "src-tauri/src/quick_material/surface.rs",
+    "snapshot": "src-tauri__src__quick_material__surface.rs.txt",
+    "sha256": "c21c6751b2c5af5a34469411927653cd92a968cdacd1e4f5c8bbc9c3c6b99636"
+  },
+  {
+    "source": "src-tauri/src/quick_material/tests.rs",
+    "snapshot": "src-tauri__src__quick_material__tests.rs.txt",
+    "sha256": "9a091ebcd5ffa53a8e27b07305f6cd8495c10be9cb55d8d77722862aa816c2d7"
+  },
+  {
+    "source": "src-tauri/src/settings.rs",
+    "snapshot": "src-tauri__src__settings.rs.txt",
+    "sha256": "bf9ce03a8972fb83130c43fc62ffb6ac9c170ccb3ca78a6fc8d4ee8d57cfc4fe"
+  },
+  {
+    "source": "src-tauri/src/runtime/main_window.rs",
+    "snapshot": "src-tauri__src__runtime__main_window.rs.txt",
+    "sha256": "3590a1022375e082893955c1ec67e6d245f860a78b399ffeb00445ecd1cebdad"
+  },
+  {
+    "source": "src-tauri/src/app_setup.rs",
+    "snapshot": "src-tauri__src__app_setup.rs.txt",
+    "sha256": "5bfabd57e561e6dee429d3580f07cdf6a8296718ddf47805defd8c9777ffd8a4"
+  },
+  {
+    "source": "src-tauri/Cargo.toml",
+    "snapshot": "src-tauri__Cargo.toml.txt",
+    "sha256": "e4fa095f481c9b4fdbf5ba708e97036b4c3fe69da2520ee14cd76d07d3c90252"
+  }
+]

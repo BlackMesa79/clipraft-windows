@@ -217,3 +217,24 @@ fn reopened_session_rejects_old_response_even_at_same_revision() {
     assert!(!reopened.accepts(pending.version));
     assert!(reopened.accepts(current.version));
 }
+
+#[test]
+fn wheel_slots_preserve_all_legacy_counts_without_duplicate_ids() {
+    for visible in 3..=15 {
+        for total in [1, 2, 3, 5, 201, 1001] {
+            let mut session = open(total);
+            for direction in [Direction::Previous, Direction::Next] {
+                session.navigate(direction);
+                let request = session.request(visible).unwrap();
+                let count = visible.min(total);
+                assert_eq!(request.ids.len(), count);
+                assert_eq!(request.selected, count / 2);
+                assert_eq!(
+                    request.ids[request.selected],
+                    session.selected_id().unwrap()
+                );
+                assert_eq!(request.ids.iter().collect::<HashSet<_>>().len(), count);
+            }
+        }
+    }
+}

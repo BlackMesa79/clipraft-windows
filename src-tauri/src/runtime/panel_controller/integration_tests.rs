@@ -117,6 +117,7 @@ fn selection_and_commit(harness: &mut Harness) {
         harness.controller.start_session().unwrap();
         harness.settle();
         assert_eq!(harness.controller.panel.items.len(), count as usize);
+        assert_eq!(harness.controller.panel.visible_count, count);
         assert_eq!(
             harness.controller.panel.items[harness.controller.panel.selected].id,
             harness.ids[1]

@@ -148,7 +148,10 @@ try {
     await evaluate(`window.emitEvent('panel-state',${JSON.stringify(panel)})`);
     await pause(40);
   };
-  const count = () => evaluate("document.querySelector('.count')?.textContent");
+  const count = () =>
+    evaluate(
+      "[...document.querySelectorAll('.count-current,.count-total')].map(el=>el.textContent.trim()).join('/')",
+    );
   const selected = () => evaluate("document.querySelector('.item.selected')?.dataset.id");
   const capture = async (name) => {
     const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
@@ -160,7 +163,7 @@ try {
   await emit(latest);
   await evaluate(`window.resolveInitial(${JSON.stringify(payload({ serial: 0, position: 1 }))})`);
   await until(() => evaluate('window.ready===true'), '前端未 ready');
-  assert.equal((await count()).replace(/\s/g, ''), '221/301条');
+  assert.equal((await count()).replace(/\s/g, ''), '221/301');
   assert.equal(await selected(), 'id-220');
   check('较新的事件先到、初始 IPC 快照迟到时保持最新选择');
   assert.equal(await evaluate("document.querySelectorAll('.item').length"), 9);
@@ -226,7 +229,7 @@ try {
   await emit(reopened);
   await emit(payload({ serial: closed.serial, session: 1 }));
   assert.equal(await selected(), 'new-1');
-  assert.equal((await count()).replace(/\s/g, ''), '2/2条');
+  assert.equal((await count()).replace(/\s/g, ''), '2/2');
   check('关闭重开后旧会话事件不能覆盖新会话');
   await emit(
     payload({

@@ -350,16 +350,23 @@ try {
   await send('Page.navigate', { url: origin + '/?panel=quick' });
   await ready();
   assert.equal(await evaluate(`document.querySelector('.settings-toggle')`), null);
-  assert(await evaluate(`document.querySelector('header p').textContent.includes('Ctrl + Shift')`));
-  checks.push('快速面板无设置入口，使用后端快捷键提示');
+  assert(
+    await evaluate(
+      `!document.querySelector('.quick header,.quick footer')&&!!document.querySelector('.count-current')&&!document.querySelector('.count-divider')&&!!document.querySelector('.count-total')`,
+    ),
+  );
+  checks.push('快速面板无设置入口和操作说明，仅保留右上角横排位置与总数');
   await evaluate(
     `window.emitEvent('settings-changed',{...window.settings,quick_hotkey:'alt_shift_v'})`,
   );
   await until(
-    () => evaluate(`document.querySelector('header p').textContent.includes('保持 Alt + Shift')`),
-    '快速面板提示未同步',
+    () =>
+      evaluate(
+        `!document.querySelector('.quick header,.quick footer')&&!!document.querySelector('.quick .count')`,
+      ),
+    '快速面板总数丢失',
   );
-  checks.push('后端设置变更事件即时更新快速面板提示');
+  checks.push('后端设置变更后快速面板保持精简展示');
   await send('Page.navigate', { url: origin });
   await ready();
   await evaluate(

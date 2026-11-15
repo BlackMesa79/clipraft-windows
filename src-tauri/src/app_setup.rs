@@ -100,13 +100,16 @@ fn create_preview(app: &tauri::App, main: &WebviewWindow, root: &Path) -> Result
 }
 
 fn create_quick(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
+    let (width, height) = crate::quick_geometry::dimensions(5)?;
     let quick = WebviewWindowBuilder::new(
         app,
         "quick",
         WebviewUrl::App("index.html?panel=quick".into()),
     )
     .title("快速粘贴")
-    .inner_size(420.0, 530.0)
+    .inner_size(width, height)
+    .transparent(true)
+    .shadow(false)
     .visible(false)
     .focused(false)
     .focusable(false)

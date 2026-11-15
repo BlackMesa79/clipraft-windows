@@ -1,0 +1,12 @@
+{
+  "source": ".tools/u4-remove-soft-final/native-probe.log",
+  "test": "quick_material::tests::native_material_hidden_probe",
+  "passed": 1,
+  "failed": 0,
+  "host_backdrop_graph": "created",
+  "system_acrylic": "disabled",
+  "cleanup": "passed",
+  "hidden": true,
+  "visual_verified_by_probe": false,
+  "user_visual_confirmation": "用户明确反馈原生背景模糊已生效；这是独立人工确认，不由隐藏探测推断。"
+}

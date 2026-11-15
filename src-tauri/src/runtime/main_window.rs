@@ -166,7 +166,8 @@ pub(super) fn show_notice(
             return;
         }
         // 提示跟随当前前台且不激活；原生回调期间不持有错误缓存锁。
-        if let Err(error) = platform::show_notice(shared.quick.load(Ordering::Acquire)) {
+        let quick = shared.quick.load(Ordering::Acquire);
+        if let Err(error) = platform::show_notice(quick) {
             diag::write(format!("notice show failed: {error}"));
             return;
         }
@@ -183,20 +184,26 @@ pub(super) fn show_quick(
     generation: u64,
 ) -> Result<()> {
     let quick = state.quick.load(Ordering::Acquire);
+    let count = state
+        .panel
+        .lock()
+        .map_err(|_| anyhow!("面板状态不可用"))?
+        .visible_count;
+    let size = crate::quick_geometry::dimensions(count)?;
     let shared = state.clone();
     let handle = app.clone();
     on_main(app, move || {
         if generation != paste_generation() {
             return;
         }
-        if platform::show_quick(quick, target).is_err() {
+        if let Err(error) = platform::show_quick(quick, target, size) {
             if let Err(error) = shared
                 .control
                 .send(Control::Hook(hook::Action::Cancel, generation))
             {
                 diag::write(format!("quick cancel control failed: {error}"));
             }
-            report(&handle, &shared, "前台窗口已变化，面板已取消");
+            report(&handle, &shared, &format!("快速面板显示失败：{error:#}"));
         }
     })
 }

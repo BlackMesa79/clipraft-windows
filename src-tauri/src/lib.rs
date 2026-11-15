@@ -25,6 +25,7 @@ pub mod panel_neighborhood;
 pub mod panel_session;
 pub mod paster;
 pub mod platform;
+mod quick_geometry;
 mod rich_preview;
 mod runtime;
 pub mod sensitive;
@@ -410,19 +411,28 @@ fn resize_quick(
     state: tauri::State<'_, Arc<State>>,
     height: f64,
     notice: bool,
+    session: u64,
 ) -> Result<(), String> {
     if window.label() != "quick" || !height.is_finite() {
         return Err("无效的提示窗口尺寸".into());
     }
     let panel = state.panel.lock().map_err(|_| "面板状态不可用")?;
     // 丢弃前端旧提示的延迟请求，避免缩小刚重新打开的选择面板。
-    if notice != (!panel.visible && panel.error.is_some()) {
+    if !quick_geometry::accepts_resize(
+        panel.visible,
+        panel.error.is_some(),
+        panel.session,
+        notice,
+        session,
+    ) {
         return Ok(());
     }
     let height = if notice {
         height.clamp(60.0, 530.0)
     } else {
-        530.0
+        quick_geometry::dimensions(panel.visible_count)
+            .map_err(|e| e.to_string())?
+            .1
     };
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
     platform::resize_quick(

@@ -160,6 +160,7 @@ pub struct Panel {
     pub position: usize,
     pub total: usize,
     pub loading: bool,
+    pub visible_count: u32,
     #[serde(skip)]
     pub history_revision: u64,
 }

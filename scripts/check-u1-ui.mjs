@@ -262,8 +262,12 @@ try {
     "window.emitEvent('settings-changed',{...window.settings,quick_hotkey:'alt_shift_v'})",
   );
   await pause(40);
-  assert(await evaluate("document.querySelector('header p').textContent.includes('Alt + Shift')"));
-  check('AC2 settings-changed 更新 hold_label');
+  assert(
+    await evaluate(
+      "!document.querySelector('.quick header,.quick footer')&&document.querySelector('.quick .count').textContent.includes('3')",
+    ),
+  );
+  check('AC2 settings-changed 保持右侧总数、不重新显示操作说明');
   await evaluate(
     "window.emitEvent('operation-error','不应显示');window.emitEvent('history-changed');window.emitEvent('open-settings');window.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter'}))",
   );
@@ -277,20 +281,20 @@ try {
   );
   check('AC2 quick 忽略主窗口事件与 Enter，不发粘贴 IPC');
   // U1-AC4：实际布局驱动 notice 高度，重复消息去重，失败后可重试。
-  assert((await resizeCalls()).some((c) => c.height === 530 && c.notice === false));
+  assert((await resizeCalls()).some((c) => c.height === 408 && c.notice === false));
   const before = (await resizeCalls()).length;
   await state(true);
   await state(true);
   assert.equal((await resizeCalls()).length, before);
-  check('AC4 普通高度 530，重复状态不重复 resize');
+  check('AC4 普通高度按默认 5 条几何 408，重复状态不重复 resize');
   await state(true, '合成可见面板错误');
   assert.equal(await evaluate("!!document.querySelector('.notice-only')"), false);
   assert.equal(await evaluate("document.querySelectorAll('.item').length"), 3);
-  check('AC4 visible=true 错误保留列表与 footer');
+  check('AC4 visible=true 错误保留列表与错误胶囊');
   await state(false, '合成粘贴失败：目标暂不可用');
   assert(
     await evaluate(
-      "!!document.querySelector('.notice-only')&&!document.querySelector('.list,.empty,footer,.count')&&document.querySelector('h1').textContent==='操作失败'",
+      "!!document.querySelector('.notice-only')&&!document.querySelector('.list,.empty,footer,.count')&&document.querySelector('[role=alert]').textContent.includes('操作失败')",
     ),
   );
   let last = (await resizeCalls()).at(-1);
@@ -310,7 +314,7 @@ try {
   );
   check('AC4 长错误换行并限制 530 高度');
   await state(true);
-  assert.deepEqual((await resizeCalls()).at(-1), { height: 530, notice: false });
+  assert.deepEqual((await resizeCalls()).at(-1), { height: 408, notice: false, session: 1 });
   check('AC4 notice 后重新打开恢复普通高度/列表');
   const retryStart = (await resizeCalls()).length;
   const successes = await evaluate('window.resizeSuccess');

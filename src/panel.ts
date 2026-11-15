@@ -12,6 +12,7 @@ export interface PanelState {
   position: number;
   total: number;
   loading: boolean;
+  visible_count: number;
 }
 
 export function createPanelState(): {
@@ -28,6 +29,7 @@ export function createPanelState(): {
     position: 0,
     total: 0,
     loading: false,
+    visible_count: 5,
   });
   function applyPanel(next: PanelState): void {
     if (next.serial <= panel.value.serial) return;

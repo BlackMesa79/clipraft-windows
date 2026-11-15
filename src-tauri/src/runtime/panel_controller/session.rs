@@ -77,6 +77,7 @@ impl Controller {
         ));
         self.panel = Panel {
             session: self.next_session,
+            visible_count: count,
             visible: true,
             history_revision: stamp.revision,
             ..Default::default()

@@ -40,6 +40,29 @@ mod tests {
             self.conn.execute_batch("CREATE TRIGGER reject_runtime_settings BEFORE UPDATE ON settings WHEN new.key='quick_visible_count' BEGIN SELECT RAISE(ABORT,'synthetic runtime settings failure'); END;").unwrap();
         }
     }
+    #[test]
+    fn removed_background_rows_are_ignored_without_rewriting() {
+        let fixture = Fixture::new();
+        let mut storage = fixture.open();
+        let settings = Settings {
+            max_items: 4321,
+            ..Default::default()
+        };
+        storage.save_settings(&settings).unwrap();
+        for value in [r#""soft""#, r#""frosted""#, r#""native""#, "{broken"] {
+            storage.conn.execute("INSERT INTO settings(key,value) VALUES('quick_background',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [value]).unwrap();
+            let before = raw_rows(&storage);
+            let loaded = storage.load_settings().unwrap();
+            assert_eq!(loaded, settings);
+            assert!(serde_json::to_value(&loaded)
+                .unwrap()
+                .get("quick_background")
+                .is_none());
+            storage.save_settings(&loaded).unwrap();
+            assert_eq!(raw_rows(&storage), before);
+        }
+    }
+
     fn raw_rows(storage: &Storage) -> BTreeMap<String, String> {
         storage
             .conn

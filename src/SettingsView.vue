@@ -107,7 +107,7 @@ const fields = [
   { key: 'max_bytes', label: '最大空间（MB）', group: 'history' },
   { key: 'max_days', label: '保留天数（0 表示不限）', group: 'history' },
   { key: 'sensitive_ttl_minutes', label: '敏感内容保留时长', group: 'privacy' },
-  { key: 'quick_visible_count', label: '快速面板可见条数（预留）', group: 'hotkeys' },
+  { key: 'quick_visible_count', label: '快速面板可见条数', group: 'hotkeys' },
 ] as const;
 type NumericKey = (typeof fields)[number]['key'];
 function factor(key: NumericKey) {
@@ -626,7 +626,7 @@ onUnmounted(() => {
               >点录制后按下组合键，Esc取消，30秒自动结束；保存后生效，冲突或保存失败时保留旧设置。</p
             >
             <label class="number-field"
-              ><span>快速面板可见条数（仅存储）</span
+              ><span>快速面板可见条数</span
               ><input
                 v-model.number="draft.quick_visible_count"
                 type="number"
@@ -638,7 +638,9 @@ onUnmounted(() => {
                 }}</small
               ></label
             >
-            <p class="detail-note">面板激活期间不能修改快捷键。保存失败时保留原设置。</p>
+            <p class="detail-note"
+              >条数在下次打开时生效；偶数条数时上方比下方多一张，选中项始终居中。面板激活期间不能修改快捷键。保存失败时保留原设置。</p
+            >
             <p class="detail-note" data-panel-keyboard-help
               >主面板（普通、双列、紧凑）：↑/↓ 选择记录，←/→ 切换类型，Ctrl+↑/↓ 切换分组，Ctrl+F
               返回搜索；Enter 粘贴，Shift+Enter 纯文本粘贴，Esc

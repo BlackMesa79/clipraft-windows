@@ -1,0 +1,194 @@
+//! 在 WebView 子窗口下绘制 Host Backdrop，避免依赖失焦 Acrylic 的实色回退。
+use crate::{diag, platform, settings::Theme};
+use anyhow::{anyhow, Result};
+use std::{cell::RefCell, mem::size_of};
+use windows::{
+    core::Interface,
+    System::{DispatcherQueue, DispatcherQueueController},
+    Win32::{
+        Foundation::RECT,
+        System::WinRT::{
+            Composition::ICompositorDesktopInterop, CreateDispatcherQueueController,
+            DispatcherQueueOptions, RoInitialize, RoUninitialize, DQTAT_COM_STA,
+            DQTYPE_THREAD_CURRENT, RO_INIT_SINGLETHREADED,
+        },
+        UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::GetClientRect},
+    },
+    UI::{
+        Color,
+        Composition::{
+            CompositionRoundedRectangleGeometry, Compositor, ContainerVisual,
+            Desktop::DesktopWindowTarget, SpriteVisual, Visual,
+        },
+    },
+};
+
+thread_local! {
+    static CONTEXT: RefCell<Option<ThreadContext>> = const { RefCell::new(None) };
+    static SURFACE: RefCell<Option<Surface>> = const { RefCell::new(None) };
+}
+
+struct Runtime;
+impl Runtime {
+    fn new() -> Result<Self> {
+        unsafe {
+            RoInitialize(RO_INIT_SINGLETHREADED)?;
+        }
+        Ok(Self)
+    }
+}
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        unsafe {
+            RoUninitialize();
+        }
+    }
+}
+struct ThreadContext {
+    _queue: Option<DispatcherQueueController>,
+    _runtime: Runtime,
+}
+impl ThreadContext {
+    fn new() -> Result<Self> {
+        let runtime = Runtime::new()?;
+        let queue = match DispatcherQueue::GetForCurrentThread() {
+            Ok(_) => None,
+            Err(_) => Some(unsafe {
+                CreateDispatcherQueueController(DispatcherQueueOptions {
+                    dwSize: size_of::<DispatcherQueueOptions>() as u32,
+                    threadType: DQTYPE_THREAD_CURRENT,
+                    apartmentType: DQTAT_COM_STA,
+                })?
+            }),
+        };
+        Ok(Self {
+            _queue: queue,
+            _runtime: runtime,
+        })
+    }
+}
+struct OwnedCompositor(Compositor);
+impl Drop for OwnedCompositor {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.Close() {
+            diag::write(format!("quick compositor close failed: {error}"));
+        }
+    }
+}
+struct Surface {
+    raw: isize,
+    target: DesktopWindowTarget,
+    root: ContainerVisual,
+    blur: SpriteVisual,
+    tint: SpriteVisual,
+    geometry: CompositionRoundedRectangleGeometry,
+    _compositor: OwnedCompositor,
+}
+impl Surface {
+    fn new(raw: isize, theme: Theme) -> Result<Self> {
+        let compositor = OwnedCompositor(Compositor::new()?);
+        let interop: ICompositorDesktopInterop = compositor.0.cast()?;
+        // false 使背景位于子 HWND 下方，保持 WebView 卡片与文字清晰。
+        let target = unsafe { interop.CreateDesktopWindowTarget(platform::hwnd(raw), false)? };
+        let root = compositor.0.CreateContainerVisual()?;
+        let blur = compositor.0.CreateSpriteVisual()?;
+        blur.SetBrush(&compositor.0.CreateHostBackdropBrush()?)?;
+        let tint = compositor.0.CreateSpriteVisual()?;
+        let color = match theme {
+            Theme::Light => Color {
+                A: 30,
+                R: 255,
+                G: 255,
+                B: 255,
+            },
+            Theme::Dark => Color {
+                A: 40,
+                R: 16,
+                G: 27,
+                B: 35,
+            },
+        };
+        tint.SetBrush(&compositor.0.CreateColorBrushWithColor(color)?)?;
+        root.Children()?.InsertAtTop(&blur)?;
+        root.Children()?.InsertAtTop(&tint)?;
+        let geometry = compositor.0.CreateRoundedRectangleGeometry()?;
+        root.SetClip(&compositor.0.CreateGeometricClipWithGeometry(&geometry)?)?;
+        target.SetRoot(&root)?;
+        let result = Self {
+            raw,
+            target,
+            root,
+            blur,
+            tint,
+            geometry,
+            _compositor: compositor,
+        };
+        result.resize()?;
+        Ok(result)
+    }
+    fn resize(&self) -> Result<()> {
+        let mut rect = RECT::default();
+        unsafe {
+            GetClientRect(platform::hwnd(self.raw), &mut rect)?;
+        }
+        let mut size = self.root.Size()?;
+        size.X = (rect.right - rect.left) as f32;
+        size.Y = (rect.bottom - rect.top) as f32;
+        self.root.SetSize(size)?;
+        self.blur.SetSize(size)?;
+        self.tint.SetSize(size)?;
+        self.geometry.SetSize(size)?;
+        let mut radius = self.geometry.CornerRadius()?;
+        radius.X = 24.0 * unsafe { GetDpiForWindow(platform::hwnd(self.raw)) } as f32 / 96.0;
+        radius.Y = radius.X;
+        self.geometry.SetCornerRadius(radius)?;
+        Ok(())
+    }
+}
+impl Drop for Surface {
+    fn drop(&mut self) {
+        if let Err(error) = self.target.SetRoot(None::<&Visual>) {
+            diag::write(format!("quick backdrop detach failed: {error}"));
+        }
+        if let Err(error) = self.target.Close() {
+            diag::write(format!("quick target close failed: {error}"));
+        }
+    }
+}
+
+pub(super) fn create(raw: isize, theme: Theme) -> Result<()> {
+    CONTEXT.with(|context| -> Result<()> {
+        let mut context = context.borrow_mut();
+        if context.is_none() {
+            *context = Some(ThreadContext::new()?);
+        }
+        Ok(())
+    })?;
+    let surface = Surface::new(raw, theme)?;
+    SURFACE.with(|active| *active.borrow_mut() = Some(surface));
+    Ok(())
+}
+pub(super) fn clear() {
+    SURFACE.with(|active| {
+        active.borrow_mut().take();
+    });
+}
+pub(super) fn resize(raw: isize) -> Result<()> {
+    SURFACE.with(|active| {
+        let active = active.borrow();
+        let surface = active
+            .as_ref()
+            .filter(|surface| surface.raw == raw)
+            .ok_or_else(|| anyhow!("当前线程没有快速面板背景层"))?;
+        surface.resize()
+    })
+}
+#[cfg(test)]
+pub(super) fn active(raw: isize) -> bool {
+    SURFACE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .is_some_and(|surface| surface.raw == raw)
+    })
+}

@@ -191,15 +191,15 @@ pub fn position_preview(raw: isize, x: i32, y: i32, width: u32, height: u32) -> 
     }
     Ok(())
 }
-pub fn show_quick(raw: isize, target: isize) -> Result<()> {
+pub fn show_quick(raw: isize, target: isize, size: (f64, f64)) -> Result<()> {
     if foreground() != target {
         bail!("前台窗口已变化，取消面板");
     }
-    position_quick(raw, target)
+    position_quick(raw, target, Some(size))
 }
 pub fn show_notice(raw: isize) -> Result<()> {
     // 提示不执行粘贴，不依赖原目标窗口仍在前台。
-    position_quick(raw, foreground())
+    position_quick(raw, foreground(), None)
 }
 // 只调整现有窗口大小与屏内位置，不激活、不显示已经隐藏的窗口。
 pub fn resize_quick(raw: isize, height: i32) -> Result<()> {
@@ -230,7 +230,7 @@ pub fn resize_quick(raw: isize, height: i32) -> Result<()> {
         Ok(())
     }
 }
-fn position_quick(raw: isize, target: isize) -> Result<()> {
+fn position_quick(raw: isize, target: isize, size: Option<(f64, f64)>) -> Result<()> {
     unsafe {
         let mut point = POINT::default();
         let mut info = GUITHREADINFO {
@@ -254,19 +254,27 @@ fn position_quick(raw: isize, target: isize) -> Result<()> {
         let h = hwnd(raw);
         let mut rect = Default::default();
         GetWindowRect(h, &mut rect)?;
-        let width = rect.right - rect.left;
-        let height = rect.bottom - rect.top;
+        let destination = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let (mut dpi_x, mut dpi_y) = (96, 96);
+        windows::Win32::UI::HiDpi::GetDpiForMonitor(
+            destination,
+            windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+            &mut dpi_x,
+            &mut dpi_y,
+        )?;
+        let scale = f64::from(dpi_x) / 96.0;
+        let (mut width, mut height) = size.map_or(
+            (rect.right - rect.left, rect.bottom - rect.top),
+            |(w, h)| ((w * scale).ceil() as i32, (h * scale).ceil() as i32),
+        );
         let mut monitor = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        if GetMonitorInfoW(
-            MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST),
-            &mut monitor,
-        )
-        .as_bool()
-        {
+        if GetMonitorInfoW(destination, &mut monitor).as_bool() {
             let r = monitor.rcWork;
+            width = width.min(r.right - r.left);
+            height = height.min(r.bottom - r.top);
             point.x = point.x.clamp(r.left, (r.right - width).max(r.left));
             point.y = point.y.clamp(r.top, (r.bottom - height).max(r.top));
         }
@@ -275,9 +283,9 @@ fn position_quick(raw: isize, target: isize) -> Result<()> {
             Some(HWND_TOPMOST),
             point.x,
             point.y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )?;
         let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
         Ok(())
