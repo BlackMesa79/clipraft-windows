@@ -169,7 +169,12 @@ try {
   const save = () =>
     evaluate(`document.querySelector('.settings-view button[type=submit]').click()`);
   await open();
-  assert.equal(await evaluate(`document.querySelectorAll('.settings-view fieldset').length`), 5);
+  assert.deepEqual(
+    await evaluate(
+      `Array.from(document.querySelectorAll('.settings-view fieldset'), fieldset => fieldset.dataset.category).sort()`,
+    ),
+    ['appearance', 'general', 'history', 'hotkeys', 'privacy', 'storage'],
+  );
   assert.equal(
     await evaluate(
       `[...document.querySelectorAll('.settings-view select')].find(n=>n.querySelector('option[value=alt_v]')).options.length`,
@@ -186,7 +191,7 @@ try {
     await evaluate(`document.querySelectorAll('.settings-view input[type=number]')[1].value`),
     '1024',
   );
-  checks.push('五组设置（含外观）、后端候选及 MB 单位正确显示');
+  checks.push('六组设置（含数据存储）、后端候选及 MB 单位正确显示');
   await press('Delete');
   await press('Enter');
   assert.equal(await evaluate('window.deletes.length+window.pastes.length'), 0);

@@ -2637,6 +2637,241 @@ try {
       assert.equal(await evaluate("document.querySelectorAll('.hotkey-problem').length"), 0);
     }
   });
+  const storagePage = async (patch = {}) => {
+    await nav();
+    await evaluate(
+      `window.directoryStatus={...window.directoryStatus,enabled:true,...${JSON.stringify(patch)}};window.directoryPlan={ticket:'synthetic-ticket',source:'D:/synthetic/current',target:'E:/合成 空目录/片筏',bytes:2097152}`,
+    );
+    await click('.settings-toggle');
+    await pause(80);
+    await click('.settings-nav button:nth-child(6)');
+  };
+  for (const mode of ['list', 'cards', 'compact']) {
+    await test('S1 数据存储三布局显示与窄窗不溢出 ' + mode, async () => {
+      await metrics(mode === 'compact' ? 390 : 1000);
+      await nav();
+      await appearance({
+        layout: mode === 'cards' ? 'cards' : 'list',
+        compact: mode === 'compact',
+        theme: mode === 'compact' ? 'dark' : 'light',
+      });
+      await evaluate(
+        "window.directoryStatus={...window.directoryStatus,enabled:true,previous:'C:/合成旧目录/仍可能含敏感记录'}",
+      );
+      await click('.settings-toggle');
+      await pause(80);
+      if (mode === 'compact') await change('select[aria-label=设置分类]', 'storage');
+      else await click('.settings-nav button:nth-child(6)');
+      assert(
+        (await evaluate("document.querySelector('[data-current-directory]').textContent")).includes(
+          'synthetic/current',
+        ),
+      );
+      assert(
+        (
+          await evaluate("document.querySelector('[data-previous-directory]').textContent")
+        ).includes('合成旧目录'),
+      );
+      assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
+      if (mode !== 'cards') await capture('s1-storage-' + mode);
+    });
+  }
+  await test('S1 路径只移除展示用扩展前缀，迁移数据保持原值', async () => {
+    await metrics();
+    await nav();
+    const prefix = String.fromCharCode(92, 92, 63, 92);
+    const slash = String.fromCharCode(92);
+    const paths = {
+      current: prefix + 'C:' + slash + '合成数据',
+      previous: prefix + 'UNC' + slash + 'server' + slash + 'share',
+      source: prefix + 'D:' + slash + '源目录',
+      target: prefix + 'E:' + slash + '目标目录',
+    };
+    await evaluate(
+      `window.directoryStatus={...window.directoryStatus,enabled:true,current:${JSON.stringify(paths.current)},previous:${JSON.stringify(paths.previous)}};window.directoryPlan={ticket:'prefix-ticket',source:${JSON.stringify(paths.source)},target:${JSON.stringify(paths.target)},bytes:1}`,
+    );
+    await click('.settings-toggle');
+    await pause(80);
+    await click('.settings-nav button:nth-child(6)');
+    await click('.data-directory-settings button');
+    await pause(30);
+    for (const [field, expected] of Object.entries({
+      current: 'C:' + slash + '合成数据',
+      previous: slash + slash + 'server' + slash + 'share',
+      source: 'D:' + slash + '源目录',
+      target: 'E:' + slash + '目标目录',
+    })) {
+      assert.equal(
+        await evaluate(`document.querySelector('[data-${field}-directory]').textContent`),
+        expected,
+      );
+    }
+    assert.equal(await evaluate('window.directoryStatus.current'), paths.current);
+    assert.equal(await evaluate('window.directoryPlan.target'), paths.target);
+    await click('.directory-confirm button');
+    await pause(30);
+    assert.deepEqual(await evaluate('window.directoryRequests.at(-1)'), {
+      cmd: 'migrate_data_directory',
+      args: { ticket: 'prefix-ticket' },
+    });
+  });
+  await test('S1 隔离环境禁止更改与恢复目录', async () => {
+    await metrics();
+    await storagePage({ enabled: false });
+    assert.equal(
+      await evaluate(
+        "Array.from(document.querySelectorAll('.data-directory-settings button')).every(button=>button.disabled)",
+      ),
+      true,
+    );
+    assert.equal(await evaluate('window.directoryRequests.length'), 0);
+  });
+  await test('S1 选择器取消与预检确认条取消均不执行迁移', async () => {
+    await storagePage();
+    await evaluate('window.directoryPlan=null');
+    await click('.data-directory-settings button');
+    await pause(30);
+    assert.equal(await evaluate("!!document.querySelector('.directory-confirm')"), false);
+    await evaluate(
+      "window.directoryPlan={ticket:'ticket',source:'D:/old',target:'E:/new',bytes:1}",
+    );
+    await click('.data-directory-settings button');
+    await pause(30);
+    assert.equal(await evaluate("!!document.querySelector('.directory-confirm')"), true);
+    await click('.directory-confirm button:nth-child(2)');
+    assert.equal(await evaluate("!!document.querySelector('.directory-confirm')"), false);
+    assert.equal(
+      await evaluate(
+        "window.directoryRequests.some(request=>request.cmd==='migrate_data_directory')",
+      ),
+      false,
+    );
+  });
+  await test('S1 未保存设置阻止迁移，保存后允许确认', async () => {
+    await storagePage();
+    await evaluate("document.querySelector('input[type=checkbox]').click()");
+    await click('.data-directory-settings button');
+    await pause(30);
+    assert.equal(
+      await evaluate("document.querySelector('.directory-confirm button').disabled"),
+      true,
+    );
+    await click('.settings-buttons button[type=submit]');
+    await pause(80);
+    assert.equal(
+      await evaluate("document.querySelector('.directory-confirm button').disabled"),
+      false,
+    );
+    assert.equal(
+      await evaluate(
+        "window.directoryRequests.some(request=>request.cmd==='migrate_data_directory')",
+      ),
+      false,
+    );
+  });
+  await test('S1 预检失败保留当前路径且不执行迁移', async () => {
+    await storagePage();
+    await evaluate('window.failDirectoryChoice=true');
+    await click('.data-directory-settings button');
+    await pause(30);
+    assert.equal(await evaluate("!!document.querySelector('.directory-confirm')"), false);
+    assert(
+      (
+        await evaluate(
+          "document.querySelector('.data-directory-settings [role=alert]').textContent",
+        )
+      ).includes('非空'),
+    );
+    assert.equal(
+      await evaluate("document.querySelector('[data-current-directory]').textContent"),
+      'D:/synthetic/current',
+    );
+  });
+  await test('S1 确认失败可重试，成功只发送预检票据并保持重启锁定', async () => {
+    await storagePage();
+    await click('.data-directory-settings button');
+    await pause(30);
+    await evaluate('window.failDirectoryMigration=true');
+    await click('.directory-confirm button');
+    await pause(30);
+    assert.equal(
+      await evaluate("document.querySelector('.directory-confirm button').disabled"),
+      false,
+    );
+    await evaluate('window.failDirectoryMigration=false');
+    await click('.directory-confirm button');
+    await pause(30);
+    assert.deepEqual(
+      await evaluate(
+        "window.directoryRequests.filter(request=>request.cmd==='migrate_data_directory').at(-1).args",
+      ),
+      { ticket: 'synthetic-ticket' },
+    );
+    assert.equal(
+      await evaluate("document.querySelector('.directory-confirm button').disabled"),
+      true,
+    );
+    assert(
+      (await evaluate("document.querySelector('.data-directory-settings').textContent")).includes(
+        '正在重启',
+      ),
+    );
+  });
+  await test('S1 恢复默认也先预检，选择期间锁定设置操作', async () => {
+    await storagePage();
+    await evaluate('window.holdDirectoryChoice=true');
+    await click('.data-directory-settings .directory-actions button:nth-child(2)');
+    await pause(30);
+    assert.equal(await evaluate("document.querySelector('.settings-back').disabled"), true);
+    await evaluate('window.releaseDirectoryChoice()');
+    await pause(30);
+    assert.equal(await evaluate('window.directoryRequests.at(-1).cmd'), 'restore_data_directory');
+    assert.equal(await evaluate("!!document.querySelector('.directory-confirm')"), true);
+    assert.equal(
+      await evaluate(
+        "window.directoryRequests.some(request=>request.cmd==='migrate_data_directory')",
+      ),
+      false,
+    );
+  });
+  for (const compact of [false, true]) {
+    await test('S1 恢复默认显示旧数据保留位置且取消不迁移 ' + compact, async () => {
+      await metrics(compact ? 390 : 1000);
+      await nav();
+      await appearance({ compact, theme: compact ? 'dark' : 'light' });
+      await evaluate(
+        "window.directoryStatus={...window.directoryStatus,enabled:true,displaced:'C:/合成已保留旧数据'};window.directoryPlan={ticket:'restore-ticket',source:'D:/current',target:'C:/default',bytes:1024,displaced:'C:/合成待保留旧数据'}",
+      );
+      await click('.settings-toggle');
+      await pause(80);
+      if (compact) await change('select[aria-label=设置分类]', 'storage');
+      else await click('.settings-nav button:nth-child(6)');
+      await click('.data-directory-settings .directory-actions button:nth-child(2)');
+      await pause(30);
+      assert.equal(
+        await evaluate("document.querySelector('[data-displaced-directory]').textContent"),
+        'C:/合成已保留旧数据',
+      );
+      assert.equal(
+        await evaluate("document.querySelector('[data-planned-backup]').textContent"),
+        'C:/合成待保留旧数据',
+      );
+      assert(
+        (await evaluate("document.querySelector('.directory-confirm').textContent")).includes(
+          '无需手工清空',
+        ),
+      );
+      assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
+      await capture('s1-restore-' + (compact ? 'compact' : 'normal'));
+      await click('.directory-confirm button:nth-child(2)');
+      assert.equal(
+        await evaluate(
+          "window.directoryRequests.some(request=>request.cmd==='migrate_data_directory')",
+        ),
+        false,
+      );
+    });
+  }
   await writeFile(
     path.join(out, 'results.json'),
     JSON.stringify(

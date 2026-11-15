@@ -10,6 +10,7 @@ mod clipboard;
 mod clipboard_diag;
 mod clipboard_owner;
 mod compact_preview;
+mod data_directory;
 mod diag;
 mod file_actions;
 mod file_status;
@@ -573,6 +574,10 @@ fn read_protocol_thumbnail(app: &tauri::AppHandle, id: &str) -> Option<Vec<u8>> 
 fn application_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            data_directory::commands::data_directory_status,
+            data_directory::commands::choose_data_directory,
+            data_directory::commands::restore_data_directory,
+            data_directory::commands::migrate_data_directory,
             get_settings,
             get_setting_options,
             set_hotkey_recording,
@@ -620,31 +625,37 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
         })
 }
 
-fn open_storage() -> anyhow::Result<(std::path::PathBuf, storage::Storage)> {
-    let root = platform::data_root()?;
-    diag::init(&root)?;
-    let key = platform::master_key(&root)?;
-    let storage = storage::Storage::open(&root, &key)?;
+fn open_storage() -> anyhow::Result<(data_directory::Session, storage::Storage)> {
+    let session = data_directory::Session::open()?;
+    let root = &session.root;
+    diag::init(root)?;
+    let key = platform::master_key(root)?;
+    let storage = storage::Storage::open(root, &key)?;
+    session.persist_location()?;
     // 迁移完成之后、runtime 启动之前扫描；维护失败只记录诊断。
     if let Err(e) = storage.scan_orphan_blobs() {
         diag::write(format!("startup orphan scan failed: {e}"));
     }
-    Ok((root, storage))
+    Ok((session, storage))
 }
 pub fn run() {
     let smoke = smoke_enabled(std::env::var("CLIPBOARD_M0_SMOKE").ok().as_deref());
     // 数据错误必须在进入 setup 前处理，避免被事件循环转成 panic。
     let data = open_storage();
-    let (root, storage) = match data {
+    let (session, storage) = match data {
         Ok(data) => data,
         Err(error) => startup_failed(&error, smoke),
     };
+    let root = session.root.clone();
+    let cache = session.cache.clone();
+    let control = session.control.clone();
     let result = application_builder()
         .setup(move |app| {
+            app.manage(control);
             let result = if smoke {
-                app_setup::initialize_smoke(app, storage, root)
+                app_setup::initialize_smoke(app, storage, root, cache)
             } else {
-                app_setup::initialize(app, storage, root)
+                app_setup::initialize(app, storage, cache)
             };
             result.map_err(Into::into)
         })
@@ -658,6 +669,7 @@ pub fn run() {
         }),
         Err(error) => startup_failed(&error, smoke),
     }
+    drop(session);
 }
 
 #[cfg(test)]

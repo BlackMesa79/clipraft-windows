@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import DataDirectorySettings from './DataDirectorySettings.vue';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
 import {
   shortcutLabel,
@@ -32,8 +33,12 @@ const categories = [
   { id: 'history', label: '历史记录' },
   { id: 'privacy', label: '隐私' },
   { id: 'hotkeys', label: '快捷键' },
+  { id: 'storage', label: '数据存储' },
 ];
 const category = ref('general');
+const unsavedSettings = computed(
+  () => JSON.stringify(draft.value) !== JSON.stringify(original.value),
+);
 const {
   recordingField,
   recordOperations,
@@ -385,6 +390,7 @@ onUnmounted(() => {
           ><button
             v-for="entry in categories"
             :key="entry.id"
+            :disabled="busy"
             type="button"
             :aria-current="category === entry.id ? 'page' : undefined"
             @click="category = entry.id"
@@ -434,6 +440,14 @@ onUnmounted(() => {
             <p class="detail-note"
               >普通与紧凑模式共用；只在唤出时定位。空间不足时约束在当前屏幕工作区内。</p
             >
+          </fieldset>
+          <fieldset :disabled="busy" v-show="category === 'storage'" data-category="storage">
+            <legend>数据存储</legend>
+            <DataDirectorySettings
+              :disabled="busy"
+              :unsaved="unsavedSettings"
+              @busy="busy = $event"
+            />
           </fieldset>
           <fieldset :disabled="busy" v-show="category === 'history'" data-category="history">
             <legend>历史记录</legend>
@@ -703,7 +717,7 @@ onUnmounted(() => {
   padding: 7px;
   min-width: 0;
 }
-.settings-view button {
+.settings-view :deep(button) {
   border: 1px solid var(--line);
   border-radius: 5px;
   background: var(--select);
@@ -711,7 +725,7 @@ onUnmounted(() => {
   padding: 6px 12px;
   cursor: pointer;
 }
-.settings-view button:disabled {
+.settings-view :deep(button:disabled) {
   opacity: 0.5;
   cursor: default;
 }

@@ -5,8 +5,25 @@ export const settingsMock = `(() => {
   const range=(min,max,step=1)=>({min,max,step});
   const options={defaults,ranges:{max_items:range(10,100000),max_bytes:range(10485760,107374182400),max_days:range(0,3650),sensitive_ttl_minutes:range(0,1440),quick_visible_count:range(3,15)},main_hotkeys:[key('alt_v','Alt + V'),key('ctrl_alt_v','Ctrl + Alt + V'),key('win_alt_v','Win + Alt + V'),key('ctrl_backtick','Ctrl + \u0060')],quick_hotkeys:[key('ctrl_shift_v','Ctrl + Shift + V','Ctrl + Shift'),key('ctrl_alt_shift_v','Ctrl + Alt + Shift + V','Ctrl + Alt + Shift'),key('alt_shift_v','Alt + Shift + V','Alt + Shift')],bytes_per_mb:1048576,ignored_apps_max:256};
   window.settings=JSON.parse(JSON.stringify(defaults)); window.settingUpdates=[];window.cleanupPreviews=[];window.hotkeyChecks=[];
+  window.directoryStatus={current:'D:/synthetic/current',default:'D:/synthetic/default',custom:true,enabled:false,previous:null};
+  window.directoryRequests=[];
   const invoke=window.__TAURI_INTERNALS__.invoke;
   window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
+    if(cmd==='data_directory_status'){
+      if(window.failDirectoryStatus)throw Error('合成目录状态失败');
+      return JSON.parse(JSON.stringify(window.directoryStatus));
+    }
+    if(cmd==='choose_data_directory'||cmd==='restore_data_directory'){
+      window.directoryRequests.push({cmd,args});
+      if(window.failDirectoryChoice)throw Error('目标目录非空');
+      if(window.holdDirectoryChoice)await new Promise(resolve=>window.releaseDirectoryChoice=resolve);
+      return window.directoryPlan??null;
+    }
+    if(cmd==='migrate_data_directory'){
+      window.directoryRequests.push({cmd,args});
+      if(window.failDirectoryMigration)throw Error('目标目录正被另一实例使用');
+      return;
+    }
     if(cmd==='sync_main_layout')return;
     if(cmd==='get_settings')return JSON.parse(JSON.stringify(window.settings));
     if(cmd==='get_setting_options')return options;

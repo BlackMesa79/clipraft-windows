@@ -9,9 +9,9 @@ use std::{
 };
 use tauri::{Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-pub(crate) fn initialize(app: &mut tauri::App, storage: Storage, root: PathBuf) -> Result<()> {
+pub(crate) fn initialize(app: &mut tauri::App, storage: Storage, cache: PathBuf) -> Result<()> {
     let state = runtime::start(app.handle().clone(), storage, false)?;
-    create_windows(app, &state, &root)?;
+    create_windows(app, &state, &cache)?;
     app_tray::create(app)
 }
 
@@ -19,10 +19,11 @@ pub(crate) fn initialize_smoke(
     app: &mut tauri::App,
     mut storage: Storage,
     root: PathBuf,
+    cache: PathBuf,
 ) -> Result<()> {
     app_smoke::seed(&mut storage)?;
     let state = runtime::start(app.handle().clone(), storage, true)?;
-    create_windows(app, &state, &root)?;
+    create_windows(app, &state, &cache)?;
     app_smoke::start_report(app.handle().clone(), state, root)
 }
 
@@ -62,7 +63,8 @@ fn create_main(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
             .decorations(false)
             .inner_size(1000.0, 700.0)
             .visible(false)
-            .data_directory(root.join("webview"))
+            .focused(false)
+            .data_directory(root.to_path_buf())
             .build()?,
     )
 }
@@ -85,7 +87,7 @@ fn create_preview(app: &tauri::App, main: &WebviewWindow, root: &Path) -> Result
     .decorations(false)
     .skip_taskbar(true)
     .resizable(false)
-    .data_directory(root.join("webview"))
+    .data_directory(root.to_path_buf())
     .build()?;
     platform::prepare_preview(preview.hwnd()?.0 as isize)?;
     for event in ["main-hidden", "history-changed"] {
@@ -112,7 +114,7 @@ fn create_quick(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
     .always_on_top(true)
     .skip_taskbar(true)
     .resizable(false)
-    .data_directory(root.join("webview"))
+    .data_directory(root.to_path_buf())
     .build()?;
     // 忽略鼠标命中，避免 WebView 子窗口激活。
     quick.set_ignore_cursor_events(true)?;
