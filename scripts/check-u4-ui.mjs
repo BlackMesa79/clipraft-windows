@@ -454,6 +454,66 @@ try {
     );
     check(`${theme}：错误提示图标/标题/正文分层、阴影空间与长消息限高`);
   }
+  const stable = payload({
+    session: 60,
+    visible_count: 4,
+    selected: 2,
+    position: 220,
+    items: Array.from({ length: 4 }, (_, i) => row('u5-' + i)),
+  });
+  await emit(stable);
+  await evaluate(
+    "window.emitEvent('settings-changed',{...window.settings,theme:'dark',layout:'cards',compact:true,quick_visible_count:15})",
+  );
+  await pause(60);
+  assert.equal(await selected(), 'u5-2');
+  assert.equal(await evaluate("document.querySelectorAll('.wheel-card').length"), 4);
+  assert.equal(
+    await evaluate("window.calls.filter(c=>c.cmd==='resize_quick').at(-1).args.height"),
+    408,
+  );
+  check('U5 主窗口布局/条数设置变化不重排活动quick会话或修改其固定几何');
+  await emit(payload({ session: 60, visible_count: 4, loading: true, items: [], selected: 0 }));
+  await emit(stable);
+  assert.equal(await evaluate("document.querySelectorAll('.wheel-card').length"), 0);
+  await emit(
+    payload({
+      session: 60,
+      visible_count: 4,
+      selected: 0,
+      items: [
+        row('u5-sensitive', { summary: '••••••', sensitive: true, thumbnail: 'must-not-load' }),
+      ],
+    }),
+  );
+  assert.equal(await selected(), 'u5-sensitive');
+  assert(!(await evaluate("window.imageRequests.includes('must-not-load')")));
+  assert(!(await evaluate("document.body.textContent.includes('合成记录 u5-2')")));
+  check('U5 设置变化后安全失效立即清除正文，旧事件不复活摘要，敏感缩略图不读取');
+  const notice = payload({ session: 60, visible: false, items: [], error: '合成删除/到期失败' });
+  await emit(notice);
+  await emit(
+    payload({
+      session: 61,
+      total: 1,
+      position: 0,
+      selected: 0,
+      visible_count: 15,
+      items: [row('u5-reopened')],
+    }),
+  );
+  await emit(notice);
+  assert.equal(await selected(), 'u5-reopened');
+  assert.equal(await evaluate("document.querySelector('.notice-only')"), null);
+  const reopenedSize = await evaluate("window.calls.filter(c=>c.cmd==='resize_quick').at(-1).args");
+  assert.deepEqual(reopenedSize, { height: 1168, notice: false, session: 61 });
+  assert.equal(
+    await evaluate(
+      "window.calls.filter(c=>['paste_item','reveal_item','item_detail','list_items','sync_main_layout'].includes(c.cmd)).length",
+    ),
+    0,
+  );
+  check('U5 失败提示后重开单条新会话，旧notice不覆盖选择/几何，不调用主窗或粘贴IPC');
   const result = {
     passed: checks.length,
     failed: 0,

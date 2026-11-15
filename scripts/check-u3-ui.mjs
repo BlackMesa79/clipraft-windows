@@ -105,7 +105,7 @@ try {
         window.calls.push({cmd,args});
         if(cmd==='plugin:event|listen'){events.set(args.event,args.handler);return id;}
         if(cmd==='panel_state')return new Promise(resolve=>{window.resolveInitial=resolve;});
-        if(cmd==='frontend_ready'){window.ready=true;return;}
+        if(cmd==='frontend_ready'){window.ready=true;return true;}
         return 1;
       }
     };
@@ -260,6 +260,14 @@ try {
     0,
   );
   check('前端只展示后端状态，不自行分页取原文或按局部下标粘贴');
+  await pause(80);
+  const diagnostics = await evaluate(
+    "window.calls.filter(call=>call.cmd==='panel_diagnostic').map(call=>call.args)",
+  );
+  assert(diagnostics.some((row) => row.stage === 'received'));
+  assert(diagnostics.some((row) => row.stage === 'frame'));
+  assert(diagnostics.every((row) => Object.keys(row).sort().join(',') === 'serial,session,stage'));
+  check('诊断启用时仅上报收到/帧状态编号，无记录ID、正文或错误内容');
   const result = {
     passed: checks.length,
     failed: 0,

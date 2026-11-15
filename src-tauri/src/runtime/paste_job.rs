@@ -17,6 +17,7 @@ struct PasteTask<'a> {
     request: PasteRequest,
     intent: paster::PasteIntent<'a>,
     clip: Option<Clip>,
+    expected_focus: Option<paster::focus_restore::Target>,
 }
 
 impl PasteTask<'_> {
@@ -70,12 +71,20 @@ impl PasteTask<'_> {
         )
     }
 
-    fn prepare(&self) -> Result<()> {
-        let main = self.state.main.load(Ordering::Acquire);
-        if self.request.restore {
-            return paster::prepare_restored_target(self.request.target, main);
+    fn prepare(&self) -> Result<paster::PasteStatus> {
+        if !self.intent.is_current() {
+            return Ok(paster::PasteStatus::Superseded);
         }
-        paster::prepare_current_target(self.request.target, main)
+        let main = self.state.main.load(Ordering::Acquire);
+        if !self.request.restore {
+            paster::prepare_current_target(self.request.target, main)?;
+            return Ok(paster::PasteStatus::Complete);
+        }
+        paster::prepare_restored_target(self.request.target, main)?;
+        match self.expected_focus {
+            Some(target) => paster::focus_restore::wait_ready(target, &self.intent),
+            None => Ok(paster::PasteStatus::Complete),
+        }
     }
 
     fn step(&mut self, stage: paster::PasteStage) -> Result<paster::PasteStatus> {
@@ -86,8 +95,23 @@ impl PasteTask<'_> {
                 diag::snapshot("before_wait");
                 return paster::wait_for_release(&self.intent);
             }
-            paster::PasteStage::Prepare => self.prepare()?,
-            paster::PasteStage::Inject => return paster::inject(self.request.target, &self.intent),
+            paster::PasteStage::Prepare => {
+                diag::focus::snapshot(
+                    "before_prepare",
+                    self.request.target,
+                    self.request.generation,
+                );
+                let prepared = self.prepare();
+                diag::focus::snapshot(
+                    "after_prepare",
+                    self.request.target,
+                    self.request.generation,
+                );
+                return prepared;
+            }
+            paster::PasteStage::Inject => {
+                return paster::inject(self.request.target, &self.intent, self.expected_focus)
+            }
             paster::PasteStage::Touch => self
                 .state
                 .storage
@@ -100,11 +124,35 @@ impl PasteTask<'_> {
 }
 
 pub(super) fn run(app: &AppHandle, state: &State, request: PasteRequest) {
+    if diag::enabled() {
+        diag::write(format!(
+            "paste_request generation={} restore={} plain={} target=0x{:X}",
+            request.generation, request.restore, request.plain, request.target
+        ));
+    }
+    let expected_focus = match request.restore {
+        true => match state.target_focus.lock() {
+            Ok(focus) => focus.filter(|focus| focus.window() == request.target),
+            Err(error) => {
+                super::report(app, state, &format!("输入焦点状态不可用：{error}"));
+                return;
+            }
+        },
+        false => None,
+    };
+    if diag::enabled() {
+        diag::write(format!(
+            "paste_focus generation={} captured={}",
+            request.generation,
+            expected_focus.is_some()
+        ));
+    }
     let mut task = PasteTask {
         state,
         intent: paster::PasteIntent::new(&PASTE_GENERATION, request.generation),
         request,
         clip: None,
+        expected_focus,
     };
     let intent = paster::PasteIntent::new(&PASTE_GENERATION, task.request.generation);
     let result = paster::run_paste(&intent, |stage| task.step(stage));
@@ -151,6 +199,7 @@ mod tests {
             request: request(),
             intent: paster::PasteIntent::new(&generation, 7),
             clip: None,
+            expected_focus: None,
         };
         let mut visited = Vec::new();
         let intent = paster::PasteIntent::new(&generation, 7);
@@ -181,6 +230,7 @@ mod tests {
             request: request(),
             intent: paster::PasteIntent::new(&generation, 7),
             clip: None,
+            expected_focus: None,
         };
         task.report_failure(anyhow!("synthetic failure"));
         assert!(

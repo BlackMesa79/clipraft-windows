@@ -950,10 +950,13 @@ onMounted(async () => {
         startupError.value = payload;
       }),
     );
-    [settings.value, settingOptions.value] = await Promise.all([
+    const [initialSettings, options] = await Promise.all([
       invoke<Settings>('get_settings'),
       invoke<SettingOptions>('get_setting_options'),
     ]);
+    // 初始化等待期间可能已收到保存事件，不能用旧快照覆盖新设置。
+    settings.value ??= initialSettings;
+    settingOptions.value = options;
     startupError.value = (await invoke<string | null>('startup_error')) ?? '';
     await loadGroups();
     await load();

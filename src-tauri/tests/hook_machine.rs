@@ -383,3 +383,50 @@ fn reopen_after_cancel_and_after_commit() {
     let _ = press(&mut m, LSHIFT);
     assert_eq!(press(&mut m, VK_V).action, Some(Action::Open));
 }
+
+#[test]
+fn missed_main_hotkey_release_is_reconciled_before_first_quick_press() {
+    let mut baseline = Machine::default();
+    baseline.step(0xA4, true, false, true);
+    baseline.step(0x56, true, false, true);
+    baseline.step(0xA4, false, false, true);
+    baseline.step(0xA2, true, false, true);
+    baseline.step(0xA0, true, false, true);
+    assert_eq!(
+        baseline.step(0x56, true, false, true).action,
+        None,
+        "未校正时重现日志中的首次无反应"
+    );
+    let mut machine = Machine::default();
+    machine.step(0xA4, true, false, true);
+    assert_eq!(machine.step(0x56, true, false, true).action, None);
+    machine.step(0xA4, false, false, true);
+    // 模拟 Alt+V 的真实 V-up 未进入状态机；新的 Ctrl 事件确认系统V已松开。
+    assert!(machine.reconcile_trigger_release(0x56, false));
+    machine.step(0xA2, true, false, true);
+    machine.step(0xA0, true, false, true);
+    assert_eq!(
+        machine.step(0x56, true, false, true).action,
+        Some(Action::Open)
+    );
+}
+
+#[test]
+fn held_or_swallowed_trigger_is_never_reconciled_as_released() {
+    let mut machine = Machine::default();
+    machine.step(0x56, true, false, true);
+    assert!(!machine.reconcile_trigger_release(0x56, true));
+    assert!(!machine.reconcile_trigger_release(0x41, false));
+    machine.step(0x56, false, false, true);
+    machine.step(0xA2, true, false, true);
+    machine.step(0xA0, true, false, true);
+    assert_eq!(
+        machine.step(0x56, true, false, true).action,
+        Some(Action::Open)
+    );
+    assert!(!machine.reconcile_trigger_release(0x56, false));
+    machine.step(0x1B, true, false, true);
+    assert!(!machine.reconcile_trigger_release(0x56, false));
+    assert_eq!(machine.step(0x56, true, false, true).action, None);
+    assert!(machine.step(0x56, false, false, true).swallow);
+}

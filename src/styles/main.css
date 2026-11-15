@@ -1627,8 +1627,8 @@
 }
 .main-window .filter-label {
   flex: 0 0 24px;
-  color: var(--text);
-  font-weight: 600;
+  color: var(--muted);
+  font-weight: 400;
 }
 .main-window .kind-filters {
   min-width: 0;

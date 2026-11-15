@@ -3441,6 +3441,23 @@ try {
     assert.equal(await evaluate("document.querySelector('select[aria-label=快速面板背景]')"), null);
     await capture('card-shadow-settings');
   });
+  await test('K1 类型标签恢复普通样式且保留类型Tab', async () => {
+    for (const theme of ['light', 'dark']) {
+      for (const mode of ['list', 'cards', 'compact']) {
+        await k1Setup(mode);
+        await appearance({ theme });
+        const label = await evaluate(
+          "(()=>{const n=document.querySelector('.filter-label'),s=getComputedStyle(n),group=document.querySelector('.compact-groups');return {weight:s.fontWeight,color:s.color,groupColor:group?getComputedStyle(group).color:s.color,size:s.fontSize,tabs:document.querySelectorAll('.kind-filters button').length,selected:document.querySelectorAll('.kind-filters [aria-pressed=true]').length};})()",
+        );
+        assert.equal(label.weight, '400');
+        assert.equal(label.size, '12px');
+        assert.equal(label.color, label.groupColor);
+        assert.equal(label.tabs, 5);
+        assert.equal(label.selected, 1);
+        if (mode === 'compact') await capture('plain-type-label-' + theme);
+      }
+    }
+  });
   await writeFile(
     path.join(out, 'results.json'),
     JSON.stringify(

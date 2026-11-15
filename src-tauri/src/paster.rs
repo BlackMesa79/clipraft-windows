@@ -1,4 +1,5 @@
 use crate::{diag, hook::MODIFIER_KEYS, platform};
+pub(crate) mod focus_restore;
 use anyhow::{bail, Result};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -260,7 +261,11 @@ pub fn paste_events() -> [INPUT; 4] {
         key(0xA2, false),
     ]
 }
-pub fn inject(target: isize, intent: &PasteIntent<'_>) -> Result<PasteStatus> {
+pub(crate) fn inject(
+    target: isize,
+    intent: &PasteIntent<'_>,
+    restored: Option<focus_restore::Target>,
+) -> Result<PasteStatus> {
     // 准备焦点期间若又按下修饰键，仍按代号等待；只有真实超时才报错。
     if wait_for_release(intent)? == PasteStatus::Superseded {
         return Ok(PasteStatus::Superseded);
@@ -269,7 +274,11 @@ pub fn inject(target: isize, intent: &PasteIntent<'_>) -> Result<PasteStatus> {
         bail!("前台窗口已变化，已取消按键注入");
     }
     diag::snapshot("before_send");
-    // 紧邻系统调用再次检查，避免诊断快照期间的新 Open 被旧任务越过。
+    diag::focus::snapshot("before_send", target, intent.expected);
+    if let Some(restored) = restored {
+        focus_restore::verify(restored)?;
+    }
+    // 紧邻系统调用再次检查，避免诊断和焦点采样期间的新 Open 被旧任务越过。
     if !intent.is_current() {
         return Ok(PasteStatus::Superseded);
     }
@@ -284,6 +293,7 @@ pub fn inject(target: isize, intent: &PasteIntent<'_>) -> Result<PasteStatus> {
         let _ = send(&cleanup, "partial_release");
     }
     diag::snapshot("after_send");
+    diag::focus::snapshot("after_send", target, intent.expected);
     if sent != 4 {
         bail!("SendInput 未完整发送；可能受到目标权限或桌面限制");
     }

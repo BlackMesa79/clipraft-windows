@@ -129,6 +129,7 @@ try {
     const invokeWithSettings=window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke=async(cmd,args)=>{
       if(cmd==='get_settings'&&location.search.includes('fail=settings'))throw Error('合成 settings 失败');
+      if(cmd==='get_settings'&&location.search.includes('hold-settings')){const initial=await invokeWithSettings(cmd,args);return new Promise(resolve=>window.releaseInitialSettings=()=>resolve(initial));}
       return invokeWithSettings(cmd,args);
     };`,
   });
@@ -238,6 +239,10 @@ try {
   );
   assert(await evaluate("[...document.querySelectorAll('.item')].every(el=>el.tabIndex===-1)"));
   check('AC2 quick 无主窗口控件且不参与鼠标/Tab 交互');
+  assert.equal(
+    await evaluate("window.calls.filter(call=>call.cmd==='panel_diagnostic').length"),
+    0,
+  );
   assert(
     await evaluate(
       "document.querySelector('.sensitive-badge')&&document.querySelectorAll('img').length===0",
@@ -347,6 +352,25 @@ try {
     assert.equal(await evaluate('window.ready'), false);
     assert((await resizeCalls()).some((c) => c.notice === true));
     check('AC5 ' + fail + ' 初始化失败展示 notice 且不 ready');
+  }
+  for (const panel of ['quick', 'main']) {
+    await send('Page.navigate', { url: origin + '/?panel=' + panel + '&hold-settings' });
+    await until(
+      () => evaluate("typeof window.releaseInitialSettings==='function'"),
+      '初始设置请求未挂起',
+    );
+    await evaluate(
+      "window.emitEvent('settings-changed',{...window.settings,theme:'dark',layout:'cards',compact:true});window.releaseInitialSettings()",
+    );
+    await until(() => evaluate('window.ready===true'), '设置竞争后未就绪');
+    assert.equal(
+      await evaluate('document.documentElement.dataset.theme'),
+      'dark',
+      '迟到初始设置不应覆盖更新事件：' + panel,
+    );
+    if (panel === 'main')
+      assert(await evaluate("!!document.querySelector('.main-window.compact')"));
+    check('U5 ' + panel + '：初始化设置迟到不覆盖已到达的最新主题/布局');
   }
   await writeFile(
     path.join(out, 'results.json'),

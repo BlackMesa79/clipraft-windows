@@ -111,6 +111,11 @@ fn show(
 ) -> Result<()> {
     new_paste_intent();
     update_error(state, None)?;
+    *state
+        .target_focus
+        .lock()
+        .map_err(|_| anyhow!("输入焦点状态不可用"))? =
+        crate::paster::focus_restore::capture(request.external);
     state.target.store(request.external, Ordering::Release);
     diag::modifier_snapshot("toggle", "before_show");
     platform::arm_main_menu_guard();
@@ -192,11 +197,22 @@ pub(super) fn show_quick(
     let size = crate::quick_geometry::dimensions(count)?;
     let shared = state.clone();
     let handle = app.clone();
+    diag::focus::quick_window("show_queued", quick, generation);
     on_main(app, move || {
+        diag::focus::quick_window("show_callback", quick, generation);
         if generation != paste_generation() {
+            diag::write(format!("quick_show generation={generation} result=stale"));
             return;
         }
-        if let Err(error) = platform::show_quick(quick, target, size) {
+        let shown = platform::show_quick(quick, target, size);
+        diag::focus::quick_window("show_return", quick, generation);
+        if diag::enabled() {
+            diag::write(format!(
+                "quick_show generation={generation} result_ok={}",
+                shown.is_ok()
+            ));
+        }
+        if let Err(error) = shown {
             if let Err(error) = shared
                 .control
                 .send(Control::Hook(hook::Action::Cancel, generation))

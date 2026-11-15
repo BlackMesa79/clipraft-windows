@@ -112,6 +112,9 @@ impl Controller {
     }
 
     fn action(&mut self, action: Action, generation: u64) -> Result<()> {
+        if diag::enabled() {
+            diag::write(format!("panel_action action={action:?} generation={generation} current={} session={} visible={}",paste_generation(),self.panel.session,self.panel.visible));
+        }
         if generation != paste_generation() {
             return Ok(());
         }
@@ -127,11 +130,23 @@ impl Controller {
         update_error(&self.state, None)?;
         self.target = platform::foreground();
         if !platform::valid_external(self.target) {
+            diag::write(format!(
+                "panel_open generation={generation} result=invalid_target"
+            ));
             return self.close();
         }
         if let Err(error) = self.start_session() {
+            diag::write(format!(
+                "panel_open generation={generation} result=start_failed"
+            ));
             self.close()?;
             return self.show_report(error.to_string(), Some(generation));
+        }
+        if diag::enabled() {
+            diag::write(format!(
+                "panel_open generation={generation} session={} visible={} loading={} total={}",
+                self.panel.session, self.panel.visible, self.panel.loading, self.panel.total
+            ));
         }
         if !self.panel.visible {
             return self.close();

@@ -76,6 +76,13 @@ fn run(reply: SyncSender<Result<()>>) {
         }
     };
     registration.publish_thread();
+    if crate::diag::enabled() {
+        crate::diag::write(format!(
+            "hook_started thread={} receiver={}",
+            THREAD.load(Ordering::Acquire),
+            RECEIVER.load(Ordering::Acquire)
+        ));
+    }
     crate::app_events::record(
         "hook thread failed",
         serve(reply, registration, || message_loop(read_message, dispatch)),

@@ -70,6 +70,7 @@ fn clip(text: &str) -> crate::model::Clip {
 pub(in crate::runtime) fn check_integration(app: &AppHandle) {
     let mut harness = Harness::new(app);
     selection_and_commit(&mut harness);
+    visible_count_changes_only_on_reopen(&mut harness);
     frozen_order_and_reopen(&mut harness);
     sensitive_and_deletion(&mut harness);
     delayed_result_and_reopen(&mut harness);
@@ -282,4 +283,25 @@ fn index_and_mutation_reject_open(harness: &mut Harness) {
         .to_string()
         .contains("合成索引失败"));
     assert!(harness.controller.coordinator.is_none());
+}
+
+fn visible_count_changes_only_on_reopen(harness: &mut Harness) {
+    let state = harness.controller.state.clone();
+    state.settings.lock().unwrap().quick_visible_count = 4;
+    harness.controller.start_session().unwrap();
+    harness.settle();
+    let session = harness.controller.panel.session;
+    state.settings.lock().unwrap().quick_visible_count = 15;
+    harness.controller.navigate(Action::Next).unwrap();
+    harness.settle();
+    assert_eq!(harness.controller.panel.session, session);
+    assert_eq!(harness.controller.panel.visible_count, 4);
+    assert_eq!(harness.controller.panel.items.len(), 4);
+    harness.controller.close().unwrap();
+    harness.controller.start_session().unwrap();
+    harness.settle();
+    assert!(harness.controller.panel.session > session);
+    assert_eq!(harness.controller.panel.visible_count, 15);
+    assert_eq!(harness.controller.panel.items.len(), 15);
+    assert_eq!(harness.selected_id(), harness.ids[1]);
 }

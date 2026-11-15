@@ -335,6 +335,19 @@ impl Machine {
             key | (u32::from(mods) << 8)
         })
     }
+    /// 只在另一真实修饰键事件中采样；不能用被吞掉的触发键异步状态误判长按已释放。
+    pub fn reconcile_trigger_release(&mut self, key: u32, system_down: bool) -> bool {
+        if self.active || key != self.shortcut.key || system_down {
+            return false;
+        }
+        let index = key as usize;
+        if self.swallowed[index] || !self.down[index] {
+            return false;
+        }
+        self.down[index] = false;
+        true
+    }
+
     pub fn seed(&mut self, bits: u16) {
         for (i, k) in MODIFIER_KEYS.iter().enumerate() {
             self.down[*k as usize] = bits & (1 << i) != 0;

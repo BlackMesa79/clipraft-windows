@@ -209,6 +209,8 @@ pub fn startup_failure(message: &str) {
     }
 }
 
+pub mod focus;
+pub mod trigger;
 mod writer;
 
 #[cfg(test)]

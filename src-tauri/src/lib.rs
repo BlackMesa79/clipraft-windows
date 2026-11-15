@@ -453,7 +453,7 @@ fn last_error(state: tauri::State<'_, Arc<State>>) -> Result<Option<String>, Str
 fn frontend_ready(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<State>>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if window.label() == "quick" {
         let has_items =
             !state.smoke && !state.items.lock().map_err(|_| "面板条目不可用")?.is_empty();
@@ -468,6 +468,36 @@ fn frontend_ready(
                 .inspect_err(|_| state.settings_requested.store(true, Ordering::Release))
                 .map_err(|error| error.to_string())?;
         }
+    }
+    if diag::enabled() {
+        diag::write(format!(
+            "frontend_ready window={} hook_ready={}",
+            window.label(),
+            hook::READY.load(Ordering::Acquire)
+        ));
+    }
+    Ok(diag::enabled())
+}
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+enum PanelDiagnosticStage {
+    Received,
+    Frame,
+}
+#[tauri::command]
+fn panel_diagnostic(
+    window: tauri::WebviewWindow,
+    stage: PanelDiagnosticStage,
+    serial: u64,
+    session: u64,
+) -> Result<(), String> {
+    if window.label() != "quick" {
+        return Err("仅快速面板可报告诊断".into());
+    }
+    if diag::enabled() {
+        diag::write(format!(
+            "panel_frontend stage={stage:?} serial={serial} session={session}"
+        ));
     }
     Ok(())
 }
@@ -608,6 +638,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             resize_quick,
             last_error,
             frontend_ready,
+            panel_diagnostic,
             thumbnail_loaded,
             preview_loaded,
             paste_item,

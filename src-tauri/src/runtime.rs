@@ -181,6 +181,7 @@ pub struct State {
     pub jobs: SyncSender<Job>,
     pub control: Sender<Control>,
     pub target: AtomicIsize,
+    pub target_focus: Mutex<Option<paster::focus_restore::Target>>,
     pub main: AtomicIsize,
     pub quick: AtomicIsize,
     pub ready: AtomicBool,
@@ -326,6 +327,17 @@ fn publish(app: &AppHandle, state: &State, panel: &Panel) -> Result<()> {
     history_gate::sanitize(&mut panel, *stamp);
     panel.serial = state.panel_serial.fetch_add(1, Ordering::AcqRel) + 1;
     *state.panel.lock().map_err(|_| anyhow!("面板快照不可用"))? = panel.clone();
+    if diag::enabled() {
+        diag::write(format!(
+            "panel_publish serial={} session={} visible={} loading={} items={} error={}",
+            panel.serial,
+            panel.session,
+            panel.visible,
+            panel.loading,
+            panel.items.len(),
+            panel.error.is_some()
+        ));
+    }
     app.emit_to("quick", "panel-state", &panel)?;
     Ok(())
 }
@@ -477,6 +489,7 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         jobs: jobs.clone(),
         control: control.clone(),
         target: AtomicIsize::new(0),
+        target_focus: Mutex::new(None),
         main: AtomicIsize::new(0),
         quick: AtomicIsize::new(0),
         ready: AtomicBool::new(false),

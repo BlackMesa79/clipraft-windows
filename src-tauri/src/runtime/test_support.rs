@@ -71,6 +71,7 @@ pub(super) fn state(root: &std::path::Path) -> State {
         jobs: mpsc::sync_channel(1).0,
         control: mpsc::channel().0,
         target: AtomicIsize::new(0),
+        target_focus: Mutex::new(None),
         main: AtomicIsize::new(0),
         quick: AtomicIsize::new(0),
         ready: AtomicBool::new(false),

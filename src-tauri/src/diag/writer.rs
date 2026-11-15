@@ -71,6 +71,12 @@ fn write_message(
     if message.message == KEY_MESSAGE {
         write_key(writer, message)?;
     }
+    if matches!(
+        message.message,
+        trigger::TRIGGER_MESSAGE | trigger::DISPATCH_MESSAGE | trigger::RECONCILE_MESSAGE
+    ) {
+        trigger::write(writer, message)?;
+    }
     while let Ok((time, text)) = pending.try_recv() {
         writeln!(writer, "t_ms={time} {text}")?;
     }

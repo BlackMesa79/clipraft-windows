@@ -7,6 +7,7 @@ struct HookEvent {
     down: bool,
     injected: bool,
     logical: u16,
+    trigger_sample: Option<(u32, bool)>,
 }
 
 pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -20,6 +21,7 @@ pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -
         down: w.0 == WM_KEYDOWN as usize || w.0 == WM_SYSKEYDOWN as usize,
         injected: keyboard.flags.contains(LLKHF_INJECTED),
         logical: crate::paster::logical(),
+        trigger_sample: trigger_sample(keyboard.vkCode, keyboard.flags.contains(LLKHF_INJECTED)),
     };
     PHYSICAL.store(
         corrected_modifiers(
@@ -43,6 +45,18 @@ pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -
     CallNextHookEx(None, code, w, l)
 }
 
+fn trigger_sample(key: u32, injected: bool) -> Option<(u32, bool)> {
+    if injected
+        || !MODIFIER_KEYS
+            .iter()
+            .any(|modifier| u32::from(*modifier) == key)
+    {
+        return None;
+    }
+    let trigger = read_shortcut(&SHORTCUT).key;
+    Some((trigger, unsafe { GetAsyncKeyState(trigger as i32) } < 0))
+}
+
 fn process_event(state: &mut Machine, event: &HookEvent) -> bool {
     if CANCEL_PANEL.swap(false, Ordering::AcqRel) {
         state.cancel();
@@ -51,14 +65,20 @@ fn process_event(state: &mut Machine, event: &HookEvent) -> bool {
     if reserved && !state.active {
         state.shortcut = read_shortcut(&SHORTCUT);
     }
-    let was_down = event.key < 256 && state.down[event.key as usize];
     let session = RECORD_SESSION.load(Ordering::Acquire);
     let recording = recording() && session == RECORD_SESSION.load(Ordering::Acquire);
+    if !recording {
+        reconcile_trigger(state, event);
+    }
+    let was_down = event.key < 256 && state.down[event.key as usize];
+    let active_before = state.active;
+    let ready = READY.load(Ordering::Relaxed);
+    let trace_trigger = diagnostic_candidate(state, event);
     let mut decision = state.step_with_logical(
         event.key,
         event.down,
         event.injected,
-        reserved && !recording && READY.load(Ordering::Relaxed),
+        reserved && !recording && ready,
         event.logical,
     );
     if recording {
@@ -66,7 +86,34 @@ fn process_event(state: &mut Machine, event: &HookEvent) -> bool {
             decision = recorded;
         }
     }
+    if trace_trigger && crate::diag::enabled() {
+        crate::diag::trigger::record(crate::diag::trigger::Trigger {
+            down: event.down,
+            repeated: was_down,
+            active: active_before,
+            ready,
+            reserved,
+            recording,
+            held: held_modifiers(state.modifier_bits()),
+            expected: state.shortcut.modifiers,
+            action: decision.action,
+        });
+    }
     finish_event(state, event, &decision, reserved)
+}
+
+fn reconcile_trigger(state: &mut Machine, event: &HookEvent) {
+    if let Some((key, down)) = event.trigger_sample {
+        if state.reconcile_trigger_release(key, down) {
+            crate::diag::trigger::reconciled();
+        }
+    }
+}
+
+fn diagnostic_candidate(state: &Machine, event: &HookEvent) -> bool {
+    !event.injected
+        && event.key == state.shortcut.key
+        && (event.logical != 0 || state.modifier_bits() != 0 || state.active)
 }
 
 fn finish_event(
@@ -130,7 +177,7 @@ fn post_action(action: Action) -> bool {
     } else {
         crate::runtime::paste_generation()
     };
-    unsafe {
+    let accepted = unsafe {
         PostThreadMessageW(
             RECEIVER.load(Ordering::Relaxed),
             ACTION_MESSAGE,
@@ -138,12 +185,55 @@ fn post_action(action: Action) -> bool {
             LPARAM(generation as isize),
         )
         .is_ok()
-    }
+    };
+    crate::diag::trigger::dispatch(action, generation, accepted);
+    accepted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_candidates_exclude_plain_typing_and_injected_events() {
+        let state = Machine::default();
+        let mut event = HookEvent {
+            key: 0x56,
+            scan: 0,
+            down: true,
+            injected: false,
+            logical: 0,
+            trigger_sample: None,
+        };
+        assert!(!diagnostic_candidate(&state, &event));
+        event.logical = 1;
+        assert!(diagnostic_candidate(&state, &event));
+        event.key = 0x41;
+        assert!(!diagnostic_candidate(&state, &event));
+        event.key = 0x56;
+        event.injected = true;
+        assert!(!diagnostic_candidate(&state, &event));
+    }
+
+    #[test]
+    fn modifier_probe_repairs_only_matching_released_trigger() {
+        let mut state = Machine::default();
+        state.step(0xA4, true, false, true);
+        state.step(0x56, true, false, true);
+        let mut event = HookEvent {
+            key: 0xA2,
+            scan: 0,
+            down: true,
+            injected: false,
+            logical: 1,
+            trigger_sample: Some((0x41, false)),
+        };
+        reconcile_trigger(&mut state, &event);
+        assert!(state.down[0x56]);
+        event.trigger_sample = Some((0x56, false));
+        reconcile_trigger(&mut state, &event);
+        assert!(!state.down[0x56]);
+    }
 
     fn opened() -> Machine {
         let mut state = Machine::default();
@@ -167,6 +257,7 @@ mod tests {
             down: true,
             injected: false,
             logical: 5,
+            trigger_sample: None,
         };
         let panel =
             state.step_with_logical(event.key, event.down, event.injected, false, event.logical);

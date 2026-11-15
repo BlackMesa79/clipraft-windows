@@ -130,3 +130,27 @@ fn native_private_queue_drains_text_and_stops_on_quit() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn trigger_and_dispatch_messages_are_written_without_panel_window_gate() {
+    let (_send, pending) = mpsc::sync_channel(1);
+    let lost = AtomicU32::new(0);
+    let mut output = Vec::new();
+    let trigger = MSG {
+        message: trigger::TRIGGER_MESSAGE,
+        wParam: WPARAM(1 | (1 << 4) | (3 << 8) | (3 << 12)),
+        lParam: LPARAM(123),
+        ..Default::default()
+    };
+    write_message(&mut output, &trigger, &pending, &lost).unwrap();
+    let dispatch = MSG {
+        message: trigger::DISPATCH_MESSAGE,
+        wParam: WPARAM(hook::Action::Open as usize),
+        lParam: LPARAM(7),
+        ..Default::default()
+    };
+    write_message(&mut output, &dispatch, &pending, &lost).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("t_ms=123 quick_trigger down=true"));
+    assert!(text.contains("generation=7 action=Some(Open) accepted=false"));
+}

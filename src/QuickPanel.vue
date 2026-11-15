@@ -8,8 +8,11 @@ import UiIcon from './UiIcon.vue';
 import { createPanelState, type PanelState } from './panel';
 import { applyTheme, type Settings, type SettingOptions } from './settings';
 import './styles/quick.css';
+import { createPanelDiagnostics } from './panelDiagnostics';
 
 const { panel, applyPanel } = createPanelState();
+const diagnostics = createPanelDiagnostics();
+watch(panel, diagnostics.record, { flush: 'post' });
 const items = computed(() => panel.value.items);
 const error = ref('');
 watch(
@@ -67,17 +70,21 @@ onMounted(async () => {
         settings.value = payload;
       }),
     );
-    [settings.value, settingOptions.value] = await Promise.all([
+    const [initialSettings, options] = await Promise.all([
       invoke<Settings>('get_settings'),
       invoke<SettingOptions>('get_setting_options'),
     ]);
+    // 初始化等待期间可能已收到保存事件，不能用旧快照覆盖新设置。
+    settings.value ??= initialSettings;
+    settingOptions.value = options;
     applyPanel(await invoke<PanelState>('panel_state'));
-    await invoke('frontend_ready');
+    diagnostics.start(await invoke<boolean>('frontend_ready'), panel.value);
   } catch (e) {
     error.value = '初始化失败：' + String(e);
   }
 });
 onUnmounted(() => {
+  diagnostics.stop();
   window.removeEventListener('resize', updateViewport);
   panelObserver?.disconnect();
   stops.forEach((stop) => stop());
