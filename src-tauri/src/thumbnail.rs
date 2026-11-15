@@ -33,6 +33,11 @@ pub(crate) fn mosaic(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     );
     encode_image(masked, true).ok_or_else(|| anyhow::anyhow!("敏感图片预览编码失败"))
 }
+pub(crate) fn rich_image(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = decode_image(bytes)?;
+    let transparent = has_transparency(&image);
+    encode_image(image.thumbnail(1600, 2400), transparent)
+}
 const FILE_LIMIT: u64 = 50 * 1024 * 1024;
 /// 仅识别支持的图片签名，不根据 blob 名称推断格式。
 pub(crate) fn preview_mime(bytes: &[u8]) -> Option<&'static str> {

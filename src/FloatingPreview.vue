@@ -3,6 +3,8 @@ import { onMounted, onUnmounted, ref, watch, nextTick } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import PreviewImage from './PreviewImage.vue';
+import RichPreview from './RichPreview.vue';
+import type { RichPreview as RichContent } from './richPreview';
 import { kindLabel, type Item } from './history';
 import { applyTheme, type Settings } from './settings';
 import { createDetailImage } from './detailImage';
@@ -10,6 +12,7 @@ interface Content {
   generation?: number;
   item: Item;
   detail: {
+    rich?: RichContent;
     image?: number[];
     text: string;
     truncated: boolean;
@@ -142,7 +145,7 @@ onUnmounted(() => {
     >
       <template v-if="content">
         <header
-          ><span>{{ kindLabel(content.item) }}预览</span
+          ><span>{{ content.detail.rich ? '图文' : kindLabel(content.item) }}预览</span
           ><span v-if="content.item.sensitive">敏感内容 · 已打码</span
           ><span v-else>只读预览</span></header
         >
@@ -167,7 +170,14 @@ onUnmounted(() => {
               large
               @loaded="measureHeight"
             />
-            <pre v-if="content.detail.text" class="floating-text">{{ content.detail.text }}</pre>
+            <RichPreview
+              v-if="content.detail.rich"
+              :content="content.detail.rich"
+              @loaded="measureHeight"
+            />
+            <pre v-else-if="content.detail.text" class="floating-text">{{
+              content.detail.text
+            }}</pre>
             <ul v-if="content.detail.files.length" class="floating-files"
               ><li v-for="file in content.detail.files" :key="file.path"
                 >{{ file.path }}<small v-if="file.exists === false">源文件已不存在</small

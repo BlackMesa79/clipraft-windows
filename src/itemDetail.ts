@@ -1,9 +1,11 @@
 import { ref, type Ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { Item } from './history';
+import type { RichPreview } from './richPreview';
 import { createDetailImage } from './detailImage';
 
 interface Detail {
+  rich?: RichPreview;
   image?: number[];
   text: string;
   truncated: boolean;

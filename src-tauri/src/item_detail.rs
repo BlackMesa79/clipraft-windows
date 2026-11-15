@@ -1,3 +1,4 @@
+pub(crate) mod read;
 use crate::model;
 
 #[derive(Clone, serde::Serialize)]
@@ -12,6 +13,8 @@ pub(crate) struct ItemDetail {
     pub(crate) text: String,
     pub(crate) truncated: bool,
     pub(crate) files: Vec<FileDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rich: Option<crate::rich_preview::Preview>,
 }
 pub(crate) fn from_clip(clip: &model::Clip) -> ItemDetail {
     let full = clip.text().unwrap_or_default();
@@ -30,6 +33,7 @@ pub(crate) fn from_clip(clip: &model::Clip) -> ItemDetail {
         .collect();
     ItemDetail {
         image: None,
+        rich: crate::rich_preview::from_clip(clip),
         text,
         truncated,
         files,

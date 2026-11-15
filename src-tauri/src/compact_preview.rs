@@ -391,16 +391,8 @@ pub async fn sync_compact_preview(
 }
 
 fn load_content(shared: &State, id: &str, generation: u64) -> Result<Content, String> {
-    let storage = shared
-        .storage
-        .lock()
-        .map_err(|_| "存储不可用".to_string())?;
-    let item = storage
-        .preview_item(id)
-        .map_err(|_| "预览记录读取失败".to_string())?;
-    let detail = storage
-        .display_detail(id)
-        .map_err(|_| "预览内容读取失败".to_string())?;
+    let (item, detail) = crate::item_detail::read::display(&shared.storage, id)
+        .map_err(|_| "预览记录读取失败或状态已变化".to_string())?;
     Ok::<_, String>(Content {
         generation,
         item,
@@ -460,6 +452,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                rich: None,
                 image: None,
                 text: String::new(),
                 truncated: false,
@@ -523,6 +516,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                rich: None,
                 image: None,
                 text: String::new(),
                 truncated: false,
@@ -580,6 +574,7 @@ mod tests {
             generation: state.generation.load(Ordering::Acquire),
             item: ItemView::default(),
             detail: ItemDetail {
+                rich: None,
                 image: None,
                 text: "synthetic".into(),
                 truncated: false,
@@ -628,6 +623,7 @@ mod tests {
             generation,
             item: ItemView::default(),
             detail: ItemDetail {
+                rich: None,
                 image: None,
                 text: String::new(),
                 truncated: false,

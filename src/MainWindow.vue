@@ -12,6 +12,7 @@ async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './styles/main.css';
 import PreviewImage from './PreviewImage.vue';
+import RichPreview from './RichPreview.vue';
 import { createItemDetail } from './itemDetail';
 import { createCompactPreview } from './compactPreview';
 import HistoryList from './HistoryList.vue';
@@ -1213,7 +1214,7 @@ onUnmounted(() => {
                 ><button v-else type="button" @click="loadDetail">隐藏原文</button></div
               >
               <div class="detail-caption detail-header"
-                ><span>{{ kindLabel(active) }}预览</span
+                ><span>{{ detail?.rich ? '图文' : kindLabel(active) }}预览</span
                 ><button
                   type="button"
                   class="preview-refresh icon-button"
@@ -1267,8 +1268,11 @@ onUnmounted(() => {
               <p v-else-if="detailError" class="error" role="alert">{{ detailError }}</p>
               <template v-else-if="detail">
                 <template v-if="active.kind === 'text' || active.kind === 'rich'">
-                  <p v-if="detail.truncated" class="detail-note">仅显示前 20000 个字符</p>
-                  <pre class="text-detail">{{ detail.text || '此记录没有纯文本内容' }}</pre>
+                  <RichPreview v-if="detail.rich" :content="detail.rich" />
+                  <template v-else>
+                    <p v-if="detail.truncated" class="detail-note">仅显示前 20000 个字符</p>
+                    <pre class="text-detail">{{ detail.text || '此记录没有纯文本内容' }}</pre>
+                  </template>
                 </template>
                 <ul v-if="active.kind === 'files'" class="file-detail">
                   <li v-for="(file, index) in detail.files" :key="file.path"

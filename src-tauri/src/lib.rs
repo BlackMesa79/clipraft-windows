@@ -25,6 +25,7 @@ pub mod panel_neighborhood;
 pub mod panel_session;
 pub mod paster;
 pub mod platform;
+mod rich_preview;
 mod runtime;
 pub mod sensitive;
 pub mod settings;
@@ -326,12 +327,9 @@ async fn item_detail(
 ) -> Result<ItemDetail, String> {
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        shared
-            .storage
-            .lock()
-            .map_err(|_| "存储不可用")?
-            .display_detail(&id)
-            .map_err(|_| "记录读取失败".into())
+        item_detail::read::display(&shared.storage, &id)
+            .map(|(_, detail)| detail)
+            .map_err(|_| "记录读取失败或状态已变化".into())
     })
     .await
     .map_err(|_| "预览任务失败")?
@@ -347,12 +345,9 @@ async fn reveal_item(
     }
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        shared
-            .storage
-            .lock()
-            .map_err(|_| "存储不可用")?
-            .reveal_detail(&id)
-            .map_err(|_| "记录读取失败".into())
+        item_detail::read::reveal(&shared.storage, &id)
+            .map(|(_, detail)| detail)
+            .map_err(|_| "记录读取失败或状态已变化".into())
     })
     .await
     .map_err(|_| "显示原文任务失败")?

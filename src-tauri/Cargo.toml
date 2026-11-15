@@ -25,6 +25,9 @@ getrandom = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 zstd = { version = "0.13", default-features = false }
 pinyin = "0.10"
+# 复用锁文件中已有的 HTML5 解析器与编码库，预览只输出安全块。
+dom_query = "=0.28.0"
+base64 = "=0.23.1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

@@ -26,6 +26,7 @@ impl Storage {
                 .map(|bytes| crate::thumbnail::mosaic(&bytes))
                 .transpose()?;
             return Ok(ItemDetail {
+                rich: None,
                 image,
                 text: String::new(),
                 truncated: false,
@@ -86,6 +87,7 @@ fn masked_detail(clip: &Clip, json: &str) -> Result<ItemDetail> {
     let mut chars = masked.chars();
     let text = chars.by_ref().take(20000).collect();
     Ok(ItemDetail {
+        rich: None,
         image: None,
         text,
         truncated: chars.next().is_some(),

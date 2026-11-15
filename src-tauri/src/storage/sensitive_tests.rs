@@ -1409,3 +1409,45 @@ fn detail_reveal_keeps_corrupt_view_behavior_and_storage_state() {
     assert!(storage.display_detail("missing").is_err());
     assert!(storage.reveal_detail("missing").is_err());
 }
+
+#[test]
+fn rich_html_preview_is_hidden_until_reveal_and_payload_roundtrips() {
+    let fixture = Fixture::new();
+    let mut storage = fixture.open();
+    let clip = crate::model::Clip {
+        formats: vec![
+            crate::model::FormatData {
+                name: "CF_UNICODETEXT".into(),
+                bytes: "合成图文"
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            },
+            crate::model::FormatData {
+                name: "HTML Format".into(),
+                bytes: b"before<img src='file:///C:/synthetic/missing.png'>after".to_vec(),
+            },
+        ],
+    };
+    storage.save(&clip).unwrap();
+    let id = clip.hash();
+    assert!(storage.display_detail(&id).unwrap().rich.is_some());
+    storage
+        .set_sensitive(std::slice::from_ref(&id), true, 0)
+        .unwrap();
+    assert!(storage.display_detail(&id).unwrap().rich.is_none());
+    assert!(storage.reveal_detail(&id).unwrap().rich.is_some());
+    assert_eq!(storage.load(&id).unwrap().formats, clip.formats);
+    let shared = std::sync::Mutex::new(storage);
+    let (_, masked) = crate::item_detail::read::display(&shared, &id).unwrap();
+    assert!(masked.rich.is_none());
+    let (_, mut revealed) = crate::item_detail::read::reveal(&shared, &id).unwrap();
+    let preview = revealed.rich.take().unwrap();
+    assert!(serde_json::to_string(&preview)
+        .unwrap()
+        .contains("原图片已失效"));
+    assert!(!serde_json::to_string(&preview)
+        .unwrap()
+        .contains("C:/synthetic"));
+}

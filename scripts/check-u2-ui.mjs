@@ -3046,6 +3046,153 @@ try {
       });
     }
   }
+  const richSetup = async (mode = 'list') => {
+    await metrics(mode === 'compact' ? 390 : 1000);
+    await nav();
+    await appearance({ compact: mode === 'compact', layout: mode === 'cards' ? 'cards' : 'list' });
+    await evaluate(
+      `(()=>{const canvas=document.createElement('canvas');canvas.width=160;canvas.height=220;const context=canvas.getContext('2d');context.fillStyle='#277d77';context.fillRect(0,0,160,220);const image=canvas.toDataURL('image/png');window.b10Rich={blocks:[{kind:'text',text:'合成第一段 <script>不会执行</script>'},{kind:'image',src:image,message:null},{kind:'text',text:'合成第二段'},{kind:'image',src:image,message:null}],truncated:false,linked_images:true};window.rows=[{id:'rich',kind:'text',summary:'合成图文',formats:['CF_UNICODETEXT','HTML Format'],files:[]},{id:'plain',kind:'text',summary:'普通文本',formats:['CF_UNICODETEXT'],files:[]}];const invoke=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=async(cmd,args)=>{if(cmd==='item_detail'&&args.id==='rich'){if(window.b10Hold)return new Promise(resolve=>window.b10Release=()=>resolve({text:'纯文本回退',files:[],truncated:false,rich:window.b10Rich}));return {text:'纯文本回退',files:[],truncated:false,...(!window.rows[0].sensitive?{rich:window.b10Rich}:{})};}if(cmd==='reveal_item'&&args.id==='rich')return {text:'纯文本回退',files:[],truncated:false,rich:window.b10Rich};return invoke(cmd,args)};window.emitEvent('history-changed')})()`,
+    );
+    await until(
+      () => evaluate("document.querySelector('.item')?.dataset.id==='rich'"),
+      '图文记录未显示',
+    );
+  };
+  for (const mode of ['list', 'cards']) {
+    await test('B10 图文顺序与实际图片加载 ' + mode, async () => {
+      await richSetup(mode);
+      await until(
+        () =>
+          evaluate(
+            "document.querySelectorAll('.rich-preview img').length===2&&Array.from(document.querySelectorAll('.rich-preview img')).every(image=>image.complete&&image.naturalWidth>0)",
+          ),
+        '图文图片未渲染',
+      );
+      assert.deepEqual(
+        await evaluate(
+          "Array.from(document.querySelector('.rich-preview').children).slice(0,4).map(element=>element.tagName)",
+        ),
+        ['P', 'FIGURE', 'P', 'FIGURE'],
+      );
+      assert.equal(await evaluate("document.querySelectorAll('.rich-preview script').length"), 0);
+      assert(
+        (await evaluate("document.querySelector('.rich-preview').textContent")).includes(
+          '<script>不会执行</script>',
+        ),
+      );
+      assert.equal(await evaluate("document.querySelector('.text-detail')!==null"), false);
+      assert.equal(
+        await evaluate("document.querySelector('.detail-header').textContent.includes('图文预览')"),
+        true,
+      );
+      assert.equal(
+        await evaluate(
+          "Array.from(document.querySelectorAll('.rich-preview img')).every(image=>image.getBoundingClientRect().right<=document.querySelector('.detail').getBoundingClientRect().right)",
+        ),
+        true,
+      );
+      await capture('b10-rich-' + mode);
+    });
+  }
+  await test('B10 敏感图文未解锁不展示，显式解锁后展示并可重新隐藏', async () => {
+    await richSetup();
+    await evaluate("window.rows[0].sensitive=true;window.emitEvent('history-changed')");
+    await pause(100);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview img').length"), 0);
+    await evaluate("document.querySelector('.sensitive-actions button').click()");
+    await until(
+      () => evaluate("document.querySelectorAll('.rich-preview img').length===2"),
+      '显式解锁未显示',
+    );
+    await evaluate("document.querySelector('.sensitive-actions button').click()");
+    await pause(30);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview img').length"), 0);
+  });
+  await test('B10 失效和外链占位不产生浏览器资源请求', async () => {
+    await richSetup();
+    await evaluate(
+      "window.b10Rich={blocks:[{kind:'text',text:'保留文字'},{kind:'image',src:null,message:'原图片已失效'},{kind:'image',src:'https://invalid/remote.jpg',message:'外部图片未加载'}],truncated:true,linked_images:false};window.emitEvent('history-changed')",
+    );
+    await pause(90);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview img').length"), 0);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview figcaption').length"), 2);
+    assert(
+      (await evaluate("document.querySelector('.rich-preview').textContent")).includes(
+        '仅显示部分',
+      ),
+    );
+  });
+  await test('B10 切换记录清除图文，迟到详情不恢复旧图', async () => {
+    await richSetup();
+    await evaluate("window.b10Hold=true;window.emitEvent('history-changed')");
+    await until(() => evaluate("typeof window.b10Release==='function'"), '延迟详情未开始');
+    await click('[data-id="plain"]');
+    await evaluate('window.b10Release()');
+    await pause(70);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview').length"), 0);
+  });
+  await test('B10 紧凑浮窗图文与图片加载尺寸回报', async () => {
+    await richSetup('compact');
+    const rich = await evaluate('window.b10Rich');
+    await send('Page.navigate', { url: origin + '/?panel=preview' });
+    await until(() => evaluate("!!document.querySelector('.floating-preview')"), '浮窗未创建');
+    await pause(100);
+    await evaluate(
+      `window.emitEvent('compact-preview-changed',{generation:1,item:{id:'rich',kind:'text',summary:'合成图文',formats:['HTML Format'],files:[]},detail:{text:'纯文本回退',files:[],truncated:false,rich:${JSON.stringify(rich)}}})`,
+    );
+    await until(
+      () =>
+        evaluate(
+          "document.querySelectorAll('.rich-preview img').length===2&&Array.from(document.querySelectorAll('.rich-preview img')).every(image=>image.naturalWidth>0)",
+        ),
+      '浮窗图文未加载',
+    );
+    assert.equal(await evaluate("document.querySelectorAll('.floating-text').length"), 0);
+    await until(
+      () => evaluate("window.calls.some(call=>call.cmd==='resize_compact_preview')"),
+      '浮窗图片加载后未报告尺寸',
+    );
+    await capture('b10-floating');
+    await evaluate("window.emitEvent('compact-preview-changed',null)");
+    await pause(35);
+    assert.equal(await evaluate("document.querySelectorAll('.rich-preview img').length"), 0);
+  });
+  if (process.env.B10_REAL_FIXTURE_DIR) {
+    await test('B10 真实记录隔离副本实际渲染', async () => {
+      const content = JSON.parse(
+        await readFile(
+          path.join(process.env.B10_REAL_FIXTURE_DIR, 'resolved-preview.json'),
+          'utf8',
+        ),
+      );
+      await richSetup();
+      await evaluate(
+        `window.b10Rich=${JSON.stringify(content)};window.emitEvent('history-changed')`,
+      );
+      await until(
+        () =>
+          evaluate(
+            "document.querySelectorAll('.rich-preview img').length===2&&Array.from(document.querySelectorAll('.rich-preview img')).every(image=>image.complete&&image.naturalHeight>0)",
+          ),
+        '真实记录图片未完成渲染',
+      );
+      assert.equal(
+        await evaluate("document.querySelectorAll('.rich-preview .rich-text').length"),
+        2,
+      );
+      assert.equal(
+        await evaluate("document.querySelectorAll('.rich-preview figcaption').length"),
+        0,
+      );
+      assert.equal(
+        await evaluate(
+          "Array.from(document.querySelectorAll('.rich-preview img')).every(image=>image.getBoundingClientRect().right<=document.querySelector('.detail').getBoundingClientRect().right)",
+        ),
+        true,
+      );
+      await capture('b10-real-record');
+    });
+  }
   const storagePage = async (patch = {}) => {
     await nav();
     await evaluate(
