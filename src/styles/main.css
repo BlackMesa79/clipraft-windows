@@ -1620,3 +1620,64 @@
   opacity: 0.45;
   cursor: default;
 }
+
+/* 筛选名称与可选项分开，紧凑分组和类型共用同一列起点。 */
+.main-window .filter-row {
+  gap: 10px;
+}
+.main-window .filter-label {
+  flex: 0 0 24px;
+  color: var(--text);
+  font-weight: 600;
+}
+.main-window .kind-filters {
+  min-width: 0;
+  padding: 4px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.main-window .kind-filters button {
+  min-width: 60px;
+  padding: 5px 15px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.main-window .kind-filters button + button {
+  margin-left: 0;
+}
+.main-window .kind-filters button:hover:not(:disabled) {
+  background: var(--select);
+  color: var(--text);
+}
+.main-window .kind-filters button[aria-pressed='true'] {
+  background: var(--bg);
+  border-color: var(--line);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 3px #183c3712;
+}
+.main-window.compact .kind-filters {
+  padding: 3px;
+  gap: 0;
+}
+.main-window.compact .kind-filters button {
+  flex: 1;
+  min-width: max-content;
+  padding: 5px 6px;
+}
+.main-window .searchbox kbd {
+  font-size: 11px;
+  padding: 3px 6px;
+}
+.main-window.compact .compact-groups,
+.main-window.compact .filter-row {
+  gap: 10px;
+}
+.main-window .keyboard-hint {
+  min-width: 0;
+  white-space: normal;
+  line-height: 1.6;
+}

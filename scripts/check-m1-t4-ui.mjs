@@ -228,11 +228,14 @@ try {
     { id: 'item-0', plain: false },
     { id: 'item-0', plain: true },
   ]);
+  assert(await evaluate("document.activeElement.matches('.item')"));
+  await press('f', { ctrlKey: true });
+  assert(await evaluate("document.activeElement.matches('input[type=search]')"));
   assert.equal(await press('Delete'), true);
   assert.equal(await evaluate('window.deletes.length'), 0);
   assert.equal(await press('a', { ctrlKey: true }), true);
   assert.equal((await chosen()).length, 1);
-  checks.push('搜索框方向键/Enter/Shift+Enter 操作列表，非空 Delete 与 Ctrl+A 保留文本编辑');
+  checks.push('搜索框上下进入列表并可粘贴，Ctrl+F 返回搜索后 Delete 与 Ctrl+A 保留文本编辑');
   await evaluate(
     "document.querySelector('input').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))",
   );

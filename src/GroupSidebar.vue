@@ -105,7 +105,7 @@ async function remove() {
 </script>
 
 <template>
-  <nav class="group-sidebar" aria-label="历史视图与分组">
+  <nav class="group-sidebar" aria-label="历史视图与分组" title="Ctrl+↑/↓ 切换分组">
     <div class="group-scroll">
       <div class="group-views">
         <button
@@ -114,6 +114,7 @@ async function remove() {
             ['ungrouped', '未分组'],
           ] as const"
           :key="entry[0]"
+          :data-group-view="entry[0]"
           type="button"
           :aria-pressed="view === entry[0]"
           :disabled="disabled || saving || editing !== null || deleting !== null"
@@ -142,6 +143,7 @@ async function remove() {
           <button
             v-else
             class="colored-group"
+            :data-group-view="group.id"
             :style="groupColorStyle(group.id)"
             type="button"
             :aria-pressed="view === group.id"

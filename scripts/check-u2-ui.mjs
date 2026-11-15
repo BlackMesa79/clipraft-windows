@@ -831,7 +831,7 @@ try {
         "!!document.querySelector('.brand-mark svg')&&!!document.querySelector('.searchbox svg')&&!!document.querySelector('.group-views svg')",
       ),
     );
-    assert.equal(await evaluate("document.querySelector('.searchbox kbd').textContent"), 'Ctrl F');
+    assert.equal(await evaluate("document.querySelector('.searchbox kbd').textContent"), 'Ctrl+F');
     assert.equal(
       await evaluate("document.querySelector('.groups-heading').textContent"),
       '我的分组',
@@ -1513,7 +1513,7 @@ try {
     await evaluate("document.querySelector('.searchbox input').focus()");
     await key('ArrowDown', 40);
     await pause(40);
-    assert(await evaluate("document.activeElement.matches('input[type=search]')"));
+    assert(await evaluate("document.activeElement.matches('.item')"));
     await key('Enter', 13);
     await pause(50);
     assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='paste_item').length"), 3);
@@ -1542,7 +1542,7 @@ try {
     await pause(40);
     const after = await selected();
     assert.notEqual(after, before);
-    assert(await evaluate("document.activeElement.matches('input[type=search]')"));
+    assert(await evaluate("document.activeElement.matches('.item')"));
     await key('Enter', 13);
     await pause(40);
     assert.deepEqual(
@@ -2637,6 +2637,415 @@ try {
       assert.equal(await evaluate("document.querySelectorAll('.hotkey-problem').length"), 0);
     }
   });
+  const k1Key = async (name, modifiers = 0) => {
+    const virtualKeys = {
+      ArrowUp: 38,
+      ArrowDown: 40,
+      ArrowLeft: 37,
+      ArrowRight: 39,
+      Enter: 13,
+      Escape: 27,
+      f: 70,
+      Tab: 9,
+    };
+    for (const type of ['keyDown', 'keyUp']) {
+      await send('Input.dispatchKeyEvent', {
+        type,
+        key: name,
+        code: name === 'f' ? 'KeyF' : name,
+        windowsVirtualKeyCode: virtualKeys[name],
+        modifiers,
+      });
+    }
+  };
+  const k1Kind = () =>
+    evaluate(
+      "document.querySelector('.kind-filters button[aria-pressed=true]')?.textContent.trim()",
+    );
+  const k1Group = () =>
+    evaluate(
+      "document.querySelector('.compact-groups select')?.value ?? document.querySelector('.group-sidebar button[aria-pressed=true]')?.dataset.groupView",
+    );
+  const k1Setup = async (mode) => {
+    await metrics(mode === 'compact' ? 390 : 1000);
+    await nav();
+    await appearance({ compact: mode === 'compact', layout: mode === 'cards' ? 'cards' : 'list' });
+    await evaluate(`window.rows=[
+      {id:'k1-text-a',kind:'text',summary:'测试文本甲',formats:['CF_UNICODETEXT'],files:[],group_id:7},
+      {id:'k1-text-b',kind:'text',summary:'测试文本乙',formats:['CF_UNICODETEXT'],files:[],group_id:7},
+      {id:'k1-link',kind:'text',is_link:true,summary:'https://example.invalid/',formats:['CF_UNICODETEXT'],files:[],group_id:null},
+      {id:'k1-image',kind:'image',summary:'合成图片',formats:['PNG'],files:[],group_id:8},
+      {id:'k1-file',kind:'files',summary:'合成文件',formats:['CF_HDROP'],files:['C:/synthetic.txt'],group_id:null}
+    ];const base=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
+      if(cmd!=='list_items')return base(cmd,args);
+      window.calls.push({cmd,args});const f=args.filter??{};
+      const rows=window.rows.filter(r=>(!f.kind||(f.kind==='link'?r.is_link:r.kind===f.kind))&&(!f.query||r.summary.includes(f.query))&&(f.group_id==null||(f.group_id===-1?r.group_id==null:r.group_id===f.group_id))).slice(args.offset,args.offset+args.limit);
+      if(window.k1HoldLists)return new Promise(resolve=>window.k1Requests.push({filter:f,release:()=>resolve(rows)}));
+      return rows;
+    };window.emitEvent('history-changed')`);
+    await until(async () => (await selected()) === 'k1-text-a', 'K1 合成列表未就绪');
+    await evaluate("document.querySelector('.item').focus()");
+  };
+  for (const mode of ['list', 'cards', 'compact']) {
+    await test('K1 三布局左右类型循环及空态继续切换 ' + mode, async () => {
+      await k1Setup(mode);
+      const labels = ['文本', '图片', '文件', '链接', mode === 'compact' ? '全部类型' : '全部'];
+      for (const label of labels) {
+        await k1Key('ArrowRight');
+        await until(async () => (await k1Kind()) === label, '类型未切换 ' + label);
+        await pause(35);
+        assert(await evaluate("document.activeElement.matches('.item, .empty')"));
+        assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='paste_item').length"), 0);
+      }
+      await k1Key('ArrowLeft');
+      await pause(40);
+      assert.equal(await k1Kind(), '链接');
+      assert.equal(await selected(), 'k1-link');
+    });
+    await test('K1 三布局分组循环与类型条件保留 ' + mode, async () => {
+      await k1Setup(mode);
+      await k1Key('ArrowRight');
+      await pause(40);
+      for (const view of ['ungrouped', '7', '8', 'all']) {
+        await k1Key('ArrowDown', 2);
+        await until(async () => (await k1Group()) === view, '分组未切换 ' + view);
+        await pause(35);
+        assert.equal(await k1Kind(), '文本');
+        if (view === '8')
+          assert.equal(await evaluate("document.querySelectorAll('.item').length"), 0);
+      }
+      await k1Key('ArrowUp', 2);
+      await pause(40);
+      assert.equal(await k1Group(), '8');
+      await k1Key('ArrowRight');
+      await pause(40);
+      assert.equal(await selected(), 'k1-image');
+      assert.equal(await k1Group(), '8');
+    });
+    await test('K1 三布局搜索光标保护与进入列表返回搜索 ' + mode, async () => {
+      await k1Setup(mode);
+      await k1Key('f', 2);
+      await send('Input.insertText', { text: '测试文本' });
+      await pause(190);
+      await evaluate("document.querySelector('.searchbox input').setSelectionRange(1,1)");
+      await k1Key('ArrowRight');
+      assert.equal(await evaluate("document.querySelector('.searchbox input').selectionStart"), 2);
+      assert.equal(await k1Kind(), mode === 'compact' ? '全部类型' : '全部');
+      await evaluate("document.querySelector('.searchbox input').setSelectionRange(0,4)");
+      await k1Key('ArrowLeft');
+      assert.equal(await evaluate("document.querySelector('.searchbox input').selectionStart"), 0);
+      await k1Key('ArrowDown');
+      await pause(35);
+      assert.equal(await selected(), 'k1-text-b');
+      assert(await evaluate("document.activeElement.matches('.item')"));
+      await k1Key('ArrowRight');
+      await pause(35);
+      assert.equal(await k1Kind(), '文本');
+      assert.equal(await evaluate("document.querySelector('.searchbox input').value"), '测试文本');
+      assert.equal(await selected(), 'k1-text-a');
+      await k1Key('f', 2);
+      assert(await evaluate("document.activeElement.matches('input[type=search]')"));
+      await k1Key('ArrowDown', 2);
+      await pause(35);
+      assert.equal(await k1Group(), 'ungrouped');
+      assert.equal(await evaluate("document.querySelector('.searchbox input').value"), '测试文本');
+    });
+  }
+  await test('K1 空搜索左右切换，焦点控件保留与类型按钮跟随', async () => {
+    await k1Setup('list');
+    await k1Key('f', 2);
+    await k1Key('ArrowRight');
+    await pause(40);
+    assert.equal(await k1Kind(), '文本');
+    assert(await evaluate("document.activeElement.matches('input[type=search]')"));
+    await evaluate("document.querySelector('.kind-filters button[aria-pressed=true]').focus()");
+    await k1Key('ArrowRight');
+    await pause(40);
+    assert.equal(await k1Kind(), '图片');
+    assert.equal(await evaluate("document.activeElement.getAttribute('aria-pressed')"), 'true');
+    assert.equal(await evaluate('document.activeElement.textContent.trim()'), '图片');
+    await evaluate("document.querySelector('.group-sidebar button[aria-pressed=true]').focus()");
+    await k1Key('ArrowDown', 2);
+    await pause(40);
+    assert.equal(await k1Group(), 'ungrouped');
+    assert.equal(await evaluate("document.activeElement.getAttribute('aria-pressed')"), 'true');
+  });
+  await test('K1 额外修饰键与工具按钮不触发筛选或选记录', async () => {
+    await k1Setup('list');
+    for (const modifiers of [1, 8, 4, 10]) {
+      await k1Key('ArrowRight', modifiers);
+      await k1Key('ArrowDown', modifiers);
+    }
+    assert.equal(await k1Kind(), '全部');
+    assert.equal(await k1Group(), 'all');
+    assert.equal(await selected(), 'k1-text-a');
+    await evaluate("document.querySelector('.compact-toggle').focus()");
+    await k1Key('ArrowRight');
+    await k1Key('ArrowDown', 2);
+    assert.equal(await k1Kind(), '全部');
+    assert.equal(await k1Group(), 'all');
+  });
+  await test('K1 无用户分组仍循环全部和未分组，搜索结果为空可继续', async () => {
+    await k1Setup('compact');
+    await evaluate(
+      "(()=>{const groupInvoke=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>cmd==='list_groups'?Promise.resolve([]):groupInvoke(cmd,args);window.emitEvent('history-changed')})()",
+    );
+    await until(
+      () => evaluate("document.querySelector('.compact-groups select').options.length===2"),
+      '分组未清空',
+    );
+    await k1Key('ArrowUp', 2);
+    await pause(40);
+    assert.equal(await k1Group(), 'ungrouped');
+    await k1Key('ArrowDown', 2);
+    await pause(40);
+    assert.equal(await k1Group(), 'all');
+    await k1Key('f', 2);
+    await send('Input.insertText', { text: '无结果关键词' });
+    await pause(190);
+    await k1Key('ArrowDown');
+    await pause(30);
+    assert(await evaluate("document.activeElement.matches('.empty')"));
+    await k1Key('ArrowRight');
+    await pause(40);
+    assert.equal(await k1Kind(), '文本');
+    assert.equal(
+      await evaluate("document.querySelector('.searchbox input').value"),
+      '无结果关键词',
+    );
+  });
+  await test('K1 原生分组下拉未提交时保留方向键不拦截', async () => {
+    await k1Setup('compact');
+    const prevented = await evaluate(
+      "(()=>{const n=document.querySelector('.compact-groups select');n.focus();return ['ArrowRight','ArrowUp','ArrowDown'].map(key=>!n.dispatchEvent(new KeyboardEvent('keydown',{key,ctrlKey:true,bubbles:true,cancelable:true})))})()",
+    );
+    assert.deepEqual(prevented, [false, false, false]);
+    assert.equal(await k1Group(), 'all');
+    assert.equal(await selected(), 'k1-text-a');
+  });
+  await test('K1 输入法、设置、菜单和分组编辑期间保留原交互', async () => {
+    await k1Setup('list');
+    await evaluate(
+      "document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',isComposing:true,bubbles:true,cancelable:true}))",
+    );
+    assert.equal(await k1Kind(), '全部');
+    await evaluate(
+      "document.querySelector('.item').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:250,clientY:200}))",
+    );
+    await k1Key('ArrowDown', 2);
+    assert.equal(await k1Group(), 'all');
+    await k1Key('Escape');
+    await click('.settings-toggle');
+    await pause(60);
+    await k1Key('ArrowRight');
+    await k1Key('ArrowDown', 2);
+    await k1Key('Escape');
+    await pause(40);
+    assert.equal(await k1Kind(), '全部');
+    assert.equal(await k1Group(), 'all');
+    await evaluate(
+      "Array.from(document.querySelectorAll('.group-sidebar button')).find(button=>button.textContent.includes('新建分组')).click()",
+    );
+    await pause(30);
+    await k1Key('ArrowDown', 2);
+    await k1Key('ArrowRight');
+    assert.equal(await k1Kind(), '全部');
+    assert.equal(await k1Group(), 'all');
+  });
+  await test('K1 连续筛选旧响应丢弃且加载中Enter不粘贴旧记录', async () => {
+    await k1Setup('list');
+    await evaluate('window.k1Requests=[];window.k1HoldLists=true');
+    await k1Key('ArrowRight');
+    await until(() => evaluate('window.k1Requests.length===1'), '首个筛选未开始');
+    await k1Key('Enter');
+    assert.equal(await evaluate("window.calls.filter(call=>call.cmd==='paste_item').length"), 0);
+    await k1Key('ArrowRight');
+    await until(() => evaluate('window.k1Requests.length===2'), '第二个筛选未开始');
+    await evaluate('window.k1HoldLists=false;window.k1Requests[1].release()');
+    await until(async () => (await selected()) === 'k1-image', '新筛选未显示');
+    await evaluate('window.k1Requests[0].release()');
+    await pause(40);
+    assert.equal(await selected(), 'k1-image');
+    assert.equal(await k1Kind(), '图片');
+    await k1Key('Enter');
+    await pause(30);
+    assert.equal(
+      await evaluate("window.calls.filter(call=>call.cmd==='paste_item').at(-1).args.id"),
+      'k1-image',
+    );
+  });
+  await test('K1 切换清除多选与敏感明文预览', async () => {
+    await k1Setup('list');
+    await evaluate("window.rows[0].sensitive=true;window.emitEvent('history-changed')");
+    await pause(70);
+    await click('.item');
+    await evaluate(
+      "const b=Array.from(document.querySelectorAll('.detail button')).find(button=>button.textContent.includes('显示'));b?.click()",
+    );
+    await pause(40);
+    assert(
+      await evaluate("document.querySelector('main').textContent.includes('SYNTHETIC_SECRET_RAW')"),
+    );
+    await evaluate("document.querySelector('.item').focus()");
+    await k1Key('ArrowRight');
+    await pause(45);
+    assert.equal(
+      await evaluate("document.querySelector('main').textContent.includes('SYNTHETIC_SECRET_RAW')"),
+      false,
+    );
+    await evaluate(
+      "document.querySelectorAll('.item')[1].dispatchEvent(new MouseEvent('click',{ctrlKey:true,bubbles:true}));document.querySelector('.item').focus()",
+    );
+    assert.equal(
+      await evaluate("document.querySelectorAll('.item[aria-selected=true]').length"),
+      2,
+    );
+    await k1Key('ArrowDown', 2);
+    await pause(45);
+    assert.equal(
+      await evaluate("document.querySelectorAll('.item[aria-selected=true]').length"),
+      1,
+    );
+    assert.equal(
+      await evaluate("document.querySelector('main').textContent.includes('SYNTHETIC_SECRET_RAW')"),
+      false,
+    );
+  });
+  await test('K1 删除确认期间不切换筛选，取消后恢复', async () => {
+    await k1Setup('list');
+    await evaluate(
+      "document.querySelectorAll('.item')[1].dispatchEvent(new MouseEvent('click',{ctrlKey:true,bubbles:true}));document.querySelector('.item').focus()",
+    );
+    await evaluate(
+      "document.activeElement.dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true,cancelable:true}))",
+    );
+    await pause(30);
+    assert(await evaluate("!!document.querySelector('.delete-confirm')"));
+    await k1Key('ArrowRight');
+    await k1Key('ArrowDown', 2);
+    assert.equal(await k1Kind(), '全部');
+    assert.equal(await k1Group(), 'all');
+    await k1Key('Escape');
+    await k1Key('ArrowRight');
+    await pause(40);
+    assert.equal(await k1Kind(), '文本');
+  });
+  await test('K1 筛选等待期间Ctrl+F保留搜索焦点，迟到结果不抢焦点', async () => {
+    await k1Setup('compact');
+    await evaluate('window.k1Requests=[];window.k1HoldLists=true');
+    await k1Key('ArrowRight');
+    await until(() => evaluate('window.k1Requests.length===1'), '请求未开始');
+    await k1Key('f', 2);
+    await evaluate('window.k1HoldLists=false;window.k1Requests[0].release()');
+    await pause(50);
+    assert(await evaluate("document.activeElement.matches('input[type=search]')"));
+    assert.equal(await k1Kind(), '文本');
+  });
+  await test('K1 类型控件上Ctrl方向切分组与侧栏左右切类型', async () => {
+    await k1Setup('list');
+    await evaluate("document.querySelector('.kind-filters button').focus()");
+    await k1Key('ArrowDown', 2);
+    await pause(40);
+    assert.equal(await k1Group(), 'ungrouped');
+    await evaluate("document.querySelector('.group-sidebar button[aria-pressed=true]').focus()");
+    await k1Key('ArrowRight');
+    await pause(40);
+    assert.equal(await k1Kind(), '文本');
+    assert.equal(await k1Group(), 'ungrouped');
+  });
+  await test('K1 搜索框边界与选区不偷切类型，空搜索则可切换', async () => {
+    await k1Setup('compact');
+    await k1Key('f', 2);
+    await send('Input.insertText', { text: '测试' });
+    await pause(190);
+    await evaluate("document.querySelector('.searchbox input').setSelectionRange(2,2)");
+    await k1Key('ArrowRight');
+    assert.equal(await k1Kind(), '全部类型');
+    await evaluate("document.querySelector('.searchbox input').setSelectionRange(0,0)");
+    await k1Key('ArrowLeft');
+    assert.equal(await k1Kind(), '全部类型');
+    await evaluate(
+      "const input=document.querySelector('.searchbox input');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}))",
+    );
+    await k1Key('ArrowLeft');
+    await pause(40);
+    assert.equal(await k1Kind(), '链接');
+  });
+  await test('K1 筛选加载后不抢用户新选择的搜索或工具焦点', async () => {
+    for (const selector of ['.searchbox input', '.compact-toggle']) {
+      await k1Setup('list');
+      await evaluate('window.k1Requests=[];window.k1HoldLists=true');
+      await k1Key('ArrowRight');
+      await until(() => evaluate('window.k1Requests.length===1'), '筛选请求未开始');
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).focus();window.k1HoldLists=false;window.k1Requests[0].release()`,
+      );
+      await pause(50);
+      assert(await evaluate(`document.activeElement.matches(${JSON.stringify(selector)})`));
+    }
+  });
+  for (const mode of ['list', 'cards', 'compact']) {
+    await test('K1 说明与类型分隔布局 ' + mode, async () => {
+      await k1Setup(mode);
+      await k1Key('ArrowRight');
+      await k1Key('ArrowRight');
+      await pause(50);
+      const geometry = await evaluate(
+        `(()=>{const label=document.querySelector('.filter-label').getBoundingClientRect(),types=document.querySelector('.kind-filters').getBoundingClientRect(),group=document.querySelector('.compact-groups select')?.getBoundingClientRect();return {gap:types.left-label.right,aligned:!group||Math.abs(group.left-types.left)<=1,border:getComputedStyle(document.querySelector('.kind-filters')).borderTopWidth,divider:getComputedStyle(document.querySelector('.kind-filters')).borderLeftWidth,background:getComputedStyle(document.querySelector('.kind-filters')).backgroundColor,overflow:document.documentElement.scrollWidth>innerWidth,hint:document.querySelector('.keyboard-hint').textContent}})()`,
+      );
+      assert.equal(geometry.gap, 10);
+      assert.equal(geometry.aligned, true);
+      assert.equal(geometry.border, '1px');
+      assert.equal(geometry.divider, '1px');
+      assert.notEqual(geometry.background, 'rgba(0, 0, 0, 0)');
+      assert.equal(geometry.overflow, false);
+      assert(geometry.hint.trim().endsWith('Enter 粘贴'));
+      assert(!geometry.hint.includes('Shift') && !geometry.hint.includes('Esc'));
+      assert(
+        geometry.hint.includes('Ctrl+↑↓') &&
+          geometry.hint.includes('←→') &&
+          !geometry.hint.includes('Ctrl+F'),
+      );
+      await capture('k1-filter-help-' + mode);
+      await click(mode === 'compact' ? 'footer .settings-toggle' : '.settings-toggle');
+      await pause(60);
+      assert(
+        (
+          await evaluate("document.querySelector('[data-panel-keyboard-help]').textContent")
+        ).includes('紧凑'),
+      );
+    });
+  }
+  for (const theme of ['light', 'dark']) {
+    for (const mode of ['list', 'cards', 'compact']) {
+      await test('K1 A方案Tab样式与全部选中态 ' + theme + ' ' + mode, async () => {
+        await k1Setup(mode);
+        await appearance({ theme });
+        for (const index of [0, 1, 2, 3, 4]) {
+          await evaluate(`document.querySelectorAll('.kind-filters button')[${index}].click()`);
+          await pause(30);
+          const state = await evaluate(
+            `(()=>{const bar=document.querySelector('.kind-filters'),tabs=[...bar.querySelectorAll('button')],selected=bar.querySelector('[aria-pressed=true]'),style=getComputedStyle(selected),r=bar.getBoundingClientRect();return {count:tabs.filter(tab=>tab.getAttribute('aria-pressed')==='true').length,index:tabs.indexOf(selected),background:style.backgroundColor,page:getComputedStyle(document.querySelector('main')).backgroundColor,border:style.borderTopWidth,weight:style.fontWeight,shadow:style.boxShadow,inside:tabs.every(tab=>{const b=tab.getBoundingClientRect();return b.left>=r.left&&b.right<=r.right}),overflow:document.documentElement.scrollWidth>innerWidth}})()`,
+          );
+          assert.equal(state.count, 1);
+          assert.equal(state.index, index);
+          assert.equal(state.border, '1px');
+          assert.equal(state.weight, '600');
+          assert.notEqual(state.background, 'rgba(0, 0, 0, 0)');
+          assert.notEqual(state.shadow, 'none');
+          assert.equal(state.inside, true);
+          assert.equal(state.overflow, false);
+        }
+        await evaluate("document.querySelectorAll('.kind-filters button')[2].click()");
+        await pause(30);
+        await capture('k1-tabs-a-' + theme + '-' + mode);
+        if (mode === 'compact') {
+          await metrics(320);
+          assert.equal(await evaluate('document.documentElement.scrollWidth>innerWidth'), false);
+        }
+      });
+    }
+  }
   const storagePage = async (patch = {}) => {
     await nav();
     await evaluate(

@@ -21,6 +21,7 @@ import ContextMenu from './ContextMenu.vue';
 import GroupSidebar from './GroupSidebar.vue';
 import UiIcon from './UiIcon.vue';
 import { groupColorStyle } from './groupColors';
+import { cycleFilter, panelNavigation, type PanelNavigation } from './mainKeyboard';
 import { brandName } from './brand';
 import {
   kindLabel,
@@ -247,11 +248,15 @@ const filtered = computed(
 );
 let resetOnShow = false;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let keyboardFilterFocus = false;
+const emptyState = ref<HTMLElement | null>(null);
 async function focusSearch() {
+  keyboardFilterFocus = false;
   await nextTick();
   if (!settingsOpen.value) searchInput.value?.focus();
 }
 function filtersChanged(delay = 150) {
+  keyboardFilterFocus = false;
   resetOnShow = false;
   clearTimeout(searchTimer);
   searchTimer = undefined;
@@ -274,8 +279,8 @@ function filtersChanged(delay = 150) {
     }, delay);
 }
 watch(query, () => filtersChanged());
-watch(kind, () => filtersChanged(0));
-watch(view, () => filtersChanged(0));
+watch(kind, () => filtersChanged(0), { flush: 'sync' });
+watch(view, () => filtersChanged(0), { flush: 'sync' });
 function compositionStart() {
   composing.value = true;
   clearTimeout(searchTimer);
@@ -436,8 +441,7 @@ async function loadMore() {
   } finally {
     if (generation === listGeneration) {
       pageLoading.value = false;
-      await nextTick();
-      checkLoadMore();
+      await completeListLoad(generation);
     }
   }
 }
@@ -621,10 +625,16 @@ async function load() {
   } finally {
     if (generation === listGeneration) {
       pageLoading.value = false;
-      await nextTick();
-      checkLoadMore();
+      await completeListLoad(generation);
     }
   }
+}
+async function completeListLoad(generation: number): Promise<void> {
+  await nextTick();
+  if (generation !== listGeneration) return;
+  if (keyboardFilterFocus && canRestoreFilterFocus()) focusSelectedRecord();
+  keyboardFilterFocus = false;
+  checkLoadMore();
 }
 const fileActionBusy = ref(false);
 const fileActionBlocked = computed(
@@ -701,9 +711,12 @@ function settingsKeydown(event: KeyboardEvent): void {
 function isSearchShortcut(event: KeyboardEvent): boolean {
   return !settingsOpen.value && event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'f';
 }
+function keyboardInputBlocked(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.isComposing || composing.value || event.keyCode === 229;
+}
 async function keydown(event: KeyboardEvent): Promise<void> {
   if (settingsOpen.value && settingsRecording.value) return;
-  if (event.isComposing || composing.value || event.keyCode === 229) return;
+  if (keyboardInputBlocked(event)) return;
   if (menuInteracting.value) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -766,10 +779,10 @@ async function prepareNavigation(event: KeyboardEvent): Promise<boolean> {
   return true;
 }
 async function navigateRecords(event: KeyboardEvent): Promise<void> {
-  const inSearch = event.target === searchInput.value;
   event.preventDefault();
   resetOnShow = false;
-  if (!(await prepareNavigation(event))) return;
+  const generation = listGeneration;
+  if (!(await prepareNavigation(event)) || generation !== listGeneration) return;
   if (items.value.length)
     selectOnly(
       (selected.value + (event.key === 'ArrowDown' ? 1 : -1) + items.value.length) %
@@ -777,11 +790,60 @@ async function navigateRecords(event: KeyboardEvent): Promise<void> {
     );
   contextMenu.value = null;
   void nextTick(() => {
-    const row = listRoot.value?.querySelector<HTMLElement>(`.item[data-id="${active.value?.id}"]`);
-    row?.scrollIntoView({ block: 'nearest' });
-    // 从侧栏/筛选器进入记录导航后，焦点与选中记录一致；搜索中仍可直接输入。
-    if (!inSearch) row?.focus({ preventScroll: true });
+    if (generation === listGeneration) focusSelectedRecord();
   });
+}
+function canRestoreFilterFocus(): boolean {
+  if (settingsOpen.value || organizing.value || menuInteracting.value) return false;
+  const focused = document.activeElement;
+  return focused === document.body || !!focused?.closest('.list, .empty');
+}
+function focusSelectedRecord(): void {
+  const row = recordElement(active.value?.id);
+  row?.scrollIntoView({ block: 'nearest' });
+  (row ?? emptyState.value)?.focus({ preventScroll: true });
+}
+function navigationTarget(event: KeyboardEvent, action: PanelNavigation): boolean {
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  if (target === searchInput.value) {
+    return !action.endsWith('kind') || !query.value.length;
+  }
+  if (!target || target === document.body || target === document.documentElement) return true;
+  if (target.closest('.list, .empty')) return true;
+  if (target.closest('.kind-filters button, .group-sidebar button[aria-pressed]')) return true;
+  return false;
+}
+function changeKeyboardFilter(event: KeyboardEvent, action: PanelNavigation): void {
+  const target = event.target instanceof Element ? event.target : document.activeElement;
+  const direction = action.startsWith('previous') ? -1 : 1;
+  if (action.endsWith('kind')) {
+    kind.value = cycleFilter(
+      kinds.map((option) => option.value),
+      kind.value,
+      direction,
+    );
+  } else {
+    const views: HistoryView[] = ['all', 'ungrouped', ...groups.value.map((group) => group.id)];
+    selectView(cycleFilter(views, view.value, direction));
+  }
+  const controls = target?.closest('.kind-filters, .group-sidebar');
+  keyboardFilterFocus = target !== searchInput.value && !controls;
+  if (controls)
+    void nextTick(() =>
+      controls.querySelector<HTMLElement>('button[aria-pressed="true"]')?.focus(),
+    );
+}
+function navigatePanel(event: KeyboardEvent): boolean {
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return false;
+  const action = panelNavigation(event);
+  if (!action || busy.value || !navigationTarget(event, action)) return true;
+  event.preventDefault();
+  if (action.endsWith('record')) {
+    void navigateRecords(event);
+    return true;
+  }
+  changeKeyboardFilter(event, action);
+  return true;
 }
 function pasteFromKeyboard(event: KeyboardEvent): void {
   if (contextMenu.value) return;
@@ -800,11 +862,13 @@ function escapeRecords(event: KeyboardEvent): void {
 }
 const recordKeyActions: Readonly<Record<string, (event: KeyboardEvent) => void | Promise<void>>> = {
   Enter: pasteFromKeyboard,
-  ArrowDown: navigateRecords,
-  ArrowUp: navigateRecords,
   Escape: escapeRecords,
 };
 async function dispatchRecordKeydown(event: KeyboardEvent): Promise<void> {
+  if (navigatePanel(event)) return;
+  await dispatchRecordAction(event);
+}
+async function dispatchRecordAction(event: KeyboardEvent): Promise<void> {
   const inSearch = event.target === searchInput.value;
   if (event.key === 'Escape' && contextMenu.value) {
     event.preventDefault();
@@ -1015,12 +1079,13 @@ onUnmounted(() => {
               type="search"
               aria-label="搜索历史"
               placeholder="搜索文本、文件或拼音…"
+              title="Ctrl+F 搜索；↑/↓进入记录；列表中←/→切类型，Ctrl+↑/↓切分组"
               autocomplete="off"
               :readonly="mutationBusy"
               :disabled="deleting || groupInteracting || !!pendingDelete"
               @compositionstart="compositionStart"
               @compositionend="compositionEnd"
-            /><kbd>Ctrl F</kbd></div
+            /><kbd>Ctrl+F</kbd></div
           >
           <label
             v-if="compact"
@@ -1028,6 +1093,7 @@ onUnmounted(() => {
             :style="groupColorStyle(typeof view === 'number' ? view : null)"
             >分组<select
               aria-label="分组筛选"
+              title="列表或搜索中按 Ctrl+↑/↓ 切换分组；此下拉框保持原生键盘操作"
               :value="view"
               :disabled="deleting || organizing || !!pendingDelete"
               @change="selectCompactView"
@@ -1046,6 +1112,7 @@ onUnmounted(() => {
                 :key="option.label"
                 type="button"
                 :aria-pressed="kind === option.value"
+                :title="`${option.label}（←/→ 切换类型）`"
                 :disabled="deleting || organizing || !!pendingDelete"
                 @click="kind = option.value"
                 >{{ compact && option.value === null ? '全部类型' : option.label }}</button
@@ -1103,7 +1170,7 @@ onUnmounted(() => {
           @paste="contextPaste"
           @close="contextMenu = null"
         />
-        <section v-if="!settingsOpen && !items.length" class="empty"
+        <section v-if="!settingsOpen && !items.length" ref="emptyState" tabindex="-1" class="empty"
           ><span>▤</span
           ><h2>{{ pageLoading ? '正在搜索…' : filtered ? '没有匹配的记录' : '从一次复制开始' }}</h2
           ><p>{{
@@ -1256,7 +1323,9 @@ onUnmounted(() => {
         ><UiIcon name="settings" /> 设置</button
       >
       <span v-else>本地加密保存</span
-      ><span class="keyboard-hint">↑↓ 选择 · Enter 粘贴 · Shift + Enter 纯文本 · Esc 隐藏</span>
+      ><span class="keyboard-hint" title="↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴"
+        >↑↓ 选择 · ←→ 类型 · Ctrl+↑↓ 分组 · Enter 粘贴</span
+      >
       <button
         v-if="compact"
         :disabled="!active || busy || deleting || organizing || !!pendingDelete"

@@ -639,6 +639,11 @@ onUnmounted(() => {
               ></label
             >
             <p class="detail-note">面板激活期间不能修改快捷键。保存失败时保留原设置。</p>
+            <p class="detail-note" data-panel-keyboard-help
+              >主面板（普通、双列、紧凑）：↑/↓ 选择记录，←/→ 切换类型，Ctrl+↑/↓ 切换分组，Ctrl+F
+              返回搜索；Enter 粘贴，Shift+Enter 纯文本粘贴，Esc
+              清空搜索或隐藏。搜索框有文字时左右键移动光标，按上下键进入列表后可切换类型。</p
+            >
           </fieldset>
         </div>
       </div>
