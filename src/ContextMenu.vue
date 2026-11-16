@@ -11,6 +11,8 @@ const props = defineProps<{
   allSensitiveKept?: boolean;
   label?: string;
   files?: string[];
+  canOpenLink?: boolean;
+  linkBusy?: boolean;
 }>();
 const expanded = ref(false);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -25,6 +27,7 @@ const emit = defineEmits<{
   keepSensitive: [];
   move: [groupId: number | null];
   openFile: [index: number];
+  openLink: [];
   revealFile: [index: number];
 }>();
 const root = ref<HTMLElement | null>(null),
@@ -194,6 +197,14 @@ onUnmounted(() => {
       >
       <button type="button" role="menuitem" @click="emit('delete')">删除</button>
       <button type="button" role="menuitem" @click="emit('paste')">粘贴</button>
+      <button
+        v-if="canOpenLink"
+        type="button"
+        role="menuitem"
+        :disabled="linkBusy"
+        @click="emit('openLink')"
+        >用默认浏览器打开</button
+      >
       <template v-if="files?.length">
         <div role="separator" class="menu-separator"></div>
         <button v-if="files.length === 1" type="button" role="menuitem" @click="emit('openFile', 0)"

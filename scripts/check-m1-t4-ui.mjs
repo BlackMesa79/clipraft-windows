@@ -96,7 +96,7 @@ try {
   const mock = `(() => {
     const callbacks = new Map(), events = new Map(); let callbackId = 0;
     window.rows = Array.from({length:250},(_,i)=>({id:'item-'+i,kind:'text',summary:(i<220?'你好 Hello nihao nh ':'Other ') + i,formats:['CF_UNICODETEXT'],files:[],thumbnail:null,placeholder:null}));
-    window.calls = []; window.deletes = []; window.pastes = []; window.hidden = 0; window.ready = false; window.failNext = false; window.holdNext = false;
+    window.openLinks = []; window.calls = []; window.deletes = []; window.pastes = []; window.hidden = 0; window.ready = false; window.failNext = false; window.holdNext = false;
     window.changed = () => callbacks.get(events.get('history-changed'))?.({event:'history-changed',id:1,payload:null});
     window.emitEvent=(event,payload)=>callbacks.get(events.get(event))?.({event,id:1,payload});
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {unregisterListener(){}};
@@ -125,12 +125,18 @@ try {
           window.changed();
           return {deleted_items:before-window.rows.length,reclaimed_blobs:0,failed_blobs:[],maintenance_errors:[]};
         }
+        if(cmd==='open_link'){
+          window.openLinks.push(args);
+          if(window.holdLink)await new Promise(resolve=>window.releaseLink=resolve);
+          if(window.failLink)throw Error('默认浏览器启动失败');
+          return;
+        }
         if(cmd==='paste_item'){window.pastes.push(args);return;}
         if(cmd==='hide_main'){window.hidden++;return;}
         if(cmd==='last_error')return null;
         if(cmd==='frontend_ready'){window.ready=true;return;}
         if(cmd==='item_detail') {
-          const result={text:'详情 '+args.id,truncated:false,files:[]};
+          const result={text:args.id==='saved-link'?'https://example.com/完整链接':'详情 '+args.id,truncated:false,files:[]};
           if(window.holdDetail){window.holdDetail=false;return new Promise(resolve=>window.releaseDetail=()=>resolve(result));}
           return result;
         }
@@ -427,6 +433,167 @@ try {
   });
   assert(await evaluate('document.documentElement.scrollWidth<=680'));
   checks.push('离屏实际渲染与窄窗口无横向溢出');
+  await fresh();
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 1000,
+    height: 700,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await evaluate(`window.rows=[
+    {...window.rows[0],id:'saved-link',is_link:true,summary:'https://example.com/完整链接'},
+    {...window.rows[1],id:'plain',is_link:false,summary:'普通文本'},
+    {...window.rows[2],id:'private-link',is_link:true,sensitive:true,summary:'••••••••'}
+  ];window.changed()`);
+  await count(3);
+  await settled();
+  assert.equal(await evaluate('window.openLinks.length'), 0);
+  await until(
+    () => evaluate("!!document.querySelector('.link-actions button')"),
+    '链接详情入口未出现',
+  );
+  assert.equal(await evaluate("!!document.querySelector('.detail .preview-title')"), false);
+  assert.equal(await evaluate("!!document.querySelector('.detail-scroll .link-actions')"), false);
+  assert.equal(await evaluate("!!document.querySelector('.detail-bottom .link-actions')"), true);
+  await evaluate("window.holdLink=true;document.querySelector('.link-actions button').click()");
+  await until(
+    () => evaluate("document.querySelector('.link-actions button').disabled"),
+    '打开期间未禁用',
+  );
+  await evaluate("document.querySelector('.link-actions button').click()");
+  assert.deepEqual(await evaluate('window.openLinks'), [{ id: 'saved-link' }]);
+  await evaluate('window.holdLink=false;window.releaseLink()');
+  await until(
+    () => evaluate("!document.querySelector('.link-actions button').disabled"),
+    '操作未结束',
+  );
+  await evaluate("window.failLink=true;document.querySelector('.link-actions button').click()");
+  await until(
+    () => evaluate("document.querySelector('.error')?.textContent.includes('默认浏览器启动失败')"),
+    '错误未显示',
+  );
+  await evaluate('window.failLink=false');
+  checks.push('链接仅显式打开、IPC只传记录ID、重复点击受阻、浏览器失败可见');
+  for (const id of ['plain', 'private-link']) {
+    await evaluate(
+      `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`,
+    );
+    assert.equal(await evaluate("!!document.querySelector('.link-actions')"), false);
+    await evaluate(
+      `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:250,clientY:200}))`,
+    );
+    assert.equal(
+      await evaluate("document.querySelector('.context-menu').textContent.includes('默认浏览器')"),
+      false,
+    );
+    await press('Escape', {}, 'window');
+  }
+  checks.push('普通文本与敏感链接均不显示打开入口');
+  for (const theme of ['light', 'dark']) {
+    for (const layout of ['list', 'cards', 'compact']) {
+      await evaluate(
+        `window.emitEvent('settings-changed',{...window.settings,theme:'${theme}',layout:'${layout === 'cards' ? 'cards' : 'list'}',compact:${layout === 'compact'}})`,
+      );
+      await pause(100);
+      if (layout !== 'compact') {
+        for (const width of [1000, 680]) {
+          await send('Emulation.setDeviceMetricsOverride', {
+            width,
+            height: 700,
+            deviceScaleFactor: 1,
+            mobile: false,
+          });
+          await evaluate("document.querySelector('[data-id=saved-link]').click()");
+          const geometry = await evaluate(`(()=>{
+            const area=document.querySelector('.detail-bottom').getBoundingClientRect();
+            const open=document.querySelector('.link-actions button').getBoundingClientRect();
+            const paste=document.querySelector('.paste-primary').getBoundingClientRect();
+            return {inside:[open,paste].every(r=>r.left>=area.left&&r.right<=area.right&&r.top>=area.top&&r.bottom<=area.bottom),
+              separate:paste.right<=open.left&&Math.abs(paste.top-open.top)<1,secondary:open.width<paste.width&&open.width<=84,
+              title:!!document.querySelector('.preview-title'),overflow:document.documentElement.scrollWidth>innerWidth};
+          })()`);
+          assert(
+            geometry.inside &&
+              geometry.separate &&
+              geometry.secondary &&
+              !geometry.title &&
+              !geometry.overflow,
+            JSON.stringify(geometry),
+          );
+        }
+        await send('Emulation.setDeviceMetricsOverride', {
+          width: 1000,
+          height: 700,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+      }
+      const tab = '.kind-filters button[aria-pressed="true"]';
+      const reference = await evaluate(
+        `getComputedStyle(document.querySelector('.group-sidebar button[aria-pressed="true"]')).backgroundColor`,
+      );
+      const before = await evaluate(
+        `getComputedStyle(document.querySelector('${tab}')).backgroundColor`,
+      );
+      assert.equal(before, reference, `${theme}/${layout} 选中色不一致`);
+      const point = await evaluate(
+        `(()=>{const r=document.querySelector('${tab}').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`,
+      );
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+      assert.equal(
+        await evaluate(`getComputedStyle(document.querySelector('${tab}')).backgroundColor`),
+        before,
+      );
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 990, y: 690 });
+      await evaluate(
+        "document.querySelector('[data-id=saved-link]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:250,clientY:200}))",
+      );
+      const prior = await evaluate('window.openLinks.length');
+      await evaluate(
+        "[...document.querySelectorAll('.context-menu button')].find(n=>n.textContent.includes('默认浏览器')).click()",
+      );
+      await until(() => evaluate(`window.openLinks.length===${prior + 1}`), '右键入口未调用');
+      assert.deepEqual(await evaluate('window.openLinks.at(-1)'), { id: 'saved-link' });
+    }
+  }
+  assert.equal(await evaluate('window.pastes.length'), 0);
+  checks.push('浅深主题三布局选中色与侧栏一致、hover不变；右键链接打开不触发粘贴');
+  await evaluate(
+    "window.emitEvent('settings-changed',{...window.settings,theme:'dark',layout:'list',compact:false})",
+  );
+  await pause(100);
+  assert(await evaluate("document.querySelector('.brand-mark img').naturalWidth>0"));
+  const brandShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 70 });
+  const brandPreview = Buffer.from(brandShot.data, 'base64');
+  assert(brandPreview.length < 300 * 1024);
+  await writeFile(path.join(out, 'brand-links-dark.jpg'), brandPreview);
+  checks.push('定稿品牌图实际加载，深色选中态和链接按钮完成离屏截图');
+  checks.push('链接大标题移除；浅深两主题普通/双列及窄窗保持粘贴在左且更宽、打开在右且不超过84px');
+  await evaluate(`(()=>{
+    const canvas=document.createElement('canvas');canvas.width=640;canvas.height=400;
+    const context=canvas.getContext('2d');context.fillStyle='#277d77';context.fillRect(0,0,640,400);
+    context.fillStyle='#91c9bf';context.fillRect(60,60,240,180);context.fillStyle='#fff';context.fillRect(340,120,220,220);
+    const image=canvas.toDataURL();const convert=window.__TAURI_INTERNALS__.convertFileSrc;
+    window.__TAURI_INTERNALS__.convertFileSrc=hash=>hash==='preview-layout-image'?image:convert(hash);
+    window.rows=[{...window.rows[0],id:'preview-image',kind:'image',is_link:false,summary:'不应占据预览位置的图片标题',thumbnail:'preview-layout-image',preview:'preview-layout-image'}];
+    window.changed();
+  })()`);
+  await count(1);
+  await until(
+    () => evaluate("document.querySelector('.detail img')?.naturalWidth===640"),
+    '图片预览未加载',
+  );
+  assert.equal(await evaluate("!!document.querySelector('.detail .preview-title')"), false);
+  assert.equal(await evaluate("!!document.querySelector('.link-actions')"), false);
+  assert(
+    await evaluate("document.querySelector('.detail-header').textContent.includes('图片预览')"),
+  );
+  const imageShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 70 });
+  const imagePreview = Buffer.from(imageShot.data, 'base64');
+  assert(imagePreview.length < 300 * 1024);
+  await writeFile(path.join(out, 'image-preview-no-title.jpg'), imagePreview);
+  checks.push('图片实际渲染、移除重复大标题、保留类型说明与粘贴操作');
+
   await send('Page.navigate', { url: origin + '/?panel=quick' });
   await ready();
   await count(200);

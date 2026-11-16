@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">PasteDash / 快贴 · 闪电角标</title>
+  <defs>
+    <linearGradient id="base" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3F8DE5"/><stop offset="1" stop-color="#315EBB"/></linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0.7" y2="1"><stop stop-color="#FFE779"/><stop offset="1" stop-color="#FFB629"/></linearGradient>
+  </defs>
+  <rect x="20" y="20" width="216" height="216" rx="48" fill="url(#base)"/>
+  <rect x="58" y="100" width="136" height="96" rx="13" fill="#FFF" opacity=".28"/>
+  <rect x="58" y="86" width="136" height="96" rx="13" fill="#FFF" opacity=".55"/>
+  <rect x="58" y="70" width="136" height="96" rx="14" fill="#FFF"/>
+  <path d="M80 95h68m-68 21h45m-45 21h34" fill="none" stroke="#3976CA" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="174" cy="161" r="40" fill="#2456AF"/>
+  <circle cx="174" cy="157" r="40" fill="url(#gold)"/>
+  <path d="m180 127-28 34h20l-6 28 30-39h-21Z" fill="#24457C" stroke="#24457C" stroke-width="2" stroke-linejoin="round"/>
+</svg>

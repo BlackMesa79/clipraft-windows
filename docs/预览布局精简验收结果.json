@@ -1,0 +1,130 @@
+{
+  "date": "2026-11-17",
+  "status": "用户确认本轮全部改动验收通过，授权本地提交",
+  "prior_acceptance": "用户已确认品牌图标、类型选中色和默认浏览器打开功能通过",
+  "changes": [
+    "链接打开按钮移到预览底部，与粘贴并列，窄窗可换行",
+    "图片与链接移除重复大标题，保留类型说明与正文/图片"
+  ],
+  "rust": {
+    "passed": 916,
+    "failed": 0,
+    "ignored": 5
+  },
+  "stages": [
+    {
+      "name": "fmt",
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "exit_code": 0
+    },
+    {
+      "name": "rust",
+      "exit_code": 0
+    },
+    {
+      "name": "format",
+      "exit_code": 0
+    },
+    {
+      "name": "lint",
+      "exit_code": 0
+    },
+    {
+      "name": "build",
+      "exit_code": 0
+    },
+    {
+      "name": "m1",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t2",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t3",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t4",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t5",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t6",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t7",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t8",
+      "exit_code": 0
+    },
+    {
+      "name": "u1",
+      "exit_code": 0
+    },
+    {
+      "name": "u2",
+      "exit_code": 0
+    },
+    {
+      "name": "u3",
+      "exit_code": 0
+    },
+    {
+      "name": "u4",
+      "exit_code": 0
+    },
+    {
+      "name": "sensitive-privacy",
+      "exit_code": 0
+    },
+    {
+      "name": "main-preview-state",
+      "exit_code": 0
+    },
+    {
+      "name": "hotkey-recording-state",
+      "exit_code": 0
+    },
+    {
+      "name": "b1",
+      "exit_code": 0
+    }
+  ],
+  "ui": {
+    "m1_t4": 24,
+    "u2": 154,
+    "b1": 26
+  },
+  "smoke": {
+    "clipboard_listener_enabled": false,
+    "keyboard_hook_enabled": false,
+    "main_frontend_ready": true,
+    "preview_protocol_loaded": true,
+    "quick_frontend_ready": true,
+    "thumbnail_protocol_loaded": true,
+    "visual_verified": false
+  },
+  "binary": ".tools\\pretest-preview-layout-bin\\ClipRaft.exe",
+  "sha256": "2A6F17A252E243939BE57D8D533014D206589159E882DB16FEEC10A77DE1DCAD",
+  "logs": ".tools\\preview-layout-final-20261117-023805",
+  "visual_evidence": [
+    ".test-data/m1-t4-ui/brand-links-dark.jpg",
+    ".test-data/m1-t4-ui/image-preview-no-title.jpg"
+  ],
+  "scope": "仅前端布局、相关检查与交接；保留原程序，不访问manual或真实剪贴板，不提交/推送/发布。",
+  "user_acceptance": {
+    "date": "2026-11-17",
+    "result": "按钮位置与大小、单文件打开均通过；此前图标、类型选中色与链接默认浏览器打开保持通过"
+  }
+}

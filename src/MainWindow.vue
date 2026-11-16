@@ -24,6 +24,7 @@ import UiIcon from './UiIcon.vue';
 import { groupColorStyle } from './groupColors';
 import { cycleFilter, panelNavigation, type PanelNavigation } from './mainKeyboard';
 import { brandName } from './brand';
+import brandIcon from './assets/brand.svg?inline';
 import {
   kindLabel,
   type Item,
@@ -656,6 +657,25 @@ async function runFileAction(action: 'open' | 'reveal', index: number) {
     fileActionBusy.value = false;
   }
 }
+const canOpenLink = computed(() => !!active.value?.is_link && !active.value.sensitive);
+const canOpenSingleFile = computed(
+  () =>
+    active.value?.kind === 'files' && !active.value.sensitive && active.value.files.length === 1,
+);
+async function openLink(): Promise<void> {
+  const id = contextMenu.value?.id ?? active.value?.id;
+  if (!id || !canOpenLink.value || fileActionBlocked.value) return;
+  contextMenu.value = null;
+  fileActionBusy.value = true;
+  error.value = '';
+  try {
+    await invoke('open_link', { id });
+  } catch (failure) {
+    error.value = String(failure);
+  } finally {
+    fileActionBusy.value = false;
+  }
+}
 async function paste(plain = false) {
   if (!active.value || busy.value || deleting.value || organizing.value || pendingDelete.value)
     return;
@@ -1006,7 +1026,7 @@ onUnmounted(() => {
   >
     <header data-tauri-drag-region>
       <div class="brand" data-tauri-drag-region
-        ><span class="brand-mark"><UiIcon name="brand" /></span
+        ><span class="brand-mark"><img :src="brandIcon" alt="" /></span
         ><div
           ><h1>{{ brandName }}</h1
           ><p>你的内容，随时可用 · {{ mainLabel }}</p></div
@@ -1164,6 +1184,9 @@ onUnmounted(() => {
           :all-sensitive="allSensitive"
           :all-sensitive-kept="selectedItems.every((item) => item.sensitive && !item.expires_at)"
           :files="active?.kind === 'files' && !active.sensitive ? active.files : undefined"
+          :can-open-link="canOpenLink && selectedIds.size === 1"
+          :link-busy="!!fileActionBlocked"
+          @open-link="openLink"
           @open-file="runFileAction('open', $event)"
           @reveal-file="runFileAction('reveal', $event)"
           @sensitive="changeItems('set_sensitive')"
@@ -1227,7 +1250,11 @@ onUnmounted(() => {
                   @click="loadDetail"
                   ><UiIcon name="refresh" /><span class="sr-only">刷新状态</span></button
                 ></div
-              ><h2 v-if="!active.sensitive" class="preview-title">{{ active.summary }}</h2>
+              ><h2
+                v-if="!active.sensitive && active.kind !== 'image' && !active.is_link"
+                class="preview-title"
+                >{{ active.summary }}</h2
+              >
               <div
                 v-if="active.sensitive && (active.kind === 'image' || imageSource)"
                 class="sensitive-image"
@@ -1283,7 +1310,7 @@ onUnmounted(() => {
                       file.exists === true ? '存在' : file.exists === false ? '已失效' : '无法检查'
                     }}</span
                     ><span>{{ file.path }}</span
-                    ><div v-if="!active.sensitive" class="file-actions"
+                    ><div v-if="!active.sensitive && !canOpenSingleFile" class="file-actions"
                       ><button
                         type="button"
                         :disabled="fileActionBusy || file.exists === false"
@@ -1306,14 +1333,39 @@ onUnmounted(() => {
                   >分组：{{ groups.find((g) => g.id === active.group_id)?.name || '分组' }}</span
                 ></div
               >
-              <div class="detail-actions"
-                ><button
+              <div class="detail-actions">
+                <button
                   class="paste-primary"
                   :disabled="busy || deleting || organizing || !!pendingDelete"
                   @click="paste(false)"
                   >粘贴到原窗口</button
-                ></div
-              >
+                >
+                <div v-if="canOpenLink" class="link-actions preview-secondary">
+                  <button
+                    type="button"
+                    title="用默认浏览器打开"
+                    aria-label="用默认浏览器打开"
+                    :disabled="!!fileActionBlocked"
+                    @click="openLink"
+                    >打开链接</button
+                  >
+                </div>
+                <div v-if="canOpenSingleFile" class="single-file-actions preview-secondary">
+                  <button
+                    type="button"
+                    title="用默认应用打开"
+                    aria-label="用默认应用打开"
+                    :disabled="
+                      !!fileActionBlocked ||
+                      detailLoading ||
+                      !detail ||
+                      detail.files[0]?.exists === false
+                    "
+                    @click="runFileAction('open', 0)"
+                    >打开文件</button
+                  >
+                </div>
+              </div>
             </div>
           </aside>
         </div>

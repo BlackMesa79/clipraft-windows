@@ -60,7 +60,7 @@ fn storage(count: usize) -> Storage {
             favorite INTEGER DEFAULT 0, group_id INTEGER, source_exe TEXT,
             source_title TEXT DEFAULT 'synthetic title', sensitive INTEGER DEFAULT 0,
             expires_at INTEGER, thumbnail TEXT DEFAULT 'synthetic-thumb',
-            preview TEXT DEFAULT 'synthetic-preview'
+            preview TEXT DEFAULT 'synthetic-preview', is_link INTEGER NOT NULL DEFAULT 0
         )",
     )
     .unwrap();

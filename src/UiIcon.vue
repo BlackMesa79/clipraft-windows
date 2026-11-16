@@ -1,7 +1,6 @@
 <script setup lang="ts">
 defineProps<{ name: string }>();
 const paths: Record<string, string> = {
-  brand: 'M7 11V4h9v10H7 M16 7h3v10h-9v-3 M5 20h14 M7 23h10',
   copy: 'M8 8h12v13H8z M15 8V3H3v13h5',
   layers: 'm12 3 10 5-10 5L2 8z M2 12l10 5 10-5 M2 16l10 5 10-5',
   search: 'M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z m-2 4 7 7',

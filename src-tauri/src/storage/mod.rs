@@ -20,6 +20,7 @@ mod predict;
 #[cfg(test)]
 mod prediction_tests;
 mod search;
+pub(crate) use search::is_link;
 #[cfg(test)]
 mod search_tests;
 #[cfg(test)]
@@ -284,7 +285,7 @@ impl Storage {
     }
     /// 独立预览按 id 获取安全视图，不受快速面板第一页缓存限制。
     pub fn preview_item(&self, id: &str) -> Result<ItemView> {
-        Ok(self.conn.query_row("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE id=?1", [id], item_view)?)
+        Ok(self.conn.query_row("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview,is_link FROM items WHERE id=?1", [id], item_view)?)
     }
     pub fn list_page(
         &self,
@@ -292,7 +293,7 @@ impl Storage {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<ItemView>> {
-        let mut sql = String::from("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE 1=1");
+        let mut sql = String::from("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview,is_link FROM items WHERE 1=1");
         let mut values: Vec<rusqlite::types::Value> = Vec::new();
         if let Some(kind) = &filter.kind {
             match kind.as_str() {
@@ -932,6 +933,7 @@ fn item_view(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemView> {
     view.expires_at = r.get(12)?;
     view.thumbnail = r.get(13)?;
     view.preview = r.get(14)?;
+    view.is_link = r.get::<_, bool>(15)? && !view.sensitive;
     if view.sensitive {
         if !serde_json::from_str::<serde_json::Value>(&json)
             .ok()

@@ -1,6 +1,8 @@
 # 片筏剪贴板（ClipRaft）
 
-当前阶段（2026-11-16）：**B1及全部细节优化已获用户最终验收通过并授权提交**。包含密码导出/恢复、默认原目录替换及可选另存、迁移前备份与源清理、中断暂存管理，以及路径和键盘焦点等界面优化。最终Rust912通过/5ignored、22阶段全过、B1/细节离屏26项通过；见[最终验收结果](docs/B1最终验收结果.json)与[handoff](docs/handoff.md)。下一步按排期准备首批外测，再进入U6；未发布外测包，跨账户/电脑等覆盖缺口继续保留。[未来云功能](docs/未来功能待办.md)尚未开发。
+当前阶段（2026-11-17）：**B1及外测前品牌、链接/单文件打开、预览区细节全部获用户验收通过，并授权本地提交。** 名称保留片筏剪贴板 / ClipRaft，图标采用 C「柔和青玉」；快贴 / PasteDash [留档备用](docs/design/brand-archive/README.md)。Rust916通过/5ignored，完整22阶段检查及隔离smoke通过，见[最终验收结果](docs/预览主次操作验收结果.json)。
+
+下一步准备首批外部测试，随后推进U6。当前没有上传或对外发布测试包；跨Windows账户/电脑/固定卷及部分性能覆盖继续保留，接续以 [handoff](docs/handoff.md) 顶部为准。
 
 Tauri 2 + Rust + Vue 3 的 Windows 技术验证原型。界面启动时隐藏，通过托盘或 Alt+V 打开，不要求管理员权限。当前已完成 M1 / T1 存储层演进、T2 删除与自动清理、T3 设置、T4 搜索与筛选、T5 置顶、收藏与分组、T6 忽略程序与来源记录，T7 敏感内容识别，以及 T8 托盘与系统集成；T9 自动回归、缺陷修复与最终人工验收均已通过，M1 已完成，仍不提供安装包。
 
@@ -30,7 +32,7 @@ npm run tauri dev
 
 npm run tauri dev 自带环境包装器，使用 D:\DevTools\BuildTools\VC\Auxiliary\Build\vcvars64.bat。脚本只设置子进程环境，不改变系统和用户环境变量。路径不可用时，应修正为已有 MSVC 安装的位置，不安装或修改工具链。
 
-npm 缓存位于 node_modules/.cache/npm，Cargo 缓存位于 D:\DevTools\cargo，构建产物位于 src-tauri/target，临时文件位于 .tools/tmp。应保留 package-lock.json 与 Cargo.lock。本次任务不执行 Git 初始化、提交或推送。
+npm 缓存位于 node_modules/.cache/npm，Cargo 缓存位于 D:\DevTools\cargo，构建产物位于 src-tauri/target，临时文件位于 .tools/tmp。应保留 package-lock.json 与 Cargo.lock。仅在用户明确授权时提交或推送。
 
 SQLCipher 的指定特性需要 OpenSSL 源码构建，依赖完整 Perl。使用便携版 Strawberry Perl 5.42.3.1，位于 D:\DevTools\perl（整包 SHA256 已与官方发布页核对一致）。env.ps1 只把 perl\bin 加入当前进程 PATH，不加入 c\bin，以免 MinGW 干扰 MSVC。未修改注册表或全局 PATH。
 

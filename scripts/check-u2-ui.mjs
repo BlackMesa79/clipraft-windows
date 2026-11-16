@@ -828,7 +828,7 @@ try {
     assert(await evaluate("document.title.includes('ClipRaft')"));
     assert(
       await evaluate(
-        "!!document.querySelector('.brand-mark svg')&&!!document.querySelector('.searchbox svg')&&!!document.querySelector('.group-views svg')",
+        "!!document.querySelector('.brand-mark img')?.naturalWidth&&!!document.querySelector('.searchbox svg')&&!!document.querySelector('.group-views svg')",
       ),
     );
     assert.equal(await evaluate("document.querySelector('.searchbox kbd').textContent"), 'Ctrl+F');
@@ -919,6 +919,9 @@ try {
             ),
           '右侧合成图片未加载',
         );
+        if (mode !== 'compact') {
+          assert.equal(await evaluate("!!document.querySelector('.detail .preview-title')"), false);
+        }
         const boxes = await evaluate(
           "(()=>{const n=document.querySelector('[data-id=\"row-4\"]'),r=n.getBoundingClientRect(),i=n.querySelector('.type-icon')?.getBoundingClientRect(),p=n.querySelector('.record-thumbnail').getBoundingClientRect(),c=n.querySelector('.content').getBoundingClientRect();return {row:r.toJSON(),icon:i?.toJSON(),preview:p.toJSON(),content:c.toJSON(),fit:getComputedStyle(n.querySelector('img')).objectFit,icons:[...document.querySelectorAll('.item>.type-icon')].slice(0,6).map(n=>({w:n.getBoundingClientRect().width,h:n.getBoundingClientRect().height}))};})()",
         );
@@ -1802,11 +1805,11 @@ try {
       cleared,
     );
   });
-  await test('R17 预览只保留逐文件打开，单文件菜单打开和统一定位，失败可见', async () => {
+  await test('R17 单文件底部次要打开、多文件逐项打开、失效和敏感保护、失败可见', async () => {
     await metrics();
     await nav();
     await evaluate(
-      "window.rows[1]={...window.rows[1],files:['C:/synthetic/甲 乙,丙.txt','C:/synthetic/第二张.png'],file_status:'available'};const original=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>cmd==='item_detail'?Promise.resolve({text:'',files:window.rows[1].files.map(path=>({path,exists:true})),truncated:false}):original(cmd,args);window.emitEvent('history-changed')",
+      "window.rows[1]={...window.rows[1],files:['C:/synthetic/甲 乙,丙.txt','C:/synthetic/第二张.png'],file_status:'available'};const original=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>cmd==='item_detail'?Promise.resolve({text:'',files:window.rows[1].files.map(path=>({path,exists:window.singleFileExists??true})),truncated:false}):original(cmd,args);window.emitEvent('history-changed')",
     );
     await pause(70);
     await click('[data-id="row-1"]');
@@ -1832,11 +1835,66 @@ try {
       await evaluate("document.querySelectorAll('.file-detail .file-actions button').length"),
       2,
     );
+    assert.equal(await evaluate("!!document.querySelector('.single-file-actions')"), false);
     await capture('r17-files-detail');
     await evaluate(
-      "window.rows[1].files=['C:/synthetic/仅一个.txt'];window.emitEvent('history-changed')",
+      "window.rows[1]={...window.rows[1],files:['C:/synthetic/仅一个.txt']};window.emitEvent('history-changed')",
     );
     await pause(60);
+    await click('[data-id="row-1"]');
+    await until(
+      () =>
+        evaluate(
+          "!!document.querySelector('.single-file-actions button')&&!document.querySelector('.single-file-actions button').disabled",
+        ),
+      '单文件底部入口未就绪',
+    );
+    assert.equal(
+      await evaluate("document.querySelectorAll('.file-detail .file-actions').length"),
+      0,
+    );
+    const footer = await evaluate(`(()=>{
+      const open=document.querySelector('.single-file-actions button').getBoundingClientRect();
+      const paste=document.querySelector('.paste-primary').getBoundingClientRect();
+      return {right:open.left>=paste.right,sameRow:Math.abs(open.top-paste.top)<1,smaller:open.width<paste.width&&open.width<=84};
+    })()`);
+    assert(footer.right && footer.sameRow && footer.smaller, JSON.stringify(footer));
+    await click('.single-file-actions button');
+    await pause(40);
+    assert.deepEqual(await evaluate("window.calls.filter(c=>c.cmd==='file_action').at(-1).args"), {
+      id: 'row-1',
+      index: 0,
+      action: 'open',
+    });
+    await capture('r17-single-file-bottom');
+    await evaluate(
+      "window.singleFileExists=false;document.querySelector('.preview-refresh').click()",
+    );
+    await until(
+      () =>
+        evaluate(
+          "document.querySelector('.file-status')?.textContent.includes('已失效') && document.querySelector('.single-file-actions button')?.disabled===true",
+        ),
+      '失效单文件未禁用',
+    );
+    await evaluate(
+      "window.rows[1]={...window.rows[1],sensitive:true};window.emitEvent('history-changed')",
+    );
+    await pause(80);
+    await click('[data-id="row-1"]');
+    await until(
+      () => evaluate("!document.querySelector('.single-file-actions')"),
+      '敏感文件仍显示底部打开',
+    );
+    await evaluate(
+      "window.singleFileExists=true;window.rows[1]={...window.rows[1],sensitive:false};window.emitEvent('history-changed')",
+    );
+    await pause(80);
+    await click('[data-id="row-1"]');
+    await until(
+      () => evaluate("document.querySelector('.single-file-actions button')?.disabled===false"),
+      '单文件恢复后未启用',
+    );
     const context = async (id) => {
       await evaluate(
         `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:280,clientY:250}))`,
@@ -3018,21 +3076,23 @@ try {
   }
   for (const theme of ['light', 'dark']) {
     for (const mode of ['list', 'cards', 'compact']) {
-      await test('K1 A方案Tab样式与全部选中态 ' + theme + ' ' + mode, async () => {
+      await test('K1 Tab与侧栏统一选中态 ' + theme + ' ' + mode, async () => {
         await k1Setup(mode);
         await appearance({ theme });
         for (const index of [0, 1, 2, 3, 4]) {
           await evaluate(`document.querySelectorAll('.kind-filters button')[${index}].click()`);
           await pause(30);
           const state = await evaluate(
-            `(()=>{const bar=document.querySelector('.kind-filters'),tabs=[...bar.querySelectorAll('button')],selected=bar.querySelector('[aria-pressed=true]'),style=getComputedStyle(selected),r=bar.getBoundingClientRect();return {count:tabs.filter(tab=>tab.getAttribute('aria-pressed')==='true').length,index:tabs.indexOf(selected),background:style.backgroundColor,page:getComputedStyle(document.querySelector('main')).backgroundColor,border:style.borderTopWidth,weight:style.fontWeight,shadow:style.boxShadow,inside:tabs.every(tab=>{const b=tab.getBoundingClientRect();return b.left>=r.left&&b.right<=r.right}),overflow:document.documentElement.scrollWidth>innerWidth}})()`,
+            `(()=>{const bar=document.querySelector('.kind-filters'),tabs=[...bar.querySelectorAll('button')],selected=bar.querySelector('[aria-pressed=true]'),style=getComputedStyle(selected),r=bar.getBoundingClientRect();return {count:tabs.filter(tab=>tab.getAttribute('aria-pressed')==='true').length,index:tabs.indexOf(selected),background:style.backgroundColor,page:getComputedStyle(document.querySelector('main')).backgroundColor,border:style.borderTopWidth,weight:style.fontWeight,shadow:style.boxShadow,sidebar:getComputedStyle(document.querySelector('.group-sidebar button[aria-pressed=true]')).backgroundColor,selectedColor:style.color,sidebarColor:getComputedStyle(document.querySelector('.group-sidebar button[aria-pressed=true]')).color,inside:tabs.every(tab=>{const b=tab.getBoundingClientRect();return b.left>=r.left&&b.right<=r.right}),overflow:document.documentElement.scrollWidth>innerWidth}})()`,
           );
           assert.equal(state.count, 1);
           assert.equal(state.index, index);
           assert.equal(state.border, '1px');
           assert.equal(state.weight, '600');
           assert.notEqual(state.background, 'rgba(0, 0, 0, 0)');
-          assert.notEqual(state.shadow, 'none');
+          assert.equal(state.shadow, 'none');
+          assert.equal(state.background, state.sidebar);
+          assert.equal(state.selectedColor, state.sidebarColor);
           assert.equal(state.inside, true);
           assert.equal(state.overflow, false);
         }

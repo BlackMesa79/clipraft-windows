@@ -19,6 +19,7 @@ pub mod hook;
 mod hotkey_check;
 mod image_normalize;
 mod item_detail;
+mod link_actions;
 mod main_position;
 pub mod model;
 mod owned_files;
@@ -647,6 +648,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             move_to_group,
             item_detail,
             file_actions::file_action,
+            link_actions::open_link,
             reveal_item,
             set_sensitive,
             keep_sensitive,

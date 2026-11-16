@@ -34,7 +34,7 @@ pub(super) fn pinyin_text(text: &str) -> String {
     }
 }
 
-pub(super) fn is_link(kind: &str, text: &str) -> bool {
+pub(crate) fn is_link(kind: &str, text: &str) -> bool {
     // 先检查完整文本的字节数，避免截断后误判，也限制 URL 解析开销。
     if text.len() > LINK_TEXT_LIMIT {
         return false;

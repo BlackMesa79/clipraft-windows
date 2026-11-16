@@ -6,6 +6,7 @@ export interface Group {
 }
 export type HistoryView = 'all' | 'ungrouped' | number;
 export interface Item {
+  is_link?: boolean;
   created?: number;
   used_at?: number;
   file_status?: string | null;

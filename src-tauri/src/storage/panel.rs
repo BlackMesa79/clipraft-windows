@@ -43,7 +43,7 @@ impl Storage {
         }
         let mut items = Vec::with_capacity(ids.len());
         let now = unix_millis();
-        let mut statement = self.conn.prepare_cached("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview FROM items WHERE id=?1 AND (expires_at IS NULL OR expires_at>?2)")?;
+        let mut statement = self.conn.prepare_cached("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview,is_link FROM items WHERE id=?1 AND (expires_at IS NULL OR expires_at>?2)")?;
         for id in ids {
             if let Some(item) = statement
                 .query_row(rusqlite::params![id, now], item_view)

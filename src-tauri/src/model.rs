@@ -13,6 +13,8 @@ pub struct Clip {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ItemView {
     #[serde(default)]
+    pub is_link: bool,
+    #[serde(default)]
     pub file_status: Option<String>,
     pub id: String,
     #[serde(default)]
