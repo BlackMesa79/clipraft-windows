@@ -1,7 +1,8 @@
 use super::{
+    capture_paused,
     maintenance::CaptureMaintenance,
     paste_job::{self, PasteRequest},
-    paused, platform, queue_capture, refresh, report, save_capture, Job, State, CAPTURE_GATE,
+    platform, queue_capture, refresh, report, save_capture, Job, State, CAPTURE_GATE,
     CAPTURE_PENDING, LISTENER,
 };
 use crate::{capture_policy::CaptureError, clipboard, diag};
@@ -63,7 +64,7 @@ fn capture_job(app: &AppHandle, state: &State, maintenance: &mut CaptureMaintena
             return;
         }
     };
-    if paused() {
+    if capture_paused() {
         CAPTURE_PENDING.store(false, Ordering::Release);
         return;
     }

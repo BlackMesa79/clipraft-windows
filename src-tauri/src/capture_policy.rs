@@ -4,6 +4,25 @@ use std::{
     time::Duration,
 };
 
+/// 恢复切换首次启动仅记录监听开始后的变化，不把旧剪贴板重新带入恢复库。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StartupCapture {
+    #[default]
+    Existing,
+    ChangesOnly,
+}
+impl StartupCapture {
+    pub(crate) fn initialize_sequence(self, last: &AtomicU32, current: impl FnOnce() -> u32) {
+        match self {
+            Self::Existing => {}
+            Self::ChangesOnly => {
+                last.store(current(), Ordering::Release);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureError {
     Busy,
@@ -464,5 +483,24 @@ mod tests {
         assert!(!logs[0].contains(content));
         assert!(logs[0]
             .contains("sequence=42 current=42 self_write=false busy=false retries=0 result=ok"));
+    }
+}
+
+#[cfg(test)]
+mod startup_capture_tests {
+    use super::*;
+    #[test]
+    fn restored_start_skips_existing_sequence_but_not_next_copy() {
+        let last = AtomicU32::new(0);
+        StartupCapture::ChangesOnly.initialize_sequence(&last, || 42);
+        assert_eq!(last.load(Ordering::Acquire), 42);
+        assert_ne!(last.load(Ordering::Acquire), 43);
+    }
+    #[test]
+    fn normal_start_keeps_existing_capture_behavior_without_sampling() {
+        let last = AtomicU32::new(0);
+        StartupCapture::Existing
+            .initialize_sequence(&last, || panic!("normal start must not sample"));
+        assert_eq!(last.load(Ordering::Acquire), 0);
     }
 }

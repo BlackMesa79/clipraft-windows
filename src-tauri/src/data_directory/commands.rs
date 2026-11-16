@@ -17,6 +17,7 @@ pub(crate) struct Plan {
     source: PathBuf,
     target: PathBuf,
     bytes: u64,
+    backup: PathBuf,
     displaced: Option<PathBuf>,
 }
 #[derive(Serialize)]
@@ -27,6 +28,28 @@ pub(crate) struct Status {
     enabled: bool,
     previous: Option<PathBuf>,
     displaced: Option<PathBuf>,
+    cleanup: Option<CleanupStatus>,
+}
+#[derive(Serialize)]
+struct CleanupStatus {
+    backup: PathBuf,
+    source: PathBuf,
+    initialized: bool,
+    complete: bool,
+    remaining: usize,
+    error: Option<String>,
+}
+impl From<super::backup::Cleanup> for CleanupStatus {
+    fn from(cleanup: super::backup::Cleanup) -> Self {
+        Self {
+            backup: cleanup.backup,
+            source: cleanup.source,
+            initialized: cleanup.initialized,
+            complete: cleanup.complete,
+            remaining: cleanup.remaining,
+            error: cleanup.error,
+        }
+    }
 }
 fn main_only(window: &WebviewWindow) -> Result<(), String> {
     if window.label() != "main" {
@@ -35,7 +58,7 @@ fn main_only(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 impl DirectoryControl {
-    fn active_configuration(&self) -> Result<Configuration> {
+    pub(super) fn active_configuration(&self) -> Result<Configuration> {
         let config = self.locations.read().with_context(|| {
             format!(
                 "启动定位不可用，迁移未执行。当前数据仍在 {}；请勿清空目录",
@@ -45,11 +68,22 @@ impl DirectoryControl {
         if fs::canonicalize(&config.root)? != self.root {
             bail!("启动定位与当前数据目录不一致，迁移未执行。当前数据仍在 {}；请通过恢复入口选择现有数据，不要清空目录", self.root.display());
         }
+        if config.replacement.is_some() {
+            bail!("恢复替换待重启完成，暂不允许其他目录操作");
+        }
         Ok(config)
     }
     pub(super) fn preview(&self, target: &Path) -> Result<Plan> {
         if self.locations.config.is_none() {
             bail!("当前隔离环境禁止更改数据目录");
+        }
+        if self
+            .active_configuration()?
+            .cleanup
+            .as_ref()
+            .is_some_and(|plan| !plan.complete)
+        {
+            bail!("上次迁移源清理尚未完成，请先处理待清理项目");
         }
         if self.active_configuration()?.pending.is_some() {
             bail!("已有待执行的迁移，请先重启完成或恢复");
@@ -59,9 +93,15 @@ impl DirectoryControl {
         let displaced = super::restore::preview(&target, &self.locations)?;
         paths::writable(&target)?;
         let bytes = files::measure(&self.root)?;
-        paths::capacity(&target, bytes)?;
+        paths::capacity(&target, bytes.checked_mul(2).context("迁移空间预算溢出")?)?;
+        let ticket = config::nonce()?;
+        let backup = target
+            .parent()
+            .context("目标缺少父目录")?
+            .join(format!(".clipraft-backup-{ticket}"));
         let plan = Plan {
-            ticket: config::nonce()?,
+            ticket,
+            backup,
             source: self.root.clone(),
             target,
             bytes,
@@ -86,7 +126,12 @@ impl DirectoryControl {
         let _guard = files::lock(&target)?;
         super::restore::confirm(&target, plan.displaced.as_deref(), &self.locations)?;
         paths::writable(&target)?;
-        paths::capacity(&target, files::measure(&self.root)?)?;
+        paths::capacity(
+            &target,
+            files::measure(&self.root)?
+                .checked_mul(2)
+                .context("迁移空间预算溢出")?,
+        )?;
         let mut config = self.active_configuration()?;
         if config.pending.is_some() {
             bail!(
@@ -98,7 +143,7 @@ impl DirectoryControl {
         config.pending = Some(Migration {
             source: self.root.clone(),
             target,
-            id: config::nonce()?,
+            id: plan.ticket.clone(),
             displaced: plan.displaced.clone(),
         });
         self.locations.save(&config)?;
@@ -125,6 +170,7 @@ pub(crate) fn data_directory_status(
         enabled: state.locations.config.is_some(),
         previous: config.previous,
         displaced: config.displaced,
+        cleanup: config.cleanup.map(Into::into),
     })
 }
 #[tauri::command]
@@ -168,11 +214,17 @@ pub(crate) async fn migrate_data_directory(
     state: tauri::State<'_, Arc<DirectoryControl>>,
 ) -> Result<(), String> {
     main_only(&window)?;
+    let restart = crate::archive_service::service(&app)
+        .map_err(|error| error.to_string())?
+        .jobs
+        .begin_restart()
+        .map_err(|error| error.to_string())?;
     let shared = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || shared.schedule(&ticket))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| format!("{error:#}"))?;
+    restart.commit();
     app.request_restart();
     Ok(())
 }

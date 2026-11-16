@@ -65,7 +65,10 @@ struct Listener {
     registered: Option<Hotkey>,
 }
 
-pub(super) fn start(initial: Hotkey) -> Result<(u32, Option<String>)> {
+pub(super) fn start(
+    initial: Hotkey,
+    startup: crate::capture_policy::StartupCapture,
+) -> Result<(u32, Option<String>)> {
     let (requests, pending) = mpsc::channel();
     HOTKEY_REQUESTS
         .set(requests)
@@ -73,7 +76,7 @@ pub(super) fn start(initial: Hotkey) -> Result<(u32, Option<String>)> {
     let (reply, wait) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("clipboard-listener".into())
-        .spawn(move || run(initial, pending, reply))
+        .spawn(move || run(initial, pending, reply, startup))
         .context("剪贴板监听线程创建失败")?;
     wait.recv().map_err(|_| anyhow!("剪贴板监听线程启动失败"))?
 }
@@ -82,8 +85,9 @@ fn run(
     initial: Hotkey,
     pending: Receiver<BrokerRequest>,
     reply: SyncSender<Result<(u32, Option<String>)>>,
+    startup: crate::capture_policy::StartupCapture,
 ) {
-    let mut listener = match Listener::create() {
+    let mut listener = match Listener::create(startup) {
         Ok(listener) => listener,
         Err(error) => {
             record("broker startup error reply failed", reply.send(Err(error)));
@@ -102,7 +106,7 @@ fn run(
 }
 
 impl Listener {
-    fn create() -> Result<Self> {
+    fn create(startup: crate::capture_policy::StartupCapture) -> Result<Self> {
         let instance: HINSTANCE = unsafe { GetModuleHandleW(None)? }.into();
         let class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -120,11 +124,11 @@ impl Listener {
             timer: false,
             registered: None,
         };
-        listener.open_window()?;
+        listener.open_window(startup)?;
         Ok(listener)
     }
 
-    fn open_window(&mut self) -> Result<()> {
+    fn open_window(&mut self, startup: crate::capture_policy::StartupCapture) -> Result<()> {
         let window = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -143,6 +147,12 @@ impl Listener {
         }
         .context("监听窗口创建失败")?;
         self.window = window;
+        startup.initialize_sequence(&crate::clipboard::LAST_SEQUENCE, || unsafe {
+            windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
+        });
+        if startup == crate::capture_policy::StartupCapture::ChangesOnly {
+            diag::write("restored_startup skip_existing_clipboard=true".into());
+        }
         unsafe { AddClipboardFormatListener(window) }.context("剪贴板监听注册失败")?;
         self.listening = true;
         if unsafe { SetTimer(Some(window), TIMER_ID, TIMER_INTERVAL_MS, None) } == 0 {

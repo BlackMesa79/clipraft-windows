@@ -3,6 +3,7 @@ mod app_setup;
 mod app_smoke;
 mod app_tray;
 mod appearance;
+pub mod archive;
 mod autostart;
 mod capture_policy;
 mod capture_source;
@@ -20,6 +21,7 @@ mod image_normalize;
 mod item_detail;
 mod main_position;
 pub mod model;
+mod owned_files;
 mod owner_flush;
 pub mod panel_neighborhood;
 pub mod panel_session;
@@ -28,6 +30,7 @@ pub mod platform;
 mod quick_geometry;
 mod rich_preview;
 mod runtime;
+pub use runtime::{archive_service, archive_task, snapshot_task};
 pub mod sensitive;
 pub mod settings;
 pub mod storage;
@@ -469,6 +472,9 @@ fn frontend_ready(
                 .map_err(|error| error.to_string())?;
         }
     }
+    if window.label() == "main" {
+        data_directory::cleanup::after_frontend_ready(window.app_handle());
+    }
     if diag::enabled() {
         diag::write(format!(
             "frontend_ready window={} hook_ready={}",
@@ -616,6 +622,17 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             get_settings,
             get_setting_options,
             set_hotkey_recording,
+            runtime::archive_commands::activate_restored_archive,
+            runtime::cleanup_commands::scan_archive_staging,
+            runtime::cleanup_commands::preview_staging_cleanup,
+            runtime::cleanup_commands::confirm_staging_cleanup,
+            runtime::cleanup_commands::cancel_staging_cleanup,
+            runtime::cleanup_commands::retry_migration_cleanup,
+            runtime::archive_commands::start_archive_export,
+            runtime::archive_commands::start_archive_restore,
+            runtime::archive_commands::choose_archive_path,
+            archive_service::archive_task_status,
+            archive_service::cancel_archive_task,
             check_hotkeys,
             update_settings,
             preview_cleanup,
@@ -682,12 +699,18 @@ pub fn run() {
         Ok(data) => data,
         Err(error) => startup_failed(&error, smoke),
     };
+    let startup_capture = session.startup_capture;
     let root = session.root.clone();
     let cache = session.cache.clone();
     let control = session.control.clone();
     let result = application_builder()
         .setup(move |app| {
+            app.manage(startup_capture);
             app.manage(control);
+            app.manage(std::sync::Arc::new(
+                runtime::cleanup_commands::Reviews::default(),
+            ));
+            app.manage(archive_service::Service::new(root.clone()));
             let result = if smoke {
                 app_setup::initialize_smoke(app, storage, root, cache)
             } else {

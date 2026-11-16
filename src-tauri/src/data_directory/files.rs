@@ -16,7 +16,7 @@ pub(super) struct Entry {
     pub bytes: u64,
     pub hash: String,
 }
-pub(super) fn plain_metadata(path: &Path) -> Result<fs::Metadata> {
+pub(crate) fn plain_metadata(path: &Path) -> Result<fs::Metadata> {
     use std::os::windows::fs::MetadataExt;
     let metadata = fs::symlink_metadata(path)?;
     // Junction 与符号链接均不能将迁移写入引向清单之外。
@@ -181,4 +181,22 @@ pub(super) fn copy_verified(source: &Path, target: &Path, entry: &Entry) -> Resu
         bail!("复制期间源文件发生变化：{}", entry.path.display());
     }
     Ok(())
+}
+
+/// 源清理比复制更严格：data目录中的未知用户文件只备份，不自动删除。
+pub(super) fn cleanup_managed(path: &Path) -> bool {
+    if path.components().count() == 1 {
+        return path.to_str().is_some_and(|name| {
+            matches!(name, "history.db" | "key.bin") || name.starts_with("history.db.bak-v")
+        });
+    }
+    let Ok(hash) = path.strip_prefix("data/blobs") else {
+        return false;
+    };
+    hash.to_str().is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }

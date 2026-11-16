@@ -11,8 +11,9 @@ use windows::{
         UI::{
             Shell::{
                 CLSID_ProgressDialog, FileOpenDialog, IFileOpenDialog, IProgressDialog,
-                FOS_DONTADDTORECENT, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST,
-                FOS_PICKFOLDERS, PROGDLG_NOCANCEL, SIGDN_FILESYSPATH,
+                FILEOPENDIALOGOPTIONS, FOS_DONTADDTORECENT, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+                FOS_NOCHANGEDIR, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, PROGDLG_NOCANCEL,
+                SIGDN_FILESYSPATH,
             },
             WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONWARNING, MB_YESNO},
         },
@@ -41,17 +42,26 @@ pub(super) fn select_destination(owner: Option<isize>) -> Result<Option<PathBuf>
 pub(super) fn select_existing() -> Result<Option<PathBuf>> {
     select_folder(None, "选择现有片筏数据目录（包含 history.db 与 key.bin）")
 }
+pub(crate) fn select_archive(owner: Option<isize>) -> Result<Option<PathBuf>> {
+    select_path(owner, "选择片筏密码归档", FOS_FILEMUSTEXIST)
+}
+pub(crate) fn select_archive_folder(owner: Option<isize>) -> Result<Option<PathBuf>> {
+    select_folder(owner, "选择归档或恢复新目录的父文件夹")
+}
 fn select_folder(owner: Option<isize>, title: &str) -> Result<Option<PathBuf>> {
+    select_path(owner, title, FOS_PICKFOLDERS)
+}
+fn select_path(
+    owner: Option<isize>,
+    title: &str,
+    mode: FILEOPENDIALOGOPTIONS,
+) -> Result<Option<PathBuf>> {
     let _com = Com::start()?;
     unsafe {
         let picker: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
         picker.SetOptions(
-            FOS_PICKFOLDERS
-                | FOS_FORCEFILESYSTEM
-                | FOS_PATHMUSTEXIST
-                | FOS_NOCHANGEDIR
-                | FOS_DONTADDTORECENT,
+            mode | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT,
         )?;
         let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
         picker.SetTitle(PCWSTR(title.as_ptr()))?;

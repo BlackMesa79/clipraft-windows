@@ -15,6 +15,7 @@ mod migrations;
 mod panel;
 #[cfg(test)]
 mod panel_tests;
+mod portable_snapshot;
 mod predict;
 #[cfg(test)]
 mod prediction_tests;
@@ -25,6 +26,11 @@ mod search_tests;
 mod sensitive_tests;
 mod sensitivity;
 mod settings;
+mod snapshot;
+mod snapshot_files;
+pub(crate) use snapshot_files::SnapshotFiles;
+#[cfg(test)]
+mod snapshot_tests;
 #[cfg(test)]
 mod source_tests;
 use crate::{

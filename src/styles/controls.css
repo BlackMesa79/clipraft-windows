@@ -26,9 +26,10 @@
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+/* 控件可能紧贴窗口或滚动区边缘，焦点环统一向内绘制以免被裁切。 */
 :where(button, input, select, textarea):focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 .settings-view input,
 .settings-view select,

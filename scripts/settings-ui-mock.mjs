@@ -9,6 +9,7 @@ export const settingsMock = `(() => {
   window.directoryRequests=[];
   const invoke=window.__TAURI_INTERNALS__.invoke;
   window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
+    if(cmd==='archive_task_status')return null;
     if(cmd==='data_directory_status'){
       if(window.failDirectoryStatus)throw Error('合成目录状态失败');
       return JSON.parse(JSON.stringify(window.directoryStatus));

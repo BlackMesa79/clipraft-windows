@@ -1,0 +1,118 @@
+{
+  "date": "2026-11-16",
+  "status": "用户确认B1及细节优化全部验收通过",
+  "rust": {
+    "passed": 912,
+    "failed": 0,
+    "ignored": 5
+  },
+  "stages": [
+    {
+      "name": "fmt",
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "exit_code": 0
+    },
+    {
+      "name": "rust",
+      "exit_code": 0
+    },
+    {
+      "name": "format",
+      "exit_code": 0
+    },
+    {
+      "name": "lint",
+      "exit_code": 0
+    },
+    {
+      "name": "build",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t2-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t3-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t4-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t5-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t6-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t7-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t8-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "u1-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "u2-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "u3-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "u4-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "sensitive-privacy-ui",
+      "exit_code": 0
+    },
+    {
+      "name": "main-preview-state",
+      "exit_code": 0
+    },
+    {
+      "name": "hotkey-recording-state",
+      "exit_code": 0
+    },
+    {
+      "name": "b1-ui",
+      "exit_code": 0
+    }
+  ],
+  "ui": {
+    "passed": 26,
+    "focus_assertions": 34
+  },
+  "isolated_smoke": {
+    "clipboard_listener_enabled": false,
+    "keyboard_hook_enabled": false,
+    "main_frontend_ready": true,
+    "preview_protocol_loaded": true,
+    "quick_frontend_ready": true,
+    "thumbnail_protocol_loaded": true,
+    "visual_verified": false
+  },
+  "local_evidence": ".tools\\focus-audit-20261116-224933\\results.json",
+  "remaining_coverage": [
+    "跨Windows账户/电脑未验证",
+    "跨固定卷及真实富文本样本、性能类5项ignored未改为通过"
+  ],
+  "scope": "本次收口只更新文档并提交，沿用最终产品版本已通过的检查，不重复运行产品测试"
+}

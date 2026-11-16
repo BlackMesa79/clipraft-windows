@@ -16,6 +16,7 @@ use windows::{
     },
 };
 mod key;
+pub(crate) use key::install_master_key;
 pub use key::{master_key, DataError};
 
 // 前台跟踪与粘贴目标校验共用同一规则，菜单窗口也不能成为目标。

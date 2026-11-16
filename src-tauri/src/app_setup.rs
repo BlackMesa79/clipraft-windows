@@ -12,7 +12,17 @@ use tauri::{Listener, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 pub(crate) fn initialize(app: &mut tauri::App, storage: Storage, cache: PathBuf) -> Result<()> {
     let state = runtime::start(app.handle().clone(), storage, false)?;
     create_windows(app, &state, &cache)?;
-    app_tray::create(app)
+    app_tray::create(app)?;
+    if let Some(directory) =
+        app.try_state::<std::sync::Arc<crate::data_directory::DirectoryControl>>()
+    {
+        if let Err(error) = directory.acknowledge_restored_startup() {
+            crate::diag::write(format!(
+                "restored startup marker acknowledgement failed: {error:#}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn initialize_smoke(

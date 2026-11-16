@@ -148,7 +148,7 @@ pub(super) fn target_path(source: &Path, target: &Path) -> Result<PathBuf> {
     fixed_volume(&target)?;
     Ok(target)
 }
-pub(super) fn capacity(target: &Path, bytes: u64) -> Result<()> {
+pub(crate) fn capacity(target: &Path, bytes: u64) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     let wide: Vec<u16> = target.as_os_str().encode_wide().chain([0]).collect();
     let mut free = 0u64;

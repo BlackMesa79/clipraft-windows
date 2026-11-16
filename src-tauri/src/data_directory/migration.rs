@@ -34,6 +34,8 @@ pub(super) fn execute(
     database::checkpoint(&task.source)?;
     database::verify(&task.source)?;
     let entries = files::inventory(&task.source)?;
+    progress("正在创建并验证迁移前备份", 0, 0);
+    let cleanup = super::backup::prepare(task, &entries)?;
     progress("正在保留默认目录旧数据", 0, 0);
     super::restore::preserve(task, locations)?;
     let stage = prepare_stage(task, &entries)?;
@@ -46,6 +48,7 @@ pub(super) fn execute(
     committed.root = target;
     committed.previous = Some(task.source.clone());
     committed.pending = None;
+    committed.cleanup = Some(cleanup);
     committed.displaced = task.displaced.clone();
     locations.save(&committed)?;
     // 提交后不再返回失败，防止用户误以为仍可退回旧快照。

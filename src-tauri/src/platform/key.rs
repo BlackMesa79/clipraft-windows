@@ -97,14 +97,19 @@ pub fn master_key(root: &Path) -> Result<Zeroizing<[u8; 32]>> {
         bail!("数据库已存在但密钥缺失，拒绝生成新密钥");
     }
     let key = crate::storage::crypto::random_key()?;
-    let protected = protect(key.as_ref())?;
+    install_master_key(root, &key)?;
+    Ok(key)
+}
+
+pub(crate) fn install_master_key(root: &Path, key: &[u8; 32]) -> Result<()> {
+    let protected = protect(key)?;
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)?;
+        .open(root.join("key.bin"))?;
     file.write_all(&protected)?;
     file.sync_all()?;
-    Ok(key)
+    Ok(())
 }
 
 #[cfg(test)]

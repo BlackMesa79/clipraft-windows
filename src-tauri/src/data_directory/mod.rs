@@ -1,16 +1,24 @@
 //! 启动定位、目录独占和重启后迁移；不在运行时替换 Storage。
+mod activation;
+mod backup;
+pub(crate) mod cleanup;
 pub(crate) mod commands;
 mod config;
 mod database;
 mod dialog;
+pub(crate) use dialog::{select_archive, select_archive_folder};
 mod files;
 mod migration;
 mod paths;
+mod replacement;
 mod restore;
 #[cfg(test)]
 mod tests;
 use anyhow::{bail, Context, Result};
+pub(crate) use config::move_new;
 use config::Configuration;
+pub(crate) use files::plain_metadata;
+pub(crate) use paths::capacity;
 use paths::Locations;
 use std::{
     fs::{self, File},
@@ -19,6 +27,7 @@ use std::{
 };
 
 pub(crate) struct Session {
+    pub startup_capture: crate::capture_policy::StartupCapture,
     pub root: PathBuf,
     pub cache: PathBuf,
     pub control: Arc<DirectoryControl>,
@@ -58,6 +67,7 @@ impl Session {
         };
         let root = fs::canonicalize(config.root)?;
         Ok(Self {
+            startup_capture: config.startup_capture,
             root: root.clone(),
             cache: locations.cache.clone(),
             control: Arc::new(DirectoryControl {
@@ -101,7 +111,8 @@ fn load_data(locations: &Locations) -> Result<(Configuration, File)> {
             config.root.display()
         )
     })?;
-    if (locations.configured()? || locations.cache.try_exists()?)
+    if config.replacement.is_none()
+        && (locations.configured()? || locations.cache.try_exists()?)
         && (!root.join("history.db").is_file() || !root.join("key.bin").is_file())
     {
         bail!(
@@ -110,6 +121,10 @@ fn load_data(locations: &Locations) -> Result<(Configuration, File)> {
         );
     }
     let source_lock = files::startup_lock(&root)?;
+    if config.replacement.is_some() {
+        let committed = replacement::execute(locations, &config)?;
+        return Ok((committed, source_lock));
+    }
     if config.pending.is_none() {
         return Ok((config, source_lock));
     }

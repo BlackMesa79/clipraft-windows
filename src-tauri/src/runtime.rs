@@ -1,5 +1,9 @@
+pub(crate) mod archive_commands;
+pub mod archive_service;
+pub mod archive_task;
 mod broker;
 mod broker_messages;
+pub(crate) mod cleanup_commands;
 pub(crate) mod history_gate;
 mod history_index;
 mod main_window;
@@ -7,6 +11,7 @@ mod maintenance;
 mod panel_controller;
 mod paste_job;
 mod settings_update;
+pub mod snapshot_task;
 #[cfg(test)]
 mod test_support;
 mod worker;
@@ -34,7 +39,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(test)]
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 #[cfg(test)]
@@ -113,6 +117,9 @@ static CAPTURE_GATE: Mutex<()> = Mutex::new(());
 static PAUSED: AtomicBool = AtomicBool::new(false);
 pub fn paused() -> bool {
     PAUSED.load(Ordering::Acquire)
+}
+fn capture_paused() -> bool {
+    paused() || snapshot_task::active()
 }
 static CAPTURE_PENDING: AtomicBool = AtomicBool::new(false);
 use clipboard::LAST_SEQUENCE;
@@ -246,7 +253,7 @@ fn refresh_snapshots(state: &State) -> Result<()> {
     Ok(())
 }
 fn queue_capture() {
-    if paused() {
+    if capture_paused() {
         return;
     }
     if unsafe { GetClipboardSequenceNumber() } == LAST_SEQUENCE.load(Ordering::Acquire) {
@@ -509,16 +516,24 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         .set(control)
         .map_err(|_| anyhow!("控制线程已启动"))?;
     if !smoke {
-        initialize_native(&state, &settings)?;
+        let startup = app
+            .try_state::<crate::capture_policy::StartupCapture>()
+            .map(|value| *value.inner())
+            .unwrap_or_default();
+        initialize_native(&state, &settings, startup)?;
     }
     Ok(state)
 }
-fn initialize_native(state: &State, settings: &Settings) -> Result<()> {
+fn initialize_native(
+    state: &State,
+    settings: &Settings,
+    startup: crate::capture_policy::StartupCapture,
+) -> Result<()> {
     if let Err(error) = crate::autostart::set(settings.autostart) {
         update_error(state, Some(error.to_string()))?;
     }
     clipboard::initialize()?;
-    let (receiver, error) = broker::start(settings.main_hotkey)?;
+    let (receiver, error) = broker::start(settings.main_hotkey, startup)?;
     update_startup_error(state, error)?;
     hook::start(receiver)
 }

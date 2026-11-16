@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { directoryLabel } from './directoryDisplay';
 const props = defineProps<{ disabled: boolean; unsaved: boolean }>();
 const emit = defineEmits<{ busy: [active: boolean] }>();
 interface DirectoryStatus {
@@ -10,8 +11,17 @@ interface DirectoryStatus {
   enabled: boolean;
   previous: string | null;
   displaced?: string | null;
+  cleanup?: {
+    backup: string;
+    source: string;
+    initialized: boolean;
+    complete: boolean;
+    remaining: number;
+    error: string | null;
+  } | null;
 }
 interface MigrationPlan {
+  backup?: string;
   ticket: string;
   source: string;
   target: string;
@@ -23,15 +33,6 @@ const plan = ref<MigrationPlan>();
 const error = ref('');
 const working = ref(false);
 const restarting = ref(false);
-function directoryLabel(path: string): string {
-  // Windows 规范化路径保留在迁移协议中，仅调整常见盘符和 UNC 路径的展示。
-  const extendedPrefix = '\\\\?\\';
-  const uncPrefix = '\\\\?\\UNC\\';
-  if (path.startsWith(uncPrefix)) return '\\\\' + path.slice(uncPrefix.length);
-  const drivePath = path.slice(extendedPrefix.length);
-  if (path.startsWith(extendedPrefix) && /^[a-z]:\\/i.test(drivePath)) return drivePath;
-  return path;
-}
 function setBusy(active: boolean): void {
   working.value = active;
   emit('busy', active);
@@ -67,12 +68,39 @@ async function migrate(): Promise<void> {
     setBusy(false);
   }
 }
-onMounted(async () => {
+let disposed = false;
+let timer: ReturnType<typeof setTimeout> | undefined;
+async function refresh(): Promise<void> {
   try {
     status.value = await invoke<DirectoryStatus>('data_directory_status');
   } catch (reason) {
-    error.value = '读取数据目录失败：' + String(reason);
+    if (!disposed) error.value = '读取数据目录失败：' + String(reason);
   }
+  if (!disposed)
+    timer = setTimeout(() => {
+      void refresh();
+    }, 1500);
+}
+async function retryCleanup(): Promise<void> {
+  if (props.disabled || working.value) return;
+  setBusy(true);
+  error.value = '';
+  try {
+    await invoke('retry_migration_cleanup');
+  } catch (reason) {
+    error.value = String(reason);
+  } finally {
+    setBusy(false);
+    clearTimeout(timer);
+    await refresh();
+  }
+}
+onMounted(() => {
+  void refresh();
+});
+onUnmounted(() => {
+  disposed = true;
+  clearTimeout(timer);
 });
 </script>
 
@@ -82,7 +110,7 @@ onMounted(async () => {
       <p>{{ status.custom ? '自定义数据目录' : '默认数据目录' }}</p>
       <p class="directory-path" data-current-directory>{{ directoryLabel(status.current) }}</p>
       <p class="detail-note"
-        >历史记录、分组、收藏与设置保存在此目录。更改后迁移已有数据并重启，请勿手工清空目录。</p
+        >历史记录、分组、收藏与设置保存在此目录。迁移前会在源目录外保留完整加密备份，切换并成功初始化后按清单清理旧源文件，请勿手工清空目录。</p
       >
       <p v-if="!status.enabled" class="detail-note">当前为隔离测试环境，已禁用数据目录更改。</p>
       <div class="directory-actions">
@@ -99,10 +127,38 @@ onMounted(async () => {
           >恢复默认位置</button
         >
       </div>
-      <template v-if="status.previous">
-        <p class="detail-note">上次迁移保留副本（不随新数据同步，可能仍含已删除的敏感记录）：</p>
+      <template
+        v-if="status.previous && (!status.cleanup || status.previous !== status.cleanup.source)"
+      >
+        <p class="detail-note">上次切换保留副本（不随新数据同步，可能仍含已删除的敏感记录）：</p>
         <p class="directory-path" data-previous-directory>{{ directoryLabel(status.previous) }}</p>
       </template>
+      <div v-if="status.cleanup" class="directory-confirm" data-migration-cleanup>
+        <p>迁移前完整备份（使用原账户密钥，保留后不会与新库同步）：</p>
+        <p class="directory-path">{{ directoryLabel(status.cleanup.backup) }}</p>
+        <p
+          >旧源位置：<span class="directory-path">{{
+            directoryLabel(status.cleanup.source)
+          }}</span></p
+        >
+        <p role="status">{{
+          status.cleanup.complete
+            ? '迁移成功，源清单文件已清理；日志、缓存和额外文件保留。'
+            : '迁移成功，旧文件待清理；当前继续使用新库。'
+        }}</p>
+        <p v-if="status.cleanup.error" class="error">{{ status.cleanup.error }}</p>
+        <button
+          v-if="!status.cleanup.complete"
+          type="button"
+          data-retry-migration-cleanup
+          :disabled="disabled || working"
+          @click="retryCleanup"
+          >重试源文件清理</button
+        >
+        <p class="detail-note"
+          >备份仍含完整旧历史及可能的敏感记录，请妥善保管。只有身份和内容未变的源文件会被清理。</p
+        >
+      </div>
       <template v-if="status.displaced">
         <p class="detail-note">恢复默认时保留的旧数据（未与当前历史合并）：</p>
         <p class="directory-path" data-displaced-directory>{{
@@ -112,6 +168,13 @@ onMounted(async () => {
     </template>
     <p v-else-if="!error" role="status">正在读取数据目录…</p>
     <div v-if="plan" class="directory-confirm" role="group" aria-label="确认数据迁移">
+      <template v-if="plan.backup"
+        ><p>迁移前备份位置</p
+        ><p class="directory-path" data-migration-backup>{{ directoryLabel(plan.backup) }}</p
+        ><p class="detail-note"
+          >验证备份和目标成功、首次初始化完成后，清理源管理文件；备份继续保留。失败清理可重试，不回滚新库。</p
+        ></template
+      >
       <p>源目录</p
       ><p class="directory-path" data-source-directory>{{ directoryLabel(plan.source) }}</p>
       <p>目标目录</p

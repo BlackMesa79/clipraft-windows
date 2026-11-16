@@ -161,7 +161,7 @@
 }
 .search-tools input:focus {
   outline: 2px solid #70a4aa;
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 .kind-filters {
   display: flex;
@@ -370,7 +370,7 @@
 .main-window button:focus-visible,
 .main-window select:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 .main-window .settings-toggle,
 .compact-toggle {
@@ -439,10 +439,17 @@
   flex-wrap: wrap;
 }
 .main-window .group-editor input {
+  border-color: var(--line);
   width: 100%;
   min-width: 0;
   background: var(--bg);
   color: var(--text);
+}
+/* 焦点环向内绘制，避免被侧栏滚动容器裁掉左右边缘。 */
+.main-window .group-sidebar button:focus-visible,
+.main-window .group-editor input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 .main-window .search-tools {
   padding: 18px 20px 12px;
@@ -1089,7 +1096,7 @@
 }
 .searchbox:focus-within {
   outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 .searchbox kbd {
   font: 10px inherit;

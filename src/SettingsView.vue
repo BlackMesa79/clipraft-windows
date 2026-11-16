@@ -3,6 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import DataDirectorySettings from './DataDirectorySettings.vue';
+import ArchiveSettings from './ArchiveSettings.vue';
+import StagingSettings from './StagingSettings.vue';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
 import {
   shortcutLabel,
@@ -27,6 +29,8 @@ const error = ref(''),
   busy = ref(false),
   pending = ref<{ settings: Settings; count: number }>();
 const appName = ref('');
+const archiveBusy = ref(false);
+const cleanupBusy = ref(false);
 const categories = [
   { id: 'general', label: '通用' },
   { id: 'appearance', label: '外观' },
@@ -307,7 +311,8 @@ function addApp() {
   error.value = '';
 }
 async function save() {
-  if (busy.value || !draft.value || !original.value || validation.value) return;
+  if (busy.value || archiveBusy.value || !draft.value || !original.value || validation.value)
+    return;
   error.value = '';
   status.value = '';
   busy.value = true;
@@ -343,7 +348,7 @@ async function submit(next: Settings) {
   emit('saved', saved);
 }
 async function confirm() {
-  if (!pending.value || busy.value) return;
+  if (!pending.value || busy.value || archiveBusy.value) return;
   const next = pending.value.settings;
   busy.value = true;
   error.value = '';
@@ -444,10 +449,16 @@ onUnmounted(() => {
           <fieldset :disabled="busy" v-show="category === 'storage'" data-category="storage">
             <legend>数据存储</legend>
             <DataDirectorySettings
-              :disabled="busy"
+              :disabled="busy || archiveBusy || cleanupBusy"
               :unsaved="unsavedSettings"
               @busy="busy = $event"
             />
+            <ArchiveSettings
+              :disabled="busy || cleanupBusy"
+              :unsaved="unsavedSettings"
+              @busy="archiveBusy = $event"
+            />
+            <StagingSettings :disabled="busy || archiveBusy" @busy="cleanupBusy = $event" />
           </fieldset>
           <fieldset :disabled="busy" v-show="category === 'history'" data-category="history">
             <legend>历史记录</legend>
@@ -663,7 +674,8 @@ onUnmounted(() => {
               >将立即删除
               {{ pending.count }} 条记录。预估后新增或到期的记录可能使实际数量变化。</span
             >
-            <button type="button" :disabled="busy" @click="confirm">确认保存并清理</button
+            <button type="button" :disabled="busy || archiveBusy" @click="confirm"
+              >确认保存并清理</button
             ><button type="button" :disabled="busy" @click="pending = undefined">取消</button>
           </div>
           <p v-if="status" role="status">{{ status }}</p>
@@ -674,7 +686,9 @@ onUnmounted(() => {
         <div class="settings-buttons">
           <button
             type="submit"
-            :disabled="busy || !!validation || !!pending || (hotkeysChanged && checkBlocked)"
+            :disabled="
+              busy || archiveBusy || !!validation || !!pending || (hotkeysChanged && checkBlocked)
+            "
             >{{ busy ? '正在处理…' : '保存' }}</button><button
             type="button"
             :disabled="busy"

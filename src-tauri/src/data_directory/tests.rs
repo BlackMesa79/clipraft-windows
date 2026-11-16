@@ -72,9 +72,12 @@ impl Fixture {
     fn task(&self) -> Configuration {
         Configuration {
             version: 1,
+            startup_capture: Default::default(),
             root: self.source.clone(),
             previous: None,
+            cleanup: None,
             displaced: None,
+            replacement: None,
             pending: Some(Migration {
                 source: self.source.clone(),
                 target: self.target.clone(),
@@ -568,9 +571,12 @@ fn returning(f: &Fixture) -> (Locations, Configuration) {
     let archive = restore::preview(&f.source, &f.locations).unwrap().unwrap();
     let task = Configuration {
         version: 1,
+        startup_capture: Default::default(),
         root: f.target.clone(),
         previous: Some(f.source.clone()),
+        cleanup: None,
         displaced: None,
+        replacement: None,
         pending: Some(Migration {
             source: f.target.clone(),
             target: f.source.clone(),
@@ -706,7 +712,7 @@ fn archive_path_outside_default_sibling_is_rejected_without_moving_data() {
     assert!(!f.target.join("outside").exists());
 }
 #[test]
-fn roundtrip_via_real_control_preserves_target_instead_of_requesting_cleanup() {
+fn roundtrip_via_real_control_waits_for_cleanup_then_reuses_clean_source() {
     let f = Fixture::new();
     let id = f.seed();
     let (_, guard) = f.migrate(&f.task()).unwrap();
@@ -716,14 +722,370 @@ fn roundtrip_via_real_control_preserves_target_instead_of_requesting_cleanup() {
         root: f.target.clone(),
         plan: Mutex::new(None),
     };
+    assert!(control.preview(&f.source).is_err());
+    control.mark_migration_initialized().unwrap();
+    control.retry_source_cleanup().unwrap();
+    assert!(!f.source.join("history.db").exists());
     let plan = control.preview(&f.source).unwrap();
     control.schedule(&plan.ticket).unwrap();
     let task = f.locations.read().unwrap();
-    assert!(task.pending.as_ref().unwrap().displaced.is_some());
+    assert!(task.pending.as_ref().unwrap().displaced.is_none());
     let (_, guard) = f.migrate(&task).unwrap();
     let key = crate::platform::master_key(&f.source).unwrap();
     let storage = Storage::open(&f.source, &key).unwrap();
     assert!(storage.preview_item(&id).is_ok());
     drop(storage);
     drop(guard);
+}
+
+#[test]
+fn restored_activation_preserves_source_and_next_session_opens_target() {
+    let f = Fixture::new();
+    let id = f.seed();
+    f.locations
+        .save(&Configuration::initial(f.source.clone()))
+        .unwrap();
+    let master = crate::platform::master_key(&f.source).unwrap();
+    let mut source = Storage::open(&f.source, &master).unwrap();
+    let restored = f.root.join("restored");
+    source.create_portable_snapshot(&restored, &master).unwrap();
+    crate::platform::install_master_key(&restored, &master).unwrap();
+    let before = files::inventory(&f.source).unwrap();
+    let guard = f.control().activate_restored(&restored).unwrap();
+    let config = f.locations.read().unwrap();
+    assert_eq!(config.root, fs::canonicalize(&restored).unwrap());
+    assert_eq!(config.previous, Some(f.source.clone()));
+    assert!(config.pending.is_none());
+    assert_eq!(files::inventory(&f.source).unwrap(), before);
+    assert!(files::lock(&restored).is_err());
+    drop(guard);
+    let session = Session::open_at(f.locations.clone()).unwrap();
+    let reopened = Storage::open(
+        &session.root,
+        &crate::platform::master_key(&session.root).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reopened.load(&id).unwrap().hash(), id);
+    assert!(source.load(&id).is_ok());
+}
+
+#[test]
+fn corrupt_or_busy_restored_database_never_changes_startup_location() {
+    let f = Fixture::new();
+    f.seed();
+    f.locations
+        .save(&Configuration::initial(f.source.clone()))
+        .unwrap();
+    let master = crate::platform::master_key(&f.source).unwrap();
+    let mut source = Storage::open(&f.source, &master).unwrap();
+    let restored = f.root.join("restored");
+    source.create_snapshot(&restored, &master).unwrap();
+    crate::platform::install_master_key(&restored, &master).unwrap();
+    let config_path = f.locations.config.as_ref().unwrap();
+    let before = fs::read(config_path).unwrap();
+    let guard = files::lock(&restored).unwrap();
+    assert!(f.control().activate_restored(&restored).is_err());
+    drop(guard);
+    assert_eq!(fs::read(config_path).unwrap(), before);
+    fs::write(restored.join("history.db"), b"corrupted").unwrap();
+    assert!(f.control().activate_restored(&restored).is_err());
+    assert_eq!(fs::read(config_path).unwrap(), before);
+    assert!(f.control().activate_restored(&f.source).is_err());
+}
+
+#[test]
+fn activation_rejects_pending_migration_and_isolated_configuration() {
+    let f = Fixture::new();
+    f.seed();
+    f.locations.save(&f.task()).unwrap();
+    assert!(f.control().activate_restored(&f.target).is_err());
+    assert!(f.locations.read().unwrap().pending.is_some());
+    let mut control = f.control();
+    control.locations.config = None;
+    assert!(control.activate_restored(&f.target).is_err());
+}
+
+#[test]
+fn failed_activation_config_write_keeps_original_location_and_both_databases() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new();
+    let id = f.seed();
+    f.locations
+        .save(&Configuration::initial(f.source.clone()))
+        .unwrap();
+    let master = crate::platform::master_key(&f.source).unwrap();
+    let mut source = Storage::open(&f.source, &master).unwrap();
+    let restored = f.root.join("restored");
+    source.create_portable_snapshot(&restored, &master).unwrap();
+    crate::platform::install_master_key(&restored, &master).unwrap();
+    let config_path = f.locations.config.as_ref().unwrap();
+    let before = fs::read(config_path).unwrap();
+    let hold = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(config_path)
+        .unwrap();
+    assert!(f.control().activate_restored(&restored).is_err());
+    assert_eq!(fs::read(config_path).unwrap(), before);
+    assert!(source.load(&id).is_ok());
+    Storage::verify_snapshot(&restored, &master).unwrap();
+    assert!(files::lock(&restored).is_ok());
+    drop(hold);
+}
+
+#[test]
+fn modified_restored_object_is_rechecked_before_activation() {
+    let f = Fixture::new();
+    f.seed();
+    f.locations
+        .save(&Configuration::initial(f.source.clone()))
+        .unwrap();
+    let master = crate::platform::master_key(&f.source).unwrap();
+    let mut source = Storage::open(&f.source, &master).unwrap();
+    let restored = f.root.join("restored");
+    source.create_snapshot(&restored, &master).unwrap();
+    crate::platform::install_master_key(&restored, &master).unwrap();
+    let before = fs::read(f.locations.config.as_ref().unwrap()).unwrap();
+    let object = fs::read_dir(restored.join("data/blobs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(object, b"modified after successful restore").unwrap();
+    assert!(f.control().activate_restored(&restored).is_err());
+    assert_eq!(
+        fs::read(f.locations.config.as_ref().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn b1_migration_backup_precedes_switch_and_source_cleanup_waits_for_initialization() {
+    let f = Fixture::new();
+    let id = f.seed();
+    fs::write(f.source.join("notes.txt"), b"user notes").unwrap();
+    fs::write(f.source.join("data/user.txt"), b"nested user file").unwrap();
+    fs::write(f.source.join("diag.log"), b"keep log").unwrap();
+    let (committed, guard) = f.migrate(&f.task()).unwrap();
+    let cleanup = committed.cleanup.as_ref().unwrap();
+    assert!(cleanup.backup.join("history.db").exists());
+    assert!(!cleanup.backup.starts_with(&f.source));
+    assert!(!cleanup.initialized);
+    let control = DirectoryControl {
+        locations: f.locations.clone(),
+        root: f.target.clone(),
+        plan: Mutex::new(None),
+    };
+    assert!(control.retry_source_cleanup().is_err());
+    assert!(f.source.join("history.db").exists());
+    let key = crate::platform::master_key(&f.target).unwrap();
+    let new_store = Storage::open(&f.target, &key).unwrap();
+    assert!(new_store.load(&id).is_ok());
+    control.mark_migration_initialized().unwrap();
+    control.retry_source_cleanup().unwrap();
+    let after = f.locations.read().unwrap();
+    assert_eq!(after.root, f.target);
+    assert!(after.cleanup.as_ref().unwrap().complete);
+    assert!(!f.source.join("history.db").exists());
+    assert!(!f.source.join("key.bin").exists());
+    assert_eq!(fs::read(f.source.join("notes.txt")).unwrap(), b"user notes");
+    assert!(f.source.join("diag.log").exists());
+    assert_eq!(
+        fs::read(f.source.join("data/user.txt")).unwrap(),
+        b"nested user file"
+    );
+    database::verify(&cleanup.backup).unwrap();
+    assert!(new_store.load(&id).is_ok());
+    control.retry_source_cleanup().unwrap();
+    drop(new_store);
+    drop(guard);
+}
+#[test]
+fn b1_cleanup_changed_source_is_retained_and_retry_never_rolls_back_target() {
+    let f = Fixture::new();
+    f.seed();
+    let (committed, guard) = f.migrate(&f.task()).unwrap();
+    let cleanup = committed.cleanup.unwrap();
+    let control = DirectoryControl {
+        locations: f.locations.clone(),
+        root: f.target.clone(),
+        plan: Mutex::new(None),
+    };
+    let original = fs::read(f.source.join("history.db.bak-v4")).unwrap();
+    fs::write(f.source.join("history.db.bak-v4"), b"changed source").unwrap();
+    control.mark_migration_initialized().unwrap();
+    assert!(control.retry_source_cleanup().is_err());
+    let after = f.locations.read().unwrap();
+    assert_eq!(after.root, f.target);
+    assert!(!after.cleanup.unwrap().complete);
+    assert_eq!(
+        fs::read(f.source.join("history.db.bak-v4")).unwrap(),
+        b"changed source"
+    );
+    assert!(f.source.join("history.db").exists(), "源变化时整批保留");
+    fs::write(f.source.join("history.db.bak-v4"), original).unwrap();
+    control.retry_source_cleanup().unwrap();
+    assert!(f.locations.read().unwrap().cleanup.unwrap().complete);
+    database::verify(&cleanup.backup).unwrap();
+    drop(guard);
+}
+#[test]
+fn b1_missing_backup_or_new_source_wal_prevents_source_deletion() {
+    let f = Fixture::new();
+    f.seed();
+    let (committed, guard) = f.migrate(&f.task()).unwrap();
+    let cleanup = committed.cleanup.unwrap();
+    let control = DirectoryControl {
+        locations: f.locations.clone(),
+        root: f.target.clone(),
+        plan: Mutex::new(None),
+    };
+    control.mark_migration_initialized().unwrap();
+    fs::write(f.source.join("history.db-wal"), b"new transactions").unwrap();
+    assert!(control.retry_source_cleanup().is_err());
+    assert!(f.source.join("key.bin").exists());
+    fs::remove_file(f.source.join("history.db-wal")).unwrap();
+    fs::write(cleanup.backup.join("history.db"), b"corrupted backup").unwrap();
+    assert!(control.retry_source_cleanup().is_err());
+    assert!(f.source.join("history.db").exists());
+    assert_eq!(f.locations.read().unwrap().root, f.target);
+    drop(guard);
+}
+#[test]
+fn b1_same_content_replacement_is_not_deleted_and_reboot_retries_pending_cleanup() {
+    let f = Fixture::new();
+    f.seed();
+    let (_, guard) = f.migrate(&f.task()).unwrap();
+    let path = f.source.join("history.db.bak-v4");
+    let bytes = fs::read(&path).unwrap();
+    fs::rename(&path, f.source.join("user-kept-copy")).unwrap();
+    fs::write(&path, bytes).unwrap();
+    drop(guard);
+    let session = Session::open_at(f.locations.clone()).unwrap();
+    session.control.mark_migration_initialized().unwrap();
+    assert!(session.control.retry_source_cleanup().is_err());
+    assert!(path.exists());
+    assert!(f.source.join("user-kept-copy").exists());
+    assert_eq!(f.locations.read().unwrap().root, f.target);
+}
+
+#[test]
+fn b1_cleanup_retry_after_partial_delete_and_source_lock_failure_is_idempotent() {
+    let f = Fixture::new();
+    f.seed();
+    let (committed, guard) = f.migrate(&f.task()).unwrap();
+    let cleanup = committed.cleanup.unwrap();
+    let control = DirectoryControl {
+        locations: f.locations.clone(),
+        root: f.target.clone(),
+        plan: Mutex::new(None),
+    };
+    control.mark_migration_initialized().unwrap();
+    let source_lock = files::lock(&f.source).unwrap();
+    assert!(control.retry_source_cleanup().is_err());
+    assert!(f.source.join("history.db").exists());
+    drop(source_lock);
+    crate::owned_files::remove(&f.source, &cleanup.entries[0]).unwrap();
+    control.retry_source_cleanup().unwrap();
+    control.retry_source_cleanup().unwrap();
+    assert!(f.locations.read().unwrap().cleanup.unwrap().complete);
+    assert_eq!(f.locations.read().unwrap().root, f.target);
+    drop(guard);
+}
+#[test]
+fn b1_invalid_backup_content_prevents_target_publication_and_configuration_switch() {
+    let f = Fixture::new();
+    f.seed();
+    let task = f.task();
+    f.locations.save(&task).unwrap();
+    let before = fs::read(f.locations.config.as_ref().unwrap()).unwrap();
+    let blob = fs::read_dir(f.source.join("data/blobs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(blob, b"synthetic corrupt blob").unwrap();
+    assert!(f.migrate(&task).is_err());
+    assert!(!f.target.join("history.db").exists());
+    assert!(f.source.join("history.db").exists());
+    assert_eq!(
+        fs::read(f.locations.config.as_ref().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn deferred_restored_activation_skips_old_clipboard_then_accepts_new_copy() {
+    use crate::capture_policy::{self, Snapshot, StartupCapture};
+    use std::sync::atomic::AtomicU32;
+    let f = Fixture::new();
+    let original_id = f.seed();
+    f.locations
+        .save(&Configuration::initial(f.source.clone()))
+        .unwrap();
+    let master = crate::platform::master_key(&f.source).unwrap();
+    let mut source = Storage::open(&f.source, &master).unwrap();
+    let restored = f.root.join("deferred-restored");
+    source.create_portable_snapshot(&restored, &master).unwrap();
+    crate::platform::install_master_key(&restored, &master).unwrap();
+    let later = Clip {
+        formats: vec![FormatData {
+            name: "CF_UNICODETEXT".into(),
+            bytes: "after export"
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        }],
+    };
+    source.save(&later).unwrap();
+    // 模拟暂不替换期间旧库继续使用；重新进入界面不会改变恢复副本。
+    assert!(source.load(&later.hash()).is_ok());
+    let guard = f.control().activate_restored(&restored).unwrap();
+    drop(guard);
+    let session = Session::open_at(f.locations.clone()).unwrap();
+    assert_eq!(session.startup_capture, StartupCapture::ChangesOnly);
+    let mut target = Storage::open(&session.root, &master).unwrap();
+    let last = AtomicU32::new(0);
+    session.startup_capture.initialize_sequence(&last, || 100);
+    let mut reads = 0;
+    let skipped = capture_policy::run(
+        &last,
+        || Snapshot {
+            sequence: 100,
+            self_write: false,
+        },
+        |_| {
+            reads += 1;
+            Ok(Some(later.clone()))
+        },
+        |_| {},
+        |_| {},
+    )
+    .unwrap();
+    assert!(skipped.is_none());
+    assert_eq!(reads, 0);
+    assert!(target.load(&later.hash()).is_err());
+    assert!(target.load(&original_id).is_ok());
+    let new = capture_policy::run(
+        &last,
+        || Snapshot {
+            sequence: 101,
+            self_write: false,
+        },
+        |_| Ok(Some(later.clone())),
+        |_| {},
+        |_| {},
+    )
+    .unwrap()
+    .unwrap();
+    target.save(&new).unwrap();
+    assert!(target.load(&later.hash()).is_ok());
+    session.control.acknowledge_restored_startup().unwrap();
+    assert_eq!(
+        f.locations.read().unwrap().startup_capture,
+        StartupCapture::Existing
+    );
 }

@@ -15,10 +15,16 @@ pub(super) const CONFIG_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub(super) struct Configuration {
     pub version: u32,
+    #[serde(default)]
+    pub startup_capture: crate::capture_policy::StartupCapture,
     pub root: PathBuf,
     pub pending: Option<Migration>,
     #[serde(default)]
+    pub replacement: Option<super::replacement::Replacement>,
+    #[serde(default)]
     pub previous: Option<PathBuf>,
+    #[serde(default)]
+    pub cleanup: Option<super::backup::Cleanup>,
     #[serde(default)]
     pub displaced: Option<PathBuf>,
 }
@@ -35,9 +41,12 @@ impl Configuration {
     pub fn initial(root: PathBuf) -> Self {
         Self {
             version: CONFIG_VERSION,
+            startup_capture: Default::default(),
             root,
             pending: None,
+            replacement: None,
             previous: None,
+            cleanup: None,
             displaced: None,
         }
     }
@@ -56,6 +65,12 @@ impl Configuration {
             {
                 bail!("待迁移任务无效，请保留原数据与启动定位文件");
             }
+        }
+        if let Some(task) = &config.replacement {
+            if config.pending.is_some() || task.root != config.root {
+                bail!("恢复替换任务与定位不一致");
+            }
+            task.validate()?;
         }
         Ok(config)
     }
@@ -99,7 +114,7 @@ fn write_and_replace(temporary: &Path, path: &Path, bytes: &[u8]) -> Result<()> 
     .context("无法原子更新启动定位文件")
 }
 
-pub(super) fn move_new(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn move_new(from: &Path, to: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     let from: Vec<u16> = from.as_os_str().encode_wide().chain([0]).collect();
     let to: Vec<u16> = to.as_os_str().encode_wide().chain([0]).collect();
