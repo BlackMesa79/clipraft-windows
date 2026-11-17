@@ -9,6 +9,16 @@ ClipRaft，Windows 剪贴板管理器，目标是集 Ditto（功能全）、Copy
 
 ## 二、当前进度
 
+### 0.6.2 公开预发布及中文名称纠正（2026-11-17，最新）
+
+用户要求以0.6.2在GitHub Releases预发布，README补下载与紧凑/3D滚轮预览；随后纠正名称规则：当前仅简体中文，界面与中文说明应使用“片筏剪贴板”，以后英文界面使用ClipRaft。该规则覆盖下方“软件统一显示为ClipRaft”的旧决定。前端brand保留zh-CN/en映射，当前选zh-CN；主窗/预览/托盘/迁移对话框与Windows产品名称恢复中文，英文品牌、EXE名 `ClipRaft.exe`、包/库名、数据标识保持兼容，没有实现语言切换。
+
+已提交并推送 `7dff2e12189f94d1ed7abe214c20cf7bc3ac3248`，重跑完整22阶段全过：Rust916通过/5ignored，fmt/全目标clippy/前端format/lint/类型构建和16项状态离屏检查通过，日志 `.tools/chinese-brand-checks-20261117-172148/`。新Release标准构建成功，Windows产品名/文件描述为片筏剪贴板，文件/产品版本0.6.2，实际进程仍ClipRaft，未签名；中文/空格路径解压CRC与586个文件哈希通过，隔离smoke退出0，四项前端/协议就绪、真实监听与钩子关闭。没有更改正在运行的 `D:/Tools/ClipRaft/ClipRaft.exe`、用户数据或偏好。
+
+GitHub已发布 [片筏剪贴板0.6.2预发布版](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.6.2)，标签 `v0.6.2` 指向7dff2e1，`prerelease=true`、`draft=false`。两个附件为 `ClipRaft-0.6.2-windows-x64.zip` 和 `SHA256SUMS.txt`；ZIP为8,529,529字节，SHA256 `5A45CB8312753FF804117E9372EDBBD881408E1F2FC073B99FFD863F2735EECF`，EXE摘要见 [0.6.2预发布验收结果](0.6.2预发布验收结果.json)。已重新下载两个上传附件并核对SHA256，下载认证只发给GitHub API，不转发至附件域名；Python首次匿名GET返回404，curl随后匿名完整请求HTTP200但本地45秒超时只下约399KiB，另以range匿名下载返回206、65536字节与本地ZIP前缀完全一致。公共链接可访问，完整哈希由附件API回下载验证，不将分段称为完整下载。未上传任何旧包，旧alpha.1外测ZIP哈希仍为 `A154CFD7EDE02AF97D532D33B73931F265AA83796AA9103D39E849FC9DA50535`，旧本地包亦保留。此前中断留下的英文显示名暂存包不用于发布。
+
+README改为中文标题，首屏含Windows x64下载、发布说明和反馈入口；主面板大图下方紧凑模式与3D滚轮并排，窄屏换行。六张明暗主题图均为当前实际前端离屏渲染、合成数据、独立profile，最大1000×700且单图低于300KiB。通过GitHub Markdown API渲染后，在1040/390宽度实际离屏检查四张图片全部加载、无横向溢出及并排/换行；桌面/窄屏压缩预览均已目视检查。渲染入口 `.tools/render-readme-zh.mjs`、`.tools/render-readme-release-zh.mjs`；布局证据 `.tools/readme-layout-zh/`，发布证据 `.tools/github-v0.6.2-zh/`。远端README HTML已核对中文名称、下载入口与六张图引用；不将离屏视图当作新增原生粘贴验收。
+
 ### 0.6.2 本地交付与首次 GitHub 托管完成（2026-11-17，最新）
 
 用户已明确授权重新构建 `0.6.2` 本地包，旧外测包保持不动，并推送至 `https://github.com/BlackMesa79/clipraft-windows.git`；随后选择采用MIT许可证。根目录已新增 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`，npm/Cargo清单标识MIT，README补充授权说明。第三方组件仍按原许可，二进制包保留既有许可材料及5项MPL组件的精确源码归档。
