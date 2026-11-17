@@ -1,8 +1,8 @@
 //! 图片解码与缩略图测试：透明 PNG、DIBV5 位域、24 位 DIB、自上而下 DIB、
 //! 损坏数据与超大尺寸声明。要求：失败必须给出占位信息，绝不 panic（README「已实现范围」第 8 条）。
 
-use clipboard_m0::model::{Clip, FormatData};
-use clipboard_m0::thumbnail::{decode_dib, dimensions, generate};
+use clipraft_windows::model::{Clip, FormatData};
+use clipraft_windows::thumbnail::{decode_dib, dimensions, generate};
 use image::RgbaImage;
 use std::io::Cursor;
 

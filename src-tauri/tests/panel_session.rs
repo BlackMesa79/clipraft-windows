@@ -1,6 +1,6 @@
 //! 只驱动纯 ID 会话，不安装钩子，不访问数据库、桌面或剪贴板。
 
-use clipboard_m0::panel_session::{Direction, Session, MAX_NEIGHBORHOOD_ITEMS};
+use clipraft_windows::panel_session::{Direction, Session, MAX_NEIGHBORHOOD_ITEMS};
 use std::{collections::HashSet, sync::Arc};
 
 fn ids(count: usize) -> Arc<[String]> {

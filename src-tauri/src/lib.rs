@@ -585,7 +585,7 @@ fn smoke_enabled(value: Option<&str>) -> bool {
 }
 
 fn startup_failed(error: &dyn std::fmt::Display, smoke: bool) -> ! {
-    let message = format!("片筏剪贴板 启动失败：{error}");
+    let message = format!("ClipRaft 启动失败：{error}");
     eprintln!("{message}");
     diag::startup_failure(&message);
     if !platform::unattended_startup(

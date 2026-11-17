@@ -3,7 +3,7 @@
 //! 只驱动纯状态机，不安装真实钩子、不调用 Win32，因此可确定性地覆盖各种按键顺序。
 //! 对应设计目标：README「已实现范围」第 1、3 条与 docs 第三节「快速粘贴面板交互设计」。
 
-use clipboard_m0::hook::{initial_selection, move_selection, Action, Decision, Machine};
+use clipraft_windows::hook::{initial_selection, move_selection, Action, Decision, Machine};
 
 const LCTRL: u32 = 0xA2;
 const RCTRL: u32 = 0xA3;

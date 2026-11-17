@@ -1,5 +1,5 @@
 //! 纯协调器测试；不读取桌面、不安装钩子、不操作剪贴板。
-use clipboard_m0::{
+use clipraft_windows::{
     model::ItemView,
     panel_neighborhood::{Coordinator, Request, Response, ViewState},
     panel_session::Direction,

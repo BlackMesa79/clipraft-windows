@@ -85,7 +85,7 @@ pub(super) fn offer_recovery(error: &str) -> bool {
         MessageBoxW(
             None,
             PCWSTR(wide.as_ptr()),
-            w!("片筏剪贴板 · 数据目录恢复"),
+            w!("ClipRaft · 数据目录恢复"),
             MB_YESNO | MB_ICONWARNING,
         ) == IDYES
     }
@@ -108,7 +108,7 @@ impl MigrationProgress {
         let dialog: IProgressDialog =
             unsafe { CoCreateInstance(&CLSID_ProgressDialog, None, CLSCTX_INPROC_SERVER)? };
         unsafe {
-            dialog.SetTitle(w!("片筏剪贴板 · 正在迁移数据"))?;
+            dialog.SetTitle(w!("ClipRaft · 正在迁移数据"))?;
             dialog.StartProgressDialog(
                 None,
                 None::<&windows::core::IUnknown>,

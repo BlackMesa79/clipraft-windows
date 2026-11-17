@@ -1,9 +1,9 @@
 //! 存储与加密测试：去重置顶、错误密钥、blob 篡改、内容哈希一致性、缩略图访问控制、
 //! 主密钥文件语义，以及落盘数据的加密检查（对应 docs 第四节加密方案）。
 
-use clipboard_m0::model::{digest, encode_hdrop, Clip, FormatData};
-use clipboard_m0::storage::{crypto, Storage};
-use clipboard_m0::{platform, thumbnail};
+use clipraft_windows::model::{digest, encode_hdrop, Clip, FormatData};
+use clipraft_windows::storage::{crypto, Storage};
+use clipraft_windows::{platform, thumbnail};
 use image::RgbaImage;
 use std::{collections::HashSet, fs, io::Cursor, path::PathBuf};
 

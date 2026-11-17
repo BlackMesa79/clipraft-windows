@@ -1,11 +1,17 @@
 [package]
-name = "clipboard-m0"
-version = "0.1.0"
+name = "clipraft-windows"
+version = "0.6.2"
+license = "MIT"
 edition = "2021"
 
 [lib]
-name = "clipboard_m0"
+name = "clipraft_windows"
 crate-type = ["lib"]
+
+# 可执行文件使用产品名。
+[[bin]]
+name = "clipraft"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

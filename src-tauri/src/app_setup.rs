@@ -68,7 +68,7 @@ fn create_windows(
 fn create_main(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
     Ok(
         WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-            .title("片筏剪贴板")
+            .title("ClipRaft")
             .icon(crate::tray_status::icon()?)?
             .decorations(false)
             .inner_size(1000.0, 700.0)
@@ -85,7 +85,7 @@ fn create_preview(app: &tauri::App, main: &WebviewWindow, root: &Path) -> Result
         "preview",
         WebviewUrl::App("index.html?panel=preview".into()),
     )
-    .title("片筏剪贴板 · 内容预览")
+    .title("ClipRaft · 内容预览")
     // 原生阴影会增加白边和客户区偏移，沿用透明客户区内的边框/阴影。
     .shadow(false)
     .transparent(true)

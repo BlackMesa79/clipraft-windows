@@ -1,5 +1,5 @@
 //! T7 规格补测：所有凭据均为无效合成数据，不联网、不访问桌面剪贴板。
-use clipboard_m0::sensitive::{detect, expiry_delay, redact, SCAN_LIMIT};
+use clipraft_windows::sensitive::{detect, expiry_delay, redact, SCAN_LIMIT};
 use std::time::Duration;
 
 const FAKE: &str = "sk-TESTONLY0000000000000000abcd";

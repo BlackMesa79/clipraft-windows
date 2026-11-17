@@ -404,8 +404,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "clipboard-m0"
-version = "0.1.0"
+name = "clipraft-windows"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "argon2",

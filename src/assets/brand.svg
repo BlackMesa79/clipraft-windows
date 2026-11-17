@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title id="title">片筏剪贴板 / ClipRaft · 双层精修 · 柔和青玉</title>
+  <title id="title">ClipRaft · 双层精修 · 柔和青玉</title>
   <defs><linearGradient id="jade" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#2E877E"/><stop offset="1" stop-color="#236E69"/></linearGradient></defs>
   <rect width="64" height="64" rx="14" fill="url(#jade)"/>
   <rect x="25" y="18" width="25" height="27" rx="4.5" fill="#80BAAF"/>

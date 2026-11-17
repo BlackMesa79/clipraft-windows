@@ -3,7 +3,7 @@
 //! 文件记录必须能作为真实文件重新粘贴（docs 第一节根因 2、第二节 P0 差异点），
 //! 因此结构必须符合 DROPFILES 契约：`pFiles` 偏移、`fWide=1`、路径双零结尾。
 
-use clipboard_m0::model::{decode_hdrop, digest, encode_hdrop, is_hash, Clip, FormatData};
+use clipraft_windows::model::{decode_hdrop, digest, encode_hdrop, is_hash, Clip, FormatData};
 
 const HEADER: usize = 20;
 

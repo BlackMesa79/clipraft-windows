@@ -1,6 +1,6 @@
 //! U2：真实加密 settings 表往返、旧配置与损坏配置隔离；不启动窗口。
-use clipboard_m0::settings::{Layout, MainPosition, Settings, Theme};
-use clipboard_m0::storage::Storage;
+use clipraft_windows::settings::{Layout, MainPosition, Settings, Theme};
+use clipraft_windows::storage::Storage;
 use std::collections::BTreeMap;
 
 #[test]

@@ -1,5 +1,5 @@
 //! 等待修饰键释放的纯逻辑测试，不向系统发送按键。
-use clipboard_m0::paster::{release_decision, ReleaseDecision::*};
+use clipraft_windows::paster::{release_decision, ReleaseDecision::*};
 use std::time::Duration;
 #[test]
 fn only_logical_modifiers_block_paste() {

@@ -1,5 +1,5 @@
 //! 使用通道控制后台时序，不接管键鼠，不依赖延时碰撞竞态。
-use clipboard_m0::{
+use clipraft_windows::{
     model::ItemView,
     panel_neighborhood::{Coordinator, Loader, Request, Response, ViewState},
     panel_session::Direction,

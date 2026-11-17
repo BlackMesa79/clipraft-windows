@@ -1,5 +1,5 @@
 //! U5 原生隐藏窗口几何验证：只创建本测试窗口，不显示、不操作键鼠/剪贴板。
-use clipboard_m0::platform;
+use clipraft_windows::platform;
 use windows::{
     core::w,
     Win32::{

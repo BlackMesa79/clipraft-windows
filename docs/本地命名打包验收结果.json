@@ -1,0 +1,121 @@
+{
+  "date": "2026-11-17",
+  "status": "本地Release重新打包与进程名验证通过，命名修订尚未提交",
+  "product": "片筏剪贴板 / ClipRaft",
+  "cargo_binary": "clipraft",
+  "tauri_binary": "ClipRaft.exe",
+  "observed_process_name": "ClipRaft",
+  "windows_file_description": "ClipRaft",
+  "windows_product_name": "ClipRaft",
+  "artifact": ".tools\\local-release\\ClipRaft-local-20261117\\ClipRaft.exe",
+  "zip": ".tools/local-release/ClipRaft-local-20261117.zip",
+  "exe_sha256": "2762E6BCF5B018092C6A02223D0D70A47C45F1D92FE9EAF26BBA8BE54678FFFA",
+  "zip_sha256": "FFBC1FA1D3CF96CACB0637332DA6895A6EAD63B8E1579E0F4A8B775731061817",
+  "rust": {
+    "passed": 916,
+    "failed": 0,
+    "ignored": 5
+  },
+  "stages": [
+    {
+      "name": "fmt",
+      "exit_code": 0
+    },
+    {
+      "name": "clippy",
+      "exit_code": 0
+    },
+    {
+      "name": "rust",
+      "exit_code": 0
+    },
+    {
+      "name": "format",
+      "exit_code": 0
+    },
+    {
+      "name": "lint",
+      "exit_code": 0
+    },
+    {
+      "name": "build",
+      "exit_code": 0
+    },
+    {
+      "name": "m1",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t2",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t3",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t4",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t5",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t6",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t7",
+      "exit_code": 0
+    },
+    {
+      "name": "m1-t8",
+      "exit_code": 0
+    },
+    {
+      "name": "u1",
+      "exit_code": 0
+    },
+    {
+      "name": "u2",
+      "exit_code": 0
+    },
+    {
+      "name": "u3",
+      "exit_code": 0
+    },
+    {
+      "name": "u4",
+      "exit_code": 0
+    },
+    {
+      "name": "sensitive-privacy",
+      "exit_code": 0
+    },
+    {
+      "name": "main-preview-state",
+      "exit_code": 0
+    },
+    {
+      "name": "hotkey-recording-state",
+      "exit_code": 0
+    },
+    {
+      "name": "b1",
+      "exit_code": 0
+    }
+  ],
+  "smoke": {
+    "clipboard_listener_enabled": false,
+    "keyboard_hook_enabled": false,
+    "main_frontend_ready": true,
+    "preview_protocol_loaded": true,
+    "quick_frontend_ready": true,
+    "thumbnail_protocol_loaded": true,
+    "visual_verified": false
+  },
+  "logs": ".tools\\local-brand-final-20261117-032430",
+  "build_log": ".tools/local-brand-release-build.log",
+  "scope": "没有启动用户日常实例、改写其数据或快捷方式；仅在隔离smoke验证名称和启动；alpha.1冻结外测包保留。"
+}
