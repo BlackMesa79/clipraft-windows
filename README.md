@@ -1,24 +1,46 @@
 <div align="center">
-  <img src="src/assets/brand.svg" width="88" height="88" alt="ClipRaft 图标">
-  <h1>ClipRaft</h1>
-  <p><strong>你的内容，随时可用。</strong></p>
+  <img src="src/assets/brand.svg" width="88" height="88" alt="片筏剪贴板图标">
+  <h1>片筏剪贴板</h1>
+  <p><strong>ClipRaft · 你的内容，随时可用。</strong></p>
   <p>Windows 剪贴板管理器 · 快速粘贴 · 多格式历史 · 本地加密</p>
   <p>
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.6.2/ClipRaft-0.6.2-windows-x64.zip"><strong>下载 0.6.2 预发布版 · Windows x64</strong></a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.6.2">发布说明</a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/issues">问题反馈</a>
+  </p>
+  <p>
+    <a href="#界面预览">界面预览</a> ·
     <a href="#核心功能">核心功能</a> ·
     <a href="#快速上手">快速上手</a> ·
-    <a href="#常用快捷键">常用快捷键</a> ·
-    <a href="#后续计划">后续计划</a>
+    <a href="#常用快捷键">常用快捷键</a>
   </p>
 </div>
 
-连续复制几段文字、一张截图、几个文件，之前的内容也能随时找回来。ClipRaft 将它们保存在本机，需要时**按住快捷键、选择记录、松手粘贴**，也可以打开主窗口搜索、预览和整理历史。
+连续复制几段文字、一张截图、几个文件，之前的内容也能随时找回来。片筏剪贴板（ClipRaft）将它们保存在本机，需要时**按住快捷键、选择记录、松手粘贴**，也可以打开主窗口搜索、预览和整理历史。
+
+## 界面预览
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/main-dark.jpg">
-  <img src="docs/images/main-light.jpg" alt="ClipRaft 主窗口：左侧分组、中间历史列表、右侧内容预览与粘贴操作" width="1000">
+  <img src="docs/images/main-light.jpg" alt="片筏剪贴板主面板：左侧分组、中间历史列表、右侧内容预览与粘贴操作" width="960">
 </picture>
 
-<p align="center"><sub>主窗口预览，使用示例数据。支持浅色和深色外观。</sub></p>
+<p align="center"><sub>主面板 · 分组、历史记录与内容预览</sub></p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/compact-dark.jpg">
+    <img src="docs/images/compact-light.jpg" alt="紧凑模式：在较小窗口里搜索、筛选和选择剪贴板历史" width="400">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/quick-dark.jpg">
+    <img src="docs/images/quick-light.jpg" alt="3D滚轮快捷面板：中心卡片高亮，上下卡片呈现透视层次，松开修饰键即可粘贴" width="400">
+  </picture>
+</p>
+
+<p align="center"><sub>紧凑模式 · 小窗口浏览历史　｜　3D 滚轮快捷面板 · 按住选择，松手粘贴</sub></p>
+
+以上预览均使用示例数据，随页面主题展示浅色或深色外观。
 
 ## 核心功能
 
@@ -67,11 +89,11 @@
 
 ## 快速上手
 
-> 当前开发版本：**0.6.2**。处于早期测试与发布准备阶段，尚未提供公开下载。
+> **0.6.2 预发布版**已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.6.2/ClipRaft-0.6.2-windows-x64.zip) · [发布说明与校验值](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.6.2)。当前仍处于早期测试阶段。
 
 **运行环境：** Windows x64，需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。当前以 Windows 11 为主要验证环境，Windows 10 兼容性仍待进一步验证。
 
-获取测试用 ZIP 包后：
+下载 ZIP 包后：
 
 1. **解压并启动**：将压缩包解压到独立文件夹，双击 `ClipRaft.exe`，程序会驻留系统托盘。
 2. **试一次快速粘贴**：依次复制两段不同的文字，在输入框按住 **Ctrl + Shift**、点按 **V**，再松开修饰键，即可粘贴第一段文字。
@@ -83,7 +105,7 @@
 <summary>使用前了解</summary>
 
 - **ZIP 解压运行不等于数据便携**：历史与设置默认保存在用户目录，不会自动跟随程序文件夹移动；更换位置请使用应用内的数据迁移功能。
-- **向管理员窗口粘贴受 Windows 权限限制**：普通权限运行的 ClipRaft 无法向管理员权限的目标应用自动粘贴。
+- **向管理员窗口粘贴受 Windows 权限限制**：普通权限运行的片筏剪贴板无法向管理员权限的目标应用自动粘贴。
 - **日常数据密钥绑定 Windows 账户**：直接复制数据目录不能替代跨账户备份，请通过密码导出包迁移。
 
 </details>
@@ -114,7 +136,7 @@
 
 ## 开发与反馈
 
-ClipRaft 基于 **Tauri 2 + Vue 3 + TypeScript + Rust** 开发，通过 Win32 API 处理剪贴板、全局快捷键和粘贴。
+片筏剪贴板基于 **Tauri 2 + Vue 3 + TypeScript + Rust** 开发，通过 Win32 API 处理剪贴板、全局快捷键和粘贴。
 
 构建、测试及实现说明见 [开发与验收记录](docs/开发与验收记录.md)，接续开发请先阅读 [项目交接](docs/handoff.md)。当前构建脚本包含本机工具链路径，从源码运行前需要按本地环境调整。
 

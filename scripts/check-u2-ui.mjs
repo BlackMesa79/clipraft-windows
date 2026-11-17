@@ -824,7 +824,7 @@ try {
   await test('R08 品牌与设计稿结构：线性图标、搜索提示、侧栏分组、预览底部操作', async () => {
     await metrics();
     await nav();
-    assert.equal(await evaluate("document.querySelector('header h1').textContent"), 'ClipRaft');
+    assert.equal(await evaluate("document.querySelector('header h1').textContent"), '片筏剪贴板');
     assert(await evaluate("document.title.includes('ClipRaft')"));
     assert(
       await evaluate(

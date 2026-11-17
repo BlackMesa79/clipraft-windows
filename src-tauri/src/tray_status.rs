@@ -24,9 +24,9 @@ pub(crate) fn update(app: &tauri::AppHandle, paused: bool) {
             diag::write(format!("tray icon update failed: {error:#}"));
         }
         if let Err(error) = tray.set_tooltip(Some(if paused {
-            "ClipRaft · 已暂停监听"
+            "片筏剪贴板 · 已暂停监听"
         } else {
-            "ClipRaft · 正在监听"
+            "片筏剪贴板 · 正在监听"
         })) {
             diag::write(format!("tray tooltip update failed: {error}"));
         }

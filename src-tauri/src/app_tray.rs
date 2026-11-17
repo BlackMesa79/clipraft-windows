@@ -60,9 +60,9 @@ pub(crate) fn create(app: &tauri::App) -> anyhow::Result<()> {
     TrayIconBuilder::with_id("main-tray")
         .icon(icon)
         .tooltip(if runtime::paused() {
-            "ClipRaft · 已暂停监听"
+            "片筏剪贴板 · 已暂停监听"
         } else {
-            "ClipRaft · 正在监听"
+            "片筏剪贴板 · 正在监听"
         })
         .menu(&menu)
         .show_menu_on_left_click(false)
