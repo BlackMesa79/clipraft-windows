@@ -9,13 +9,17 @@ ClipRaft，Windows 剪贴板管理器，目标是集 Ditto（功能全）、Copy
 
 ## 二、当前进度
 
-### 0.6.2 本地包及首次 GitHub 推送准备（2026-11-17，最新）
+### 0.6.2 本地交付与首次 GitHub 托管完成（2026-11-17，最新）
 
 用户已明确授权重新构建 `0.6.2` 本地包，旧外测包保持不动，并推送至 `https://github.com/BlackMesa79/clipraft-windows.git`；随后选择采用MIT许可证。根目录已新增 `LICENSE` 与 `THIRD-PARTY-NOTICES.md`，npm/Cargo清单标识MIT，README补充授权说明。第三方组件仍按原许可，二进制包保留既有许可材料及5项MPL组件的精确源码归档。
 
-远端确认为空的公开仓库，默认分支main。本地将保留现有提交历史，统一分支为main后推送；不创建GitHub Release或上传二进制。新本地包使用独立的 `0.6.2` 命名目录，旧alpha.1外测ZIP在构建前记录SHA256，归档后再次核对。构建沿用标准Tauri入口及2线程限制，启动验证使用独立数据与profile的smoke模式，禁用真实监听/钩子，不接管键鼠或替换日常程序。
+保留现有提交历史，本地分支已由master统一为main，关联origin并推送；GitHub已识别MIT许可，产品源码提交为 `d1130a78254337bd8bb17efcd4d561dca490cfee`。远端README实际HTML已读取检查，包含明暗主题截图与MIT链接，不含 `[blocked]` 文本。未创建GitHub Release、标签或上传二进制。
 
-版本调整后的22阶段验收仍有效（Rust916通过/5ignored）；本轮新增产品许可元数据与文档，不改功能实现。Release标准构建已成功，最终产物将在许可元数据纳入后重新构建，并从新ZIP解压校验与隔离启动。产物和首次推送的最终结果在本节后续补充。
+新本地包 `.tools/local-release/ClipRaft-0.6.2-windows-x64-local.zip`（8,529,487字节），同名目录中为可直接运行的 `ClipRaft.exe`。ZIP SHA256 `BFCE2E359FCD6A23FF0F25449AE86836BAEA44715E795FCF38EA4EFF939B0F9E`；EXE SHA256 `1851475FAD2015A7D4987F5FEDFBDDBAB7417AFEBEC848A6C67E09F9F0BAF983`。最终标准Release构建成功，AMD64，文件/产品版本均为0.6.2，产品名/描述/实际进程名均为ClipRaft，未签名。包内BUILD.json记录上述已提交产品源码，不使用未提交补丁方式标识。
+
+归档CRC和解压后586个文件哈希通过；解压路径包含中文及空格。独立数据与WebView profile的smoke退出0，主窗/quick/缩略图/大预览四项就绪，真实监听与钩子关闭；不代表新增视觉、键鼠或跨机验收。第三方依赖集合与c29340c相同，随附320项保守清单及5项MPL源码归档。旧外测ZIP前后SHA256均为 `A154CFD7EDE02AF97D532D33B73931F265AA83796AA9103D39E849FC9DA50535`，未改动；旧本地包亦保留，未替换日常程序、偏好或快捷方式。
+
+版本调整后的22阶段验收仍有效（Rust916通过/5ignored）；本轮仅增加MIT元数据及交付文档，不改功能实现。前端format/lint及Release内的类型构建复验通过，Cargo metadata --locked确认MIT与0.6.2。发布前常见凭据模式检查只命中已标注的合成测试样例，忽略目录不在提交中；修正外测反馈模板3处尾部空格。既有OpenSSL缺PDB链接警告保留，构建退出码0。详细结果见 [本地0.6.2打包验收结果](本地0.6.2打包验收结果.json) 与 [本地正式名称打包](本地正式名称打包.md)，本地日志 `.tools/local-062-20261117-164429/`。随后补充这些交付记录的提交不改变构建源码。
 
 ### 版本规则统一（2026-11-17，最新）
 
