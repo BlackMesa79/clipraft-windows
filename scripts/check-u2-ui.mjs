@@ -1,3 +1,4 @@
+import { createAppearanceRecorder } from './appearance-baseline.mjs';
 // 离屏渲染 + 合成 IPC 数据；不操作用户桌面，不代表原生粘贴验收。
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -115,6 +116,10 @@ try {
       {id:'file',kind:'files',summary:'文件',formats:['CF_HDROP'],files:['C:/synthetic/report.txt'],file_status:'missing'}
     ];
     window.rows=Array.from({length:60},(_,i)=>({id:'row-'+i,kind:i===1?'files':i===2?'image':'text',summary:i===3?'合成敏感••••':'合成记录 '+i+' 用于外观和布局验收',sensitive:i===3,favorite:i%2===0,group_id:i%3===0?7:null,formats:['CF_UNICODETEXT'],files:i===1?['C:/synthetic/report.txt']:[],file_status:i===1?'missing':undefined,source_exe:'synthetic.exe',thumbnail:null}));
+    if(location.search.includes('fluent-fixture')){
+      window.rows.forEach((item,index)=>item.created=index===59?Number.MAX_SAFE_INTEGER:Date.UTC(2026,10,18,6,36-index));
+      window.rows[2].thumbnail='synthetic-thumb';
+    }
     window.emitEvent=(event,payload)=>callbacks.get(events.get(event))?.({event,id:1,payload});
     window.__TAURI_EVENT_PLUGIN_INTERNALS__={unregisterListener(){}};
     window.__TAURI_INTERNALS__={
@@ -152,6 +157,10 @@ try {
       `
     const invokeWithSettings=window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke=async(cmd,args)=>{
+      if(cmd==='get_settings'&&location.search.includes('holdappearance')) {
+        const snapshot=await invokeWithSettings(cmd,args);
+        return new Promise(resolve=>window.releaseAppearance=()=>resolve(snapshot));
+      }
       if(cmd==='get_settings'&&location.search.includes('fail=settings'))throw Error('合成 settings 失败');
       return invokeWithSettings(cmd,args);
     };`,
@@ -191,7 +200,9 @@ try {
       deviceScaleFactor: 1,
       mobile: false,
     });
+  const appearanceRecorder = createAppearanceRecorder(evaluate, out);
   const capture = async (name) => {
+    await appearanceRecorder.capture(name);
     const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
     const bytes = Buffer.from(shot.data, 'base64');
     assert(bytes.length <= 300 * 1024);
@@ -207,6 +218,7 @@ try {
   await nav();
   await test('AC1 默认浅色单列非紧凑与失焦关闭', async () => {
     assert.equal(await evaluate('document.documentElement.dataset.theme'), 'light');
+    assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
     assert.equal(
       await evaluate("document.querySelector('main').classList.contains('compact')"),
       false,
@@ -225,6 +237,13 @@ try {
       await test('AC2 ' + theme + '/' + mode + ' 布局、尺寸、选择', async () => {
         assert.equal(await selected(), 'row-12');
         assert.equal(await evaluate('document.documentElement.dataset.theme'), theme);
+        assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
+        assert.equal(
+          await evaluate(
+            "getComputedStyle(document.querySelector('.preview-secondary button') ?? document.querySelector('.kind-filters button')).borderRadius",
+          ),
+          '5px',
+        );
         if (mode === 'compact') {
           assert.equal(await evaluate("!!document.querySelector('.detail')"), false);
           assert.equal(
@@ -1145,6 +1164,11 @@ try {
     await capture('r10-floating-image-light');
     await appearance({ theme: 'dark' });
     assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark');
+    assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
+    assert.equal(
+      await evaluate("getComputedStyle(document.querySelector('.floating-preview')).borderRadius"),
+      '8px',
+    );
     await capture('r10-floating-image-dark');
   });
   await test('R10 浮窗文本、文件、敏感打码与清空', async () => {
@@ -1306,12 +1330,10 @@ try {
       await click('.settings-toggle');
       await pause(60);
       await click('.settings-nav button:nth-child(2)').catch(() => {});
-      const checkbox = await evaluate(
-        "(()=>{const n=document.querySelector('.settings-view input[type=checkbox]');const s=getComputedStyle(n);return {appearance:s.appearance,w:s.width,radius:s.borderRadius,accent:s.accentColor}})()",
+      const control = await evaluate(
+        "(()=>{const n=document.querySelector('.settings-view input[type=checkbox]');const s=getComputedStyle(n);return {appearance:s.appearance,w:s.width,h:s.height,radius:s.borderRadius}})()",
       );
-      assert.equal(checkbox.appearance, 'none');
-      assert.equal(checkbox.w, '15px');
-      assert.equal(checkbox.radius, '4px');
+      assert.deepEqual(control, { appearance: 'none', w: '15px', h: '15px', radius: '4px' });
       await capture('r12-' + theme + '-settings');
     });
 
@@ -1440,16 +1462,16 @@ try {
         colors.badge,
       );
     });
-  await test('R13 透明轨道与居中checkbox保持语义和键盘操作', async () => {
+  await test('R13 透明滚动轨道与默认皮肤复选框保持键盘操作', async () => {
     await metrics();
     await nav();
     await click('.settings-toggle');
     await pause(70);
     const before = await evaluate(
-      "(()=>{const n=document.querySelector('input[type=checkbox]'),s=getComputedStyle(n,'::after');n.focus();return {checked:n.checked,transform:s.transform,w:s.width,h:s.height,track:getComputedStyle(document.querySelector('.settings-content'),'::-webkit-scrollbar-track').backgroundColor,thumb:getComputedStyle(document.querySelector('.settings-content'),'::-webkit-scrollbar-thumb').backgroundClip}})()",
+      "(()=>{const n=document.querySelector('[data-category=general] input[type=checkbox]');n.focus();return {checked:n.checked,w:getComputedStyle(n).width,h:getComputedStyle(n).height,track:getComputedStyle(document.querySelector('.settings-content'),'::-webkit-scrollbar-track').backgroundColor,thumb:getComputedStyle(document.querySelector('.settings-content'),'::-webkit-scrollbar-thumb').backgroundClip}})()",
     );
-    assert.equal(before.transform, 'none');
-    assert.equal(before.w, before.h);
+    assert.equal(before.w, '15px');
+    assert.equal(before.h, '15px');
     assert.equal(before.track, 'rgba(0, 0, 0, 0)');
     assert.equal(before.thumb, 'padding-box');
     await send('Input.dispatchKeyEvent', {
@@ -1484,6 +1506,20 @@ try {
       modifiers: shift ? 8 : 0,
     });
   };
+  await test('预览按钮显示粘贴此条记录并提交选中的记录', async () => {
+    await metrics();
+    await nav();
+    assert.equal(
+      await evaluate("document.querySelector('.paste-primary').textContent.trim()"),
+      '粘贴此条记录',
+    );
+    const id = await selected();
+    await click('.paste-primary');
+    assert.deepEqual(
+      await evaluate("window.calls.filter(c=>c.cmd==='paste_item').map(c=>c.args)"),
+      [{ id, plain: false }],
+    );
+  });
   await test('R14 分组焦点经方向键进入记录，Enter和Shift+Enter各粘贴一次', async () => {
     await metrics();
     await nav();
@@ -1809,7 +1845,7 @@ try {
     await metrics();
     await nav();
     await evaluate(
-      "window.rows[1]={...window.rows[1],files:['C:/synthetic/甲 乙,丙.txt','C:/synthetic/第二张.png'],file_status:'available'};const original=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>cmd==='item_detail'?Promise.resolve({text:'',files:window.rows[1].files.map(path=>({path,exists:window.singleFileExists??true})),truncated:false}):original(cmd,args);window.emitEvent('history-changed')",
+      "window.rows[1]={...window.rows[1],files:['C:/synthetic/甲 乙,丙.txt','C:/synthetic/第二张.png'],file_status:'available'};const original=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=(cmd,args)=>cmd==='item_detail'?Promise.resolve({text:'',files:window.rows[1].files.map(path=>({path,exists:window.singleFileExists??true,is_directory:window.singleDirectory??false})),truncated:false}):original(cmd,args);window.emitEvent('history-changed')",
     );
     await pause(70);
     await click('[data-id="row-1"]');
@@ -1867,6 +1903,37 @@ try {
       action: 'open',
     });
     await capture('r17-single-file-bottom');
+    assert.equal(
+      await evaluate("document.querySelector('.single-file-actions button').textContent.trim()"),
+      '打开文件',
+    );
+    await evaluate(
+      "window.singleDirectory=true;document.querySelector('.preview-refresh').click()",
+    );
+    await until(
+      () =>
+        evaluate(
+          "document.querySelector('.single-file-actions button').textContent.trim()==='打开目录'",
+        ),
+      '目录按钮文案未更新',
+    );
+    assert.equal(
+      await evaluate(
+        "document.querySelector('.single-file-actions button').getAttribute('aria-label')",
+      ),
+      '打开目录',
+    );
+    await evaluate(
+      "window.singleDirectory=false;document.querySelector('.preview-refresh').click()",
+    );
+    await until(
+      () =>
+        evaluate(
+          "document.querySelector('.single-file-actions button').textContent.trim()==='打开文件'",
+        ),
+      '文件按钮文案未恢复',
+    );
+
     await evaluate(
       "window.singleFileExists=false;document.querySelector('.preview-refresh').click()",
     );
@@ -3518,6 +3585,512 @@ try {
       }
     }
   });
+  await test('U7 皮肤草稿取消、保存与六种布局配色', async () => {
+    await metrics();
+    await nav('?fluent-fixture=1');
+    const editSkin = async () => {
+      await click('.settings-toggle');
+      await until(() => evaluate("!!document.querySelector('.settings-view form')"), '设置未打开');
+      await click('.settings-nav button:nth-child(2)');
+      await change('select[aria-label=皮肤]', 'fluent');
+    };
+    await editSkin();
+    await click('.settings-cancel');
+    assert.equal(await evaluate('window.settings.skin'), 'clipraft');
+    await editSkin();
+    assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
+    await click('.settings-view button[type=submit]');
+    await until(() => evaluate("document.documentElement.dataset.skin==='fluent'"), '皮肤未生效');
+    assert.deepEqual(
+      await evaluate(
+        "[...document.querySelectorAll('.appearance-section h3')].map(n=>n.textContent)",
+      ),
+      ['主题', '布局'],
+    );
+    assert.deepEqual(
+      await evaluate(
+        "[...document.querySelectorAll('.settings-buttons button')].map(n=>n.textContent.trim())",
+      ),
+      ['取消', '保存'],
+    );
+    assert(await evaluate("document.querySelector('.settings-buttons [type=submit]').disabled"));
+    assert(
+      await evaluate(
+        "document.querySelector('.appearance-section small').getBoundingClientRect().height > 0",
+      ),
+    );
+    const switchStyle = () =>
+      evaluate(`(() => {
+        const control = document.querySelector('.compact-setting [role=switch]');
+        const track = getComputedStyle(control);
+        const thumb = getComputedStyle(control, '::before');
+        return {
+          start: track.justifyContent,
+          travel: new DOMMatrix(thumb.transform === 'none' ? '' : thumb.transform).m41,
+          available: control.clientWidth - parseFloat(track.paddingLeft) -
+            parseFloat(track.paddingRight) - parseFloat(thumb.width)
+        };
+      })()`);
+    assert.deepEqual(await switchStyle(), { start: 'flex-start', travel: 0, available: 19 });
+    await capture('fluent-settings-switch-off');
+    await click('.compact-setting [role=switch]');
+    assert(await evaluate("document.querySelector('.compact-setting [role=switch]').checked"));
+    assert(!(await evaluate("document.querySelector('.settings-buttons [type=submit]').disabled")));
+    await until(async () => (await switchStyle()).travel === 19, '开关滑块未停在轨道内');
+    await capture('fluent-settings-switch-on');
+    await click('.compact-setting [role=switch]');
+    const openPicker = async () => {
+      const point = await evaluate(
+        "(()=>{const r=document.querySelector('select[aria-label=明暗]').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()",
+      );
+      for (const type of ['mousePressed', 'mouseReleased'])
+        await send('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1 });
+    };
+    await openPicker();
+    await until(() => evaluate("!!document.querySelector('select:open')"), '下拉浮层未打开');
+    await pause(180);
+    await capture('fluent-settings-picker');
+    await key('ArrowDown', 40);
+    await key('Escape', 27);
+    assert.equal(await evaluate('document.activeElement.value'), 'light');
+    await openPicker();
+    await key('ArrowDown', 40);
+    await key('Enter', 13);
+    assert.equal(await evaluate('document.activeElement.value'), 'dark');
+    await click('.settings-title-back');
+    await click('[data-id="row-2"]');
+    for (const theme of ['light', 'dark']) {
+      for (const mode of ['list', 'cards', 'compact']) {
+        await metrics(mode === 'compact' ? 390 : 1000);
+        await appearance({
+          theme,
+          layout: mode === 'cards' ? 'cards' : 'list',
+          compact: mode === 'compact',
+        });
+        assert.equal(await selected(), 'row-2');
+        assert.deepEqual(
+          await evaluate(
+            "(()=>{const style=getComputedStyle(document.querySelector('.item.selected .summary'));return [style.fontSize,style.fontWeight];})()",
+          ),
+          [mode === 'compact' ? '12px' : '13px', '400'],
+          `${theme}/${mode} 摘要字号或字重`,
+        );
+        assert.equal(
+          await evaluate("document.querySelector('.item').getBoundingClientRect().height"),
+          { list: 64, cards: 104, compact: 58 }[mode],
+          mode,
+        );
+        assert.deepEqual(
+          await evaluate(
+            "(()=>{const {width,height}=document.querySelector('.item.selected .record-thumbnail').getBoundingClientRect();return [width,height];})()",
+          ),
+          { list: [52, 42], cards: [40, 40], compact: [44, 36] }[mode],
+          `${theme}/${mode} 缩略图尺寸`,
+        );
+        assert.equal(
+          await evaluate("!!document.querySelector('.main-statusbar .settings-toggle')"),
+          mode === 'compact',
+        );
+        assert(
+          await evaluate(`(() => {
+            const panel = document.querySelector('.main-content');
+            const frame = panel.getBoundingClientRect();
+            const body = document.querySelector('.app-body').getBoundingClientRect();
+            const footer = document.querySelector('.main-statusbar').getBoundingClientRect();
+            return !document.querySelector('.search-tools .settings-toggle') &&
+              getComputedStyle(panel).borderRadius === '8px' &&
+              body.right - frame.right === 8 && footer.top - frame.bottom === 8 &&
+              (${mode !== 'compact'} || frame.left - body.left === 8);
+          })()`),
+          `${theme}/${mode} 内容框未与窗口边缘和底栏留出间距`,
+        );
+        assert(
+          await evaluate(
+            "/^\\d{2}:\\d{2}$/.test(document.querySelector('.record-time').textContent.trim())",
+          ),
+        );
+        assert(await evaluate("!document.querySelector('[data-id=row-59] .record-time')"));
+        const selectedFill = theme === 'dark' ? 'rgb(48, 72, 67)' : 'rgb(227, 240, 236)';
+        await until(
+          () =>
+            evaluate(
+              `getComputedStyle(document.querySelector('.item.selected')).backgroundColor===${JSON.stringify(selectedFill)}`,
+            ),
+          '选中填充未达到目标颜色',
+        );
+        await capture('fluent-' + theme + '-' + mode);
+      }
+    }
+  });
+  await test('U7 Fluent 左侧分组圆点与选中样式', async () => {
+    await metrics();
+    await nav();
+    for (const theme of ['light', 'dark']) {
+      await appearance({ skin: 'fluent', theme });
+      assert.equal(await evaluate("document.querySelector('.group-sidebar h2')"), null);
+      const dots = () =>
+        evaluate(`[...document.querySelectorAll('.group-views [data-group-view] .group-dot')].map(dot => {
+          const style = getComputedStyle(dot);
+          return {size: [style.width, style.height], radius: style.borderRadius, color: style.backgroundColor};
+        })`);
+      const markers = await dots();
+      assert.equal(markers.length, 3);
+      for (const marker of markers) {
+        assert.deepEqual(marker.size, ['8px', '8px']);
+        assert.equal(marker.radius, '50%');
+      }
+      assert.equal(new Set(markers.map(({ color }) => color)).size, 3);
+      assert(await evaluate("!!document.querySelector('[data-group-view=all] > svg')"));
+      assert.equal(
+        await evaluate("document.querySelector('[data-group-view=all]').textContent.trim()"),
+        '全部分组',
+      );
+      const group = '[data-group-view="7"]';
+      await click(group);
+      const selectedFill = theme === 'dark' ? 'rgb(48, 72, 67)' : 'rgb(227, 240, 236)';
+      const accent = theme === 'dark' ? 'rgb(131, 213, 195)' : 'rgb(23, 107, 100)';
+      await until(
+        () =>
+          evaluate(
+            `getComputedStyle(document.querySelector('${group}')).backgroundColor===${JSON.stringify(selectedFill)}`,
+          ),
+        '分组未显示选中底色',
+      );
+      assert.equal(
+        await evaluate(
+          `getComputedStyle(document.querySelector('${group}[aria-pressed=true]'),'::before').backgroundColor`,
+        ),
+        accent,
+      );
+      assert.deepEqual(await dots(), markers);
+      await capture('fluent-' + theme + '-groups');
+    }
+  });
+  await test('U7 Fluent 开关与两套皮肤的设置控件', async () => {
+    for (const [skin, width, theme] of [
+      ['fluent', 1000, 'light'],
+      ['fluent', 390, 'dark'],
+      ['clipraft', 1000, 'light'],
+      ['clipraft', 390, 'dark'],
+    ]) {
+      await metrics(width);
+      await nav();
+      await appearance({ skin, theme, compact: width === 390 });
+      await click('.settings-toggle');
+      await until(() => evaluate("!!document.querySelector('.settings-view form')"), '设置未打开');
+      if (skin === 'fluent')
+        assert(
+          await evaluate(`(() => {
+          const select = document.querySelector('select[aria-label=主窗口唤出位置]');
+          const center = element => {
+            const bounds = element.getBoundingClientRect();
+            return bounds.y + bounds.height / 2;
+          };
+          return Math.abs(center(select) - center(select.previousElementSibling)) < 1;
+        })()`),
+          `${theme} 主窗口唤出位置与下拉框未垂直居中`,
+        );
+      assert.deepEqual(
+        await evaluate(`[...document.querySelectorAll('.settings-content label.check > input')].map(control => {
+          const style = getComputedStyle(control);
+          return [control.getAttribute('role'), style.width, style.height, style.borderRadius,
+            getComputedStyle(control, '::before').borderRadius, style.justifyContent];
+        })`),
+        Array.from({ length: 7 }, () =>
+          skin === 'fluent'
+            ? ['switch', '39px', '20px', '20px', '50%', 'flex-start']
+            : [null, '15px', '15px', '4px', '0px', 'center'],
+        ),
+      );
+      const focused =
+        skin === 'fluent'
+          ? '[data-category=general] [role=switch]'
+          : '[data-category=general] input[type=checkbox]';
+      const before = await evaluate(
+        `document.querySelector('${focused}').focus();document.activeElement.checked`,
+      );
+      const space = { key: ' ', code: 'Space', windowsVirtualKeyCode: 32 };
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...space, text: ' ' });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...space });
+      assert.equal(await evaluate('document.activeElement.checked'), !before);
+      assert.equal(await evaluate('window.settingUpdates.length'), 0);
+      await pause(120);
+      if (skin === 'fluent')
+        assert.equal(
+          await evaluate(
+            "new DOMMatrix(getComputedStyle(document.activeElement, '::before').transform).m41",
+          ),
+          19,
+        );
+      await capture(`${skin}-settings-${theme}-switches`);
+      for (const [category, label] of [
+        ['general', '通用'],
+        ['privacy', '隐私'],
+        ['appearance', '外观'],
+      ]) {
+        if (skin !== 'fluent') continue;
+        if (width === 390) await change('select[aria-label=设置分类]', category);
+        else
+          await evaluate(
+            `[...document.querySelectorAll('.settings-nav button')].find(n => n.textContent.trim() === ${JSON.stringify(label)}).click()`,
+          );
+        assert(
+          await evaluate(`(() => {
+            const section = document.querySelector('[data-category=${category}]');
+            const controls = [...section.querySelectorAll('[role=switch]')];
+            return controls.length > 0 && controls.every(control => {
+              const row = control.closest('label');
+              const style = getComputedStyle(row);
+              const frame = row.getBoundingClientRect();
+              const bounds = control.getBoundingClientRect();
+              const right = frame.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+              return bounds.width > 0 && Math.abs(right - bounds.right) < 1;
+            });
+          })()`),
+          `${skin}/${theme}/${category} 的开关未对齐控件列`,
+        );
+      }
+    }
+  });
+  await test('U7 其余设置分类适配宽窄布局与表单控件', async () => {
+    const categories = [
+      ['general', '通用', '.check'],
+      ['history', '历史记录', 'input[type=number]'],
+      ['privacy', '隐私', '.add-app input'],
+      ['hotkeys', '快捷键', '.hotkey-record button'],
+      ['storage', '数据存储', '.archive-field input'],
+    ];
+    for (const [width, theme] of [
+      [1000, 'light'],
+      [390, 'dark'],
+    ]) {
+      await metrics(width);
+      await nav();
+      await appearance({ skin: 'fluent', theme, compact: width === 390 });
+      await click('.settings-toggle');
+      await until(() => evaluate("!!document.querySelector('.settings-view form')"), '设置未打开');
+      assert.deepEqual(
+        await evaluate(`(() => {
+          const frame = document.querySelector('.settings-pane');
+          const bounds = frame.getBoundingClientRect();
+          const body = document.querySelector('.app-body').getBoundingClientRect();
+          const back = document.querySelector('.main-window > header .settings-title-back');
+          const style = getComputedStyle(frame);
+          return {
+            back: !!back?.querySelector('svg') && back.textContent.trim() === '设置',
+            sidebarBack: !!document.querySelector('.settings-nav .settings-back'),
+            radius: style.borderRadius,
+            clipping: style.overflow,
+            right: body.right - bounds.right,
+            bottom: body.bottom - bounds.bottom,
+            left: ${width <= 600} ? bounds.left - body.left : null
+          };
+        })()`),
+        {
+          back: true,
+          sidebarBack: false,
+          radius: '8px',
+          clipping: 'hidden',
+          right: 8,
+          bottom: 8,
+          left: width <= 600 ? 8 : null,
+        },
+        `${theme} 设置标题或内容框不符合预期`,
+      );
+      for (const [category, label, control] of categories) {
+        if (width === 390) await change('select[aria-label=设置分类]', category);
+        else
+          await evaluate(
+            `[...document.querySelectorAll('.settings-nav button')].find(n => n.textContent.trim() === ${JSON.stringify(label)}).click()`,
+          );
+        assert(
+          await evaluate(`(() => {
+            const page = document.querySelector('[data-category=${category}]');
+            const field = page.querySelector(${JSON.stringify(control)});
+            const card = page.querySelector(':scope > label, :scope > section');
+            const content = document.querySelector('.settings-content');
+            const frame = content.getBoundingClientRect();
+            const bounds = field.getBoundingClientRect();
+            return bounds.width > 0 && getComputedStyle(card).borderRadius === '4px' &&
+              bounds.left >= frame.left && bounds.right <= frame.right &&
+              content.scrollWidth <= content.clientWidth;
+          })()`),
+          `${theme}/${category} 控件溢出或卡片样式未生效`,
+        );
+        await pause(150);
+        await capture(`fluent-settings-${theme}-${category}`);
+      }
+    }
+  });
+  await test('U7 设置字号、忽略程序卡片与导出悬停', async () => {
+    for (const [width, theme, hover] of [
+      [1000, 'light', 'rgb(18, 91, 85)'],
+      [390, 'dark', 'rgb(150, 223, 207)'],
+    ]) {
+      await metrics(width);
+      await nav();
+      await appearance({ skin: 'fluent', theme, compact: width === 390 });
+      await click('.settings-toggle');
+      await until(() => evaluate("!!document.querySelector('.settings-view form')"), '设置未打开');
+      assert.deepEqual(
+        await evaluate(`[
+          '[data-category=general] .check > span',
+          '[data-category=general] .number-field > span',
+          '.compact-setting > span',
+          '.appearance-section .number-field > span'
+        ].map(selector => {
+          const style = getComputedStyle(document.querySelector(selector));
+          return [style.fontSize, style.fontWeight];
+        })`),
+        Array.from({ length: 4 }, () => ['14px', '400']),
+      );
+      const selectCategory = (category, label) =>
+        width === 390
+          ? change('select[aria-label=设置分类]', category)
+          : evaluate(
+              `[...document.querySelectorAll('.settings-nav button')].find(n => n.textContent.trim() === ${JSON.stringify(label)}).click()`,
+            );
+      await selectCategory('privacy', '隐私');
+      assert(
+        await evaluate(`(() => {
+          const rows = [...document.querySelectorAll('.ignored-apps > li')];
+          return rows.length > 0 && rows.every(row => {
+            const style = getComputedStyle(row);
+            return style.borderRadius === '4px' && style.borderTopWidth === '1px' &&
+              style.borderBottomWidth === '1px';
+          });
+        })()`),
+      );
+      await selectCategory('storage', '数据存储');
+      const point = await evaluate(`(() => {
+        const button = document.querySelector('[data-start-archive]');
+        button.scrollIntoView({block:'center'});
+        const rect = button.getBoundingClientRect();
+        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+      })()`);
+      const foreground = await evaluate(
+        "getComputedStyle(document.querySelector('[data-start-archive]')).color",
+      );
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point });
+      await until(
+        () =>
+          evaluate(
+            `getComputedStyle(document.querySelector('[data-start-archive]:hover')).backgroundColor===${JSON.stringify(hover)}`,
+          ),
+        `${theme} 开始导出的悬停背景未使用主按钮色`,
+      );
+      assert.equal(
+        await evaluate("getComputedStyle(document.querySelector('[data-start-archive]')).color"),
+        foreground,
+      );
+      await capture(`fluent-settings-${theme}-archive-hover`);
+      await selectCategory('general', '通用');
+      await click('[data-category=general] .check input');
+      await click('.settings-title-back');
+      await until(() => evaluate("!document.querySelector('.settings-view')"), '未返回列表');
+      assert.equal(await evaluate('window.settingUpdates.length'), 0);
+    }
+  });
+  await test('U7 删除确认焦点与只读浮窗表面', async () => {
+    await metrics();
+    await nav();
+    await appearance({ skin: 'fluent' });
+    await evaluate(
+      "document.querySelectorAll('.item')[1].dispatchEvent(new MouseEvent('click',{ctrlKey:true,bubbles:true}));document.querySelector('.item').focus()",
+    );
+    await evaluate(
+      "document.activeElement.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:260,clientY:180}))",
+    );
+    assert(
+      await evaluate(
+        "document.querySelector('.context-menu button:last-child').matches('.delete-record')",
+      ),
+    );
+    await click('.delete-record');
+    await until(
+      () => evaluate("document.activeElement.matches('.cancel-delete')"),
+      '确认未聚焦取消',
+    );
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      text: '\r',
+    });
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    });
+    await until(() => evaluate("!document.querySelector('.delete-confirm')"), 'Enter 未激活取消');
+    assert(await evaluate("document.activeElement.matches('.item')"));
+    await floatingNav();
+    await appearance({ skin: 'fluent', theme: 'dark' });
+    await evaluate(
+      `window.emitEvent('compact-preview-changed',${JSON.stringify(floatingContent())})`,
+    );
+    await until(() => evaluate("!!document.querySelector('.floating-title')"), '浮窗标题未显示');
+    assert.equal(
+      await evaluate(
+        "getComputedStyle(document.querySelector('.floating-preview')).backgroundColor",
+      ),
+      'rgb(44, 55, 53)',
+    );
+    await pause(180);
+    await capture('fluent-dark-floating');
+  });
+  await test('U6 三窗口迟到外观快照不覆盖已收到的新设置', async () => {
+    for (const panel of ['', 'quick', 'preview']) {
+      await send('Page.navigate', { url: origin + '/?panel=' + panel + '&holdappearance=1' });
+      await until(() => evaluate("typeof window.releaseAppearance==='function'"), '未挂起外观快照');
+      await evaluate(
+        "window.emitEvent('settings-changed',{...window.settings,skin:'fluent',theme:'dark'});window.releaseAppearance()",
+      );
+      await pause(150);
+      assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark', panel);
+      assert.equal(await evaluate('document.documentElement.dataset.skin'), 'fluent', panel);
+    }
+  });
+  await test('U6 角色令牌变更保留选择与滚动，禁用按钮不产生悬停反馈', async () => {
+    await metrics();
+    await nav();
+    await click('[data-id="row-12"]');
+    const id = await selected();
+    const scroll = await evaluate('document.querySelector(".list").scrollTop');
+    await evaluate(
+      "document.documentElement.style.setProperty('--radius-search','13px');document.documentElement.style.setProperty('--selected-bg','rgb(11, 22, 33)')",
+    );
+    assert.equal(
+      await evaluate("getComputedStyle(document.querySelector('.searchbox')).borderRadius"),
+      '13px',
+    );
+    assert.equal(
+      await evaluate("getComputedStyle(document.querySelector('.item.selected')).backgroundColor"),
+      'rgb(11, 22, 33)',
+    );
+    assert.equal(await selected(), id);
+    assert.equal(await evaluate('document.querySelector(".list").scrollTop'), scroll);
+    await evaluate(
+      "document.documentElement.removeAttribute('style');document.querySelector('.preview-refresh').disabled=true",
+    );
+    const style = () =>
+      evaluate(
+        "(()=>{const s=getComputedStyle(document.querySelector('.preview-refresh'));return [s.backgroundColor,s.borderColor,s.color]})()",
+      );
+    const before = await style();
+    await send('DOM.enable');
+    await send('CSS.enable');
+    const { root } = await send('DOM.getDocument');
+    const { nodeId } = await send('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: '.preview-refresh',
+    });
+    await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+    assert.deepEqual(await style(), before);
+    await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] });
+  });
   await writeFile(
     path.join(out, 'results.json'),
     JSON.stringify(
@@ -3535,6 +4108,7 @@ try {
   console.log(
     JSON.stringify({ passed: checks.length, failed: failures.length, failures }, null, 2),
   );
+  await appearanceRecorder.finish();
   await send('Browser.close').catch(() => {});
   if (failures.length) process.exitCode = 1;
 } finally {

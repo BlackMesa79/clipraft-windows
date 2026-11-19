@@ -153,6 +153,13 @@ pub enum Theme {
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum Skin {
+    #[default]
+    Clipraft,
+    Fluent,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Layout {
     #[default]
     List,
@@ -168,6 +175,8 @@ pub enum MainPosition {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub skin: Skin,
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
@@ -198,6 +207,7 @@ impl Default for Settings {
     fn default() -> Self {
         let policy = RetentionPolicy::default();
         Self {
+            skin: Skin::Clipraft,
             theme: Theme::Light,
             layout: Layout::List,
             compact: false,

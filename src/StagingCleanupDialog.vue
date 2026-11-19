@@ -60,25 +60,25 @@ onUnmounted(() => {
   width: min(480px, calc(100vw - 64px));
   max-height: calc(100vh - 64px);
   overflow-y: auto;
-  padding: 24px;
+  padding: var(--dialog-padding);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-dialog);
   background: var(--bg);
   color: var(--text);
-  box-shadow: 0 20px 60px #0003;
+  box-shadow: var(--shadow-dialog);
 }
 .staging-cleanup-dialog:focus {
   outline: none;
 }
 .staging-cleanup-dialog::backdrop {
-  background: #182b3666;
+  background: var(--dialog-backdrop);
 }
 h2 {
   margin: 0 0 16px;
-  font-size: 18px;
+  font-size: var(--font-heading-size);
 }
 p {
-  font-size: 13px;
+  font-size: var(--font-body-size);
   line-height: 1.6;
 }
 .staging-path {
@@ -88,23 +88,23 @@ p {
 footer {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: var(--gap-actions);
   margin-top: 24px;
 }
 button {
   padding: 8px 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--bg);
   color: var(--text);
   cursor: pointer;
 }
 button[data-confirm-staging] {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--primary-bg);
+  color: var(--primary-text);
 }
 button:disabled {
-  opacity: 0.5;
+  opacity: var(--opacity-form-disabled);
   cursor: default;
 }
 </style>

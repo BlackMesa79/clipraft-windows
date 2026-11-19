@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN" data-tone="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>片筏剪贴板 · U7 Fluent 评审稿</title>
+    <link rel="stylesheet" href="u7-fluent.css" />
+    <script src="u7-fluent.js" defer></script>
+  </head>
+  <body>
+    <main class="review">
+      <header class="review-head">
+        <div>
+          <p class="review-path">片筏剪贴板 <span aria-hidden="true">/</span> U7 设计评审</p>
+          <h1>Fluent 主题</h1>
+          <p class="review-summary">用同一组示例记录审阅主面板、设置、3D 滚轮和只读预览。</p>
+        </div>
+        <a href="U7-Fluent设计评审稿.md">设计说明 ↗</a>
+      </header>
+      <section class="review-controls" aria-label="评审画板控制">
+        <div class="views" role="group" aria-label="评审视图">
+          <button type="button" data-view="history" aria-pressed="true">主面板</button>
+          <button type="button" data-view="settings" aria-pressed="false">设置</button>
+          <button type="button" data-view="quick" aria-pressed="false">3D 滚轮</button>
+          <button type="button" data-view="floating" aria-pressed="false">只读浮窗</button>
+        </div>
+        <div class="review-options">
+          <label>明暗
+            <select id="tone">
+              <option value="light">浅色</option><option value="dark">深色</option>
+              <option value="contrast">高对比示意</option>
+            </select>
+          </label>
+          <label>布局
+            <select id="layout">
+              <option value="list">单列</option><option value="cards">双列</option>
+              <option value="compact">紧凑</option>
+            </select>
+          </label>
+          <label>表面
+            <select id="material">
+              <option value="solid">实色</option><option value="material">材质示意</option>
+            </select>
+          </label>
+          <label>动效
+            <select id="motion">
+              <option value="system">跟随系统</option><option value="reduce">减少动效</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="canvas" id="canvas" data-material="solid" aria-label="Fluent 窗口效果">
+        <article class="window mock" id="main-window" data-layout="list" aria-label="片筏剪贴板主面板">
+          <header class="titlebar">
+            <img src="../../src/assets/brand.svg" alt="" width="22" height="22" />
+            <strong>片筏剪贴板</strong>
+            <div class="title-actions">
+              <button id="compact-toggle" type="button" aria-label="切换紧凑模式" title="切换紧凑模式">◫</button>
+              <span aria-hidden="true">−</span><span aria-hidden="true">□</span><span aria-hidden="true">×</span>
+            </div>
+          </header>
+          <div class="window-body" id="history">
+            <nav class="sidebar" aria-label="分组">
+              <h2>历史记录</h2>
+              <button data-group="all" aria-pressed="true"><i class="group-dot neutral"></i>全部分组</button>
+              <button data-group="work" aria-pressed="false"><i class="group-dot work"></i>工作</button>
+              <button data-group="assets" aria-pressed="false"><i class="group-dot assets"></i>素材</button>
+              <button data-group="none" aria-pressed="false"><i class="group-dot neutral"></i>未分组</button>
+              <button id="open-settings" class="sidebar-bottom">⚙ <span>设置</span></button>
+            </nav>
+            <section class="content">
+              <div class="search-row">
+                <label class="search"><span class="search-icon" aria-hidden="true"></span>
+                  <input type="search" id="query" placeholder="搜索文本、文件或拼音…" aria-label="搜索历史" />
+                  <kbd>Ctrl+F</kbd>
+                </label>
+                <button type="button" id="compact-settings" hidden aria-label="设置">⚙</button>
+              </div>
+              <label class="compact-group">分组
+                <select id="compact-group" class="fluent-select">
+                  <option value="all">全部分组</option><option value="work">工作</option>
+                  <option value="assets">素材</option><option value="none">未分组</option>
+                </select>
+              </label>
+              <div class="filters">
+                <span class="filter-label">类型</span>
+                <div class="types" role="group" aria-label="类型筛选">
+                  <button data-kind="all" aria-pressed="true">全部</button><button data-kind="text" aria-pressed="false">文本</button>
+                  <button data-kind="image" aria-pressed="false">图片</button><button data-kind="file" aria-pressed="false">文件</button>
+                  <button data-kind="link" aria-pressed="false">链接</button>
+                </div>
+              </div>
+              <div class="history-and-detail">
+                <section class="history-list" aria-label="历史记录">
+                  <div class="list-heading"><h2>最近复制</h2><span id="total"></span></div>
+                  <div class="records" id="records"></div>
+                </section>
+                <section class="detail" aria-label="记录预览">
+                  <header class="detail-header">
+                    <h2>预览</h2>
+                    <div class="menu-anchor">
+                      <button type="button" id="menu-trigger" aria-label="记录操作" aria-expanded="false">···</button>
+                      <div class="record-menu surface" id="record-menu" hidden>
+                        <button data-action="pin">切换置顶</button>
+                        <button data-action="copy">复制内容</button>
+                        <div class="menu-rule"></div>
+                        <button data-action="delete" class="danger-text">删除记录</button>
+                      </div>
+                    </div>
+                  </header>
+                  <div id="detail-content" class="detail-content"></div>
+                  <div class="detail-footer">
+                    <p id="source"></p>
+                    <div class="detail-actions">
+                      <button class="accent" type="button" id="paste">粘贴此条记录</button>
+                      <button type="button" id="open-record" hidden></button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+              <footer class="window-footer"><span id="status" role="status"></span><span>↑ / ↓ 选择 · Enter 粘贴</span></footer>
+            </section>
+          </div>
+          <div class="window-body" id="settings" hidden>
+            <nav class="sidebar" aria-label="设置分类">
+              <button id="back" type="button">‹ 返回历史</button>
+              <h2>设置</h2>
+              <button data-setting="general">通用</button><button data-setting="appearance" aria-pressed="true">外观</button>
+              <button data-setting="history">历史记录</button><button data-setting="privacy">隐私</button>
+              <button data-setting="keys">快捷键</button><button data-setting="storage">数据存储</button>
+            </nav>
+            <section class="settings-content content">
+              <div class="settings-scroll">
+                <h2 id="settings-title">外观</h2>
+                <div id="settings-fields"></div>
+              </div>
+              <footer class="settings-footer">
+                <span id="settings-status" role="status"></span>
+                <button id="settings-cancel" type="button">取消</button>
+                <button id="settings-save" class="accent" type="button" disabled>保存</button>
+              </footer>
+            </section>
+          </div>
+        </article>
+
+        <div class="quick-mock mock" id="quick" hidden>
+          <div id="quick-stage" aria-label="快速面板演示" tabindex="0">
+            <div class="quick-head"><span>空格 / 右键取消</span><span id="wheel-count"></span></div>
+            <div class="wheel" id="wheel"></div>
+          </div>
+          <div class="wheel-controls">
+            <button id="previous" type="button" aria-label="上一条">↑</button>
+            <button id="next" type="button" aria-label="下一条">↓</button>
+            <button id="reopen" type="button" hidden>重新打开</button>
+          </div>
+        </div>
+
+        <div class="floating-mock mock" id="floating" hidden>
+          <div class="floating-origin">
+            <div id="floating-records" class="records" aria-label="用于预览的记录"></div>
+          </div>
+          <article class="floating-card surface" aria-label="只读预览">
+            <header><h2 id="float-title"></h2><span>只读预览</span></header>
+            <div id="float-content" class="float-content"></div>
+            <footer id="float-source"></footer>
+          </article>
+        </div>
+
+        <dialog id="delete-dialog" class="surface mock">
+          <h2>删除此条记录？</h2>
+          <p id="delete-summary"></p>
+          <form method="dialog">
+            <button value="cancel" autofocus>取消</button>
+            <button class="danger" value="delete">删除记录</button>
+          </form>
+        </dialog>
+      </section>
+      <footer class="review-footer">
+        <span id="scene-note">单列、双列和紧凑布局共用筛选与选中状态。</span>
+        <span>示例数据 · 材质由 CSS 示意</span>
+      </footer>
+    </main>
+  </body>
+</html>

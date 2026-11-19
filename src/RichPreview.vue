@@ -56,7 +56,7 @@ function safeImage(source: string | null): string | undefined {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.65;
-  font-size: 13px;
+  font-size: var(--font-body-size);
 }
 .rich-picture {
   margin: 0;
@@ -66,20 +66,20 @@ function safeImage(source: string | null): string | undefined {
   display: block;
   max-width: 100%;
   height: auto;
-  border-radius: 4px;
+  border-radius: var(--radius-media);
 }
 .rich-picture figcaption {
   padding: 12px;
   border: 1px dashed var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-placeholder);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-label-size);
   overflow-wrap: anywhere;
 }
 .rich-note {
   margin: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-note-size);
   line-height: 1.6;
 }
 </style>

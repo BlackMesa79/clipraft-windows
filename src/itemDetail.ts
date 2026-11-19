@@ -9,7 +9,7 @@ interface Detail {
   image?: number[];
   text: string;
   truncated: boolean;
-  files: { path: string; exists: boolean | null }[];
+  files: { path: string; exists: boolean | null; is_directory?: boolean | null }[];
 }
 interface DetailContext {
   active(): Item | undefined;

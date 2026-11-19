@@ -6,19 +6,19 @@
   }
 }
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: var(--scroll-size);
+  height: var(--scroll-size);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
-  border-radius: 8px;
+  border-radius: var(--scroll-radius);
 }
 ::-webkit-scrollbar-thumb {
   background: var(--scroll-thumb);
   border: 2px solid transparent;
   background-clip: padding-box;
-  border-radius: 8px;
-  min-height: 24px;
+  border-radius: var(--scroll-radius);
+  min-height: var(--scroll-min-length);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--muted);
@@ -28,38 +28,38 @@
 }
 /* 控件可能紧贴窗口或滚动区边缘，焦点环统一向内绘制以免被裁切。 */
 :where(button, input, select, textarea):focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: -2px;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
 }
 .settings-view input,
 .settings-view select,
 .settings-view textarea,
 .compact-groups select {
   accent-color: var(--accent);
-  color: var(--text);
-  background-color: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  color: var(--control-text);
+  background-color: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
   font: inherit;
 }
 .settings-view input:not([type='checkbox']):not([type='radio']),
 .settings-view select,
 .settings-view textarea {
   padding: 7px 9px;
-  min-height: 32px;
+  min-height: var(--control-min-height);
 }
 .settings-view input:is([type='checkbox'], [type='radio']) {
   appearance: none;
   display: inline-grid;
   place-content: center;
-  width: 15px;
-  height: 15px;
+  width: var(--check-size);
+  height: var(--check-size);
   padding: 0;
-  flex: 0 0 15px;
+  flex: 0 0 var(--check-size);
   margin: 0 6px 0 0;
   vertical-align: middle;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--radius-check);
 }
 .settings-view input[type='radio'] {
   border-radius: 50%;
@@ -68,11 +68,11 @@
   background: var(--accent);
   border-color: var(--accent);
 }
-.settings-view input[type='checkbox']:checked::after {
+.settings-view input[type='checkbox']:not([role='switch']):checked::after {
   content: '';
   width: 11px;
   height: 11px;
-  background: var(--bg);
+  background: var(--control-bg);
   clip-path: polygon(9% 47%, 22% 34%, 42% 54%, 78% 18%, 91% 31%, 42% 80%);
   transform: none;
 }
@@ -81,7 +81,7 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--bg);
+  background: var(--control-bg);
 }
 .settings-view :is(input, select, textarea):hover:not(:disabled),
 .compact-groups select:hover:not(:disabled) {
@@ -89,14 +89,62 @@
 }
 .settings-view :is(input, select, textarea):disabled,
 .compact-groups select:disabled {
-  opacity: 0.5;
+  opacity: var(--opacity-form-disabled);
   cursor: default;
 }
 .settings-view [aria-invalid='true'] {
   border-color: var(--danger);
 }
 .main-window .settings-view button {
-  border-radius: 6px;
+  border-radius: var(--radius-control);
+}
+.settings-view .check > input[role='switch'] {
+  order: 1;
+  margin: 0;
+  margin-inline-start: auto;
+}
+@media (forced-colors: none) {
+  .settings-view input[role='switch'] {
+    --switch-padding: 3px;
+    --switch-stroke: 1px;
+    appearance: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex: none;
+    width: var(--switch-width);
+    height: var(--switch-height);
+    padding: var(--switch-padding);
+    border: var(--switch-stroke) solid var(--switch-border);
+    border-radius: var(--switch-radius);
+    background: var(--surface);
+  }
+  .settings-view input[role='switch']::before {
+    content: '';
+    width: var(--switch-thumb-size);
+    height: var(--switch-thumb-size);
+    flex: none;
+    border-radius: var(--switch-thumb-radius);
+    background: var(--muted);
+  }
+  .settings-view input[role='switch']:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .settings-view input[role='switch']:checked::before {
+    transform: translateX(
+      calc(
+        var(--switch-width) - var(--switch-thumb-size) - 2 *
+          (var(--switch-padding) + var(--switch-stroke))
+      )
+    );
+    background: var(--primary-text);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .settings-view input[role='switch']::before {
+    transition: transform 100ms var(--motion-ease, ease-out);
+  }
 }
 @media (forced-colors: active) {
   .settings-view input:is([type='checkbox'], [type='radio']) {

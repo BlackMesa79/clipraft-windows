@@ -1,3 +1,4 @@
+import { createAppearanceRecorder } from './appearance-baseline.mjs';
 // 离屏渲染 + 合成 IPC 数据；不操作用户桌面，不代表原生粘贴验收。
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -93,6 +94,7 @@ try {
     if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
+  const appearanceRecorder = createAppearanceRecorder(evaluate, out);
   const mock = `(() => {
     const callbacks=new Map(),events=new Map();let id=0;
     window.calls=[];window.ready=false;window.failResize=false;
@@ -234,6 +236,7 @@ try {
     ),
     '-2px',
   );
+  await appearanceRecorder.capture('groupShot');
   const groupShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
   const groupPreview = Buffer.from(groupShot.data, 'base64');
   assert(groupPreview.length < 300 * 1024);
@@ -324,6 +327,7 @@ try {
   await until(() => evaluate("!!document.querySelector('dialog[open]')"), '密码对话框未重开');
   assert.equal(await evaluate("document.querySelector('[data-archive-password]').value"), '');
   checks.push('密码弹窗焦点、Escape隔离和取消清空');
+  await appearanceRecorder.capture('passwordShot');
   const passwordShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
   const passwordPreview = Buffer.from(passwordShot.data, 'base64');
   assert(passwordPreview.length < 300 * 1024);
@@ -451,6 +455,7 @@ try {
     await evaluate("document.querySelector('[data-confirm-archive-dialog]').disabled"),
     true,
   );
+  await appearanceRecorder.capture('replaceShot');
   const replaceShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
   const replacePreview = Buffer.from(replaceShot.data, 'base64');
   assert(replacePreview.length < 300 * 1024);
@@ -642,6 +647,7 @@ try {
   checks.push('盘符及UNC扩展前缀仅在显示中移除');
 
   await evaluate("document.querySelector('.staging-settings').scrollIntoView({block:'center'})");
+  await appearanceRecorder.capture('cleanupShot');
   const cleanupShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
   const cleanupPreview = Buffer.from(cleanupShot.data, 'base64');
   assert(cleanupPreview.length < 300 * 1024);
@@ -678,6 +684,7 @@ try {
   await evaluate(
     "document.querySelector('[data-migration-cleanup]').scrollIntoView({block:'center'})",
   );
+  await appearanceRecorder.capture('migrationShot');
   const migrationShot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
   const migrationPreview = Buffer.from(migrationShot.data, 'base64');
   assert(migrationPreview.length < 300 * 1024);
@@ -695,6 +702,7 @@ try {
     ),
   );
   console.log(JSON.stringify({ passed: checks.length, checks }));
+  await appearanceRecorder.finish();
   await send('Browser.close').catch(() => {});
 } finally {
   ws?.close();

@@ -271,6 +271,10 @@ fn restore_filters_legacy_settings_before_installing_key() {
         ..Default::default()
     };
     source.save_settings(&settings).unwrap();
+    source
+        .conn
+        .execute("DELETE FROM settings WHERE key='skin'", [])
+        .unwrap();
     source.save(&clip()).unwrap();
     source
         .conn
@@ -293,6 +297,10 @@ fn restore_filters_legacy_settings_before_installing_key() {
     .unwrap();
     let restored = Storage::open(&target, &MASTER).unwrap();
     assert!(!restored.load_settings().unwrap().autostart);
+    assert_eq!(
+        restored.load_settings().unwrap().skin,
+        crate::settings::Skin::Clipraft
+    );
     assert!(!restored.test_settings_rows().contains_key("future"));
     let expires: i64 = restored
         .conn

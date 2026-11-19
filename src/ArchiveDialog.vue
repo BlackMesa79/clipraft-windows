@@ -125,22 +125,22 @@ onUnmounted(() => {
   width: min(440px, calc(100vw - 64px));
   max-height: calc(100vh - 64px);
   overflow-y: auto;
-  padding: 24px;
+  padding: var(--dialog-padding);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--bg, #fff);
-  color: var(--text, #253434);
-  box-shadow: 0 20px 60px #0003;
+  border-radius: var(--radius-dialog);
+  background: var(--control-bg);
+  color: var(--control-text);
+  box-shadow: var(--shadow-dialog);
 }
 .archive-dialog::backdrop {
-  background: #182b3666;
+  background: var(--dialog-backdrop);
 }
 h2 {
   margin: 0 0 12px;
-  font-size: 18px;
+  font-size: var(--font-heading-size);
 }
 p {
-  font-size: 13px;
+  font-size: var(--font-body-size);
   line-height: 1.6;
 }
 label {
@@ -148,15 +148,15 @@ label {
   flex-direction: column;
   gap: 7px;
   margin: 16px 0;
-  font-size: 14px;
+  font-size: var(--font-subtitle-size);
 }
 input[type='password'] {
   width: 100%;
   box-sizing: border-box;
   padding: 9px 11px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg, #fff);
+  border-radius: var(--radius-control);
+  background: var(--control-bg);
   color: inherit;
 }
 .archive-ack {
@@ -170,27 +170,27 @@ input[type='password'] {
 footer {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: var(--gap-actions);
   margin-top: 24px;
 }
 button {
   padding: 8px 14px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--bg, #fff);
+  border-radius: var(--radius-control);
+  background: var(--control-bg);
   color: inherit;
   cursor: pointer;
 }
 button[type='submit'] {
-  background: var(--accent, #237c77);
-  color: var(--bg);
+  background: var(--primary-bg);
+  color: var(--primary-text);
 }
 button:disabled {
-  opacity: 0.5;
+  opacity: var(--opacity-form-disabled);
   cursor: default;
 }
 .archive-dialog-error {
-  color: var(--danger, #ac3030);
+  color: var(--error-text);
   overflow-wrap: anywhere;
 }
 </style>

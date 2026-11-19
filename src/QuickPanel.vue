@@ -94,6 +94,7 @@ onUnmounted(() => {
 <template>
   <main ref="panelRoot" :class="['app', 'quick', { 'notice-only': noticeOnly }]">
     <div v-if="!noticeOnly" class="wheel-stage" :style="stageStyle">
+      <span v-if="panelVisible" class="cancel-hint">空格 / 右键取消</span>
       <span
         class="count"
         :aria-label="`第 ${panel.total ? panel.position + 1 : 0} 条，共 ${panel.total} 条记录`"
@@ -106,7 +107,7 @@ onUnmounted(() => {
         ><h2>正在加载所选记录…</h2><p>可继续选择，松开修饰键粘贴当前项。</p></section
       >
       <section v-else-if="!items.length && error" class="empty" role="status"
-        ><h2>所选记录暂时无法显示</h2><p>继续选择可重试，Esc 取消。</p></section
+        ><h2>所选记录暂时无法显示</h2><p>继续选择可重试。</p></section
       >
       <section v-else-if="!items.length" class="empty"
         ><span><UiIcon name="copy" /></span><h2>从一次复制开始</h2

@@ -1,4 +1,5 @@
 export interface Settings {
+  skin: 'clipraft' | 'fluent';
   theme: 'light' | 'dark';
   layout: 'list' | 'cards';
   compact: boolean;
@@ -48,6 +49,7 @@ export function tightened(next: Settings, old: Settings): boolean {
 }
 
 export function applyTheme(settings?: Settings) {
+  document.documentElement.dataset.skin = settings?.skin ?? 'clipraft';
   document.documentElement.dataset.theme = settings?.theme ?? 'light';
 }
 

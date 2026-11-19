@@ -145,7 +145,8 @@ onUnmounted(() => {
     >
       <template v-if="content">
         <header
-          ><span>{{ content.detail.rich ? '图文' : kindLabel(content.item) }}预览</span
+          ><span class="floating-title"
+            >{{ content.detail.rich ? '图文' : kindLabel(content.item) }}预览</span
           ><span v-if="content.item.sensitive">敏感内容 · 已打码</span
           ><span v-else>只读预览</span></header
         >
@@ -242,14 +243,14 @@ onUnmounted(() => {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--preview-border);
-  border-radius: 8px;
+  border-radius: var(--radius-preview);
   box-shadow: var(--preview-shadow);
   overflow: hidden;
 }
 header {
   flex-shrink: 0;
   padding: 14px 16px;
-  font-size: 11px;
+  font-size: var(--font-note-size);
   color: var(--muted);
   border-bottom: 1px solid var(--line);
   gap: 10px;
@@ -268,17 +269,14 @@ header {
 .floating-text {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font:
-    13px/1.8 'Segoe UI',
-    'Microsoft YaHei',
-    sans-serif;
+  font: var(--font-body-size) / 1.8 var(--font-ui);
   margin: 0;
 }
 .floating-files {
   list-style: none;
   padding: 0;
   margin: 0;
-  font-size: 12px;
+  font-size: var(--font-label-size);
 }
 .floating-files li {
   padding: 10px 0;
@@ -294,7 +292,7 @@ small {
   display: block;
   max-width: 100%;
   background: var(--surface);
-  border-radius: 6px;
+  border-radius: var(--radius-placeholder);
   overflow: hidden;
   margin-bottom: 12px;
 }
@@ -315,7 +313,7 @@ footer {
   flex-shrink: 0;
   border-top: 1px solid var(--line);
   padding: 10px 16px;
-  font-size: 10px;
+  font-size: var(--font-caption-size);
   color: var(--muted);
   overflow: hidden;
   white-space: nowrap;
@@ -324,6 +322,6 @@ footer {
 [role='alert'] {
   padding: 16px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--font-label-size);
 }
 </style>

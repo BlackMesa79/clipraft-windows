@@ -1,0 +1,237 @@
+:root:not([data-skin='fluent'])
+  [data-category='appearance']
+  .number-field
+  > span
+  :is(.ui-icon, small) {
+  display: none;
+}
+[data-skin='fluent'] .main-window .settings-nav {
+  border: 0;
+  padding-top: 10px;
+  background: var(--fluent-base);
+}
+[data-skin='fluent'] .main-window .settings-nav button[aria-current='page'] {
+  font-weight: 600;
+}
+[data-skin='fluent'] .settings-view {
+  font-size: var(--font-body-size);
+}
+[data-skin='fluent'] .settings-view form {
+  grid-template-rows: minmax(0, 1fr);
+}
+[data-skin='fluent'] .settings-pane {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--fluent-panel-radius);
+}
+[data-skin='fluent'] .main-window .settings-content legend {
+  --font-section-size: 20px;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+[data-skin='fluent'] .appearance-section {
+  display: block;
+}
+[data-skin='fluent'] .appearance-section + .appearance-section {
+  margin-top: 12px;
+}
+[data-skin='fluent'] .appearance-section h3 {
+  margin: 0 0 5px;
+  font-size: var(--font-body-size);
+  font-weight: 600;
+}
+[data-skin='fluent']
+  .settings-content
+  :is(
+    .appearance-section > label,
+    fieldset > .check,
+    fieldset > .number-field,
+    .ignored-apps > li,
+    [data-category='storage'] > section
+  ) {
+  background: var(--fluent-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: 8px 12px;
+}
+[data-skin='fluent']
+  .settings-content
+  :is(.appearance-section > label, fieldset > .check, fieldset > .number-field) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--settings-input-width);
+  align-items: center;
+  column-gap: 12px;
+  min-height: 66px;
+  margin: 4px 0;
+}
+[data-skin='fluent'] .settings-content :is(.appearance-section > label, fieldset > .check) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+[data-skin='fluent'] .settings-content fieldset > .number-field {
+  align-content: center;
+  row-gap: 2px;
+}
+[data-skin='fluent'] .settings-content fieldset > :is(.check, .number-field) > span:first-of-type {
+  width: auto;
+  grid-area: 1 / 1;
+}
+[data-skin='fluent'] .settings-content .check > input[role='switch'] {
+  grid-area: 1 / 2;
+  justify-self: end;
+  margin: 0;
+}
+[data-skin='fluent'] .settings-content fieldset > .number-field > small {
+  grid-area: 2 / 1;
+  font-size: var(--font-caption-size);
+}
+[data-skin='fluent'] .settings-content .number-field > :is(input, select, .duration-input) {
+  grid-area: 1 / 2;
+}
+[data-skin='fluent'] .settings-content .number-field:has(> small) > :is(input, .duration-input) {
+  grid-row: 1 / span 2;
+}
+[data-skin='fluent']
+  .settings-content
+  fieldset
+  > .number-field
+  > :is(input, select, .duration-input) {
+  width: 100%;
+}
+[data-skin='fluent'] .settings-content .duration-input > input {
+  width: 100%;
+}
+[data-skin='fluent'] .settings-content .number-field:has(> .hotkey-record) {
+  row-gap: 6px;
+}
+[data-skin='fluent'] .settings-content .number-field > .hotkey-record {
+  grid-area: 2 / 2;
+  display: block;
+}
+[data-skin='fluent'] .settings-content .hotkey-record > button {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+}
+[data-skin='fluent'] .appearance-section > label > span {
+  display: grid;
+  width: auto;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+}
+[data-skin='fluent'] .appearance-section > label > span .ui-icon {
+  display: block;
+  grid-row: span 2;
+}
+[data-skin='fluent'] .appearance-section > label > span small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--font-caption-size);
+  font-weight: 400;
+}
+[data-skin='fluent']
+  .settings-view
+  .settings-content
+  :is(input:not([type='checkbox'], [type='radio']), select) {
+  min-height: var(--control-min-height);
+  padding: 4px 8px;
+  border-color: var(--line);
+  border-bottom-color: var(--control-border);
+  background: var(--surface);
+}
+[data-skin='fluent'] .settings-view .settings-content :is(input, select):focus-visible {
+  border-bottom-color: var(--focus);
+}
+[data-skin='fluent'] .settings-view .appearance-section select {
+  width: var(--settings-input-width);
+}
+[data-skin='fluent'] .settings-content [data-category='storage'] > section {
+  margin: 0 0 12px;
+  padding: 12px;
+}
+[data-skin='fluent'] .settings-content [data-category='storage'] > section > h3 {
+  margin: 0;
+  font-size: var(--font-body-size);
+  font-weight: 600;
+}
+[data-skin='fluent'] .settings-content .archive-field > span {
+  flex-wrap: wrap;
+}
+[data-skin='fluent'] .settings-content .archive-field > span > input {
+  flex: 1 1 160px;
+}
+[data-skin='fluent'] .settings-content .ignored-apps {
+  max-width: none;
+  margin: 8px 0;
+}
+[data-skin='fluent'] .settings-content .ignored-apps > li {
+  min-height: 48px;
+  margin: 4px 0;
+}
+[data-skin='fluent'] .settings-view .settings-content button:not(.hotkey-problem) {
+  min-height: var(--control-min-height);
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+[data-skin='fluent']
+  .settings-view
+  .settings-content
+  button:enabled:not(.hotkey-problem, [aria-pressed='true'], [data-start-archive]):hover {
+  background: var(--record-hover-bg);
+}
+[data-skin='fluent'] .settings-view .settings-content button[aria-pressed='true'] {
+  background: var(--select);
+  color: var(--text);
+}
+[data-skin='fluent'] .settings-view .settings-content button[data-start-archive]:enabled {
+  background: var(--primary-bg);
+  color: var(--primary-text);
+}
+[data-skin='fluent'] .settings-view .settings-content button[data-start-archive]:enabled:hover {
+  background: var(--fluent-primary-hover);
+}
+[data-skin='fluent'] .appearance-section .compact-setting > span {
+  grid-column: 1;
+  grid-row: 1;
+}
+[data-skin='fluent'] .main-window .settings-actions {
+  min-height: 60px;
+  padding-block: 10px;
+}
+[data-skin='fluent'] .main-window .settings-buttons button {
+  min-width: 74px;
+  min-height: var(--control-min-height);
+}
+[data-skin='fluent'] .main-window .settings-buttons .settings-cancel {
+  color: var(--text);
+  background: var(--surface);
+}
+[data-skin='fluent'] .main-window .settings-buttons button[type='submit'] {
+  color: var(--primary-text);
+  background: var(--primary-bg);
+}
+@media (max-width: 600px) {
+  [data-skin='fluent'] .settings-content {
+    --settings-input-width: min(36vw, 175px);
+  }
+  [data-skin='fluent'] .settings-content .number-field:has(> .hotkey-record) {
+    grid-template-columns: minmax(0, 1fr) min(48vw, 175px);
+  }
+  [data-skin='fluent'] .main-window.settings-open .app-body {
+    padding-inline: var(--fluent-panel-inset);
+  }
+  [data-skin='fluent'] .settings-pane {
+    grid-column: 1;
+  }
+  [data-skin='fluent'] .settings-category {
+    flex-shrink: 0;
+  }
+}

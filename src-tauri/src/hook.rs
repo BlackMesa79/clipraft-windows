@@ -8,7 +8,10 @@ use std::{
 use windows::Win32::{
     Foundation::{LPARAM, LRESULT, WPARAM},
     System::{SystemInformation::GetTickCount64, Threading::GetCurrentThreadId},
-    UI::{Input::KeyboardAndMouse::GetAsyncKeyState, WindowsAndMessaging::*},
+    UI::{
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_SPACE},
+        WindowsAndMessaging::*,
+    },
 };
 
 // 一次原子读取完整配置，避免触发键与修饰键来自不同版本。
@@ -274,7 +277,9 @@ impl Machine {
             return;
         }
         decision.action = match press.key {
-            0x1B => {
+            key if key == u32::from(VK_ESCAPE.0)
+                || (key == u32::from(VK_SPACE.0) && !press.repeated) =>
+            {
                 self.cancel();
                 Some(Action::Cancel)
             }
@@ -385,6 +390,7 @@ pub fn corrected_modifiers(
 }
 thread_local! {static MACHINE:Cell<Machine>=Cell::new(Machine::default());}
 mod event;
+mod wheel;
 
 mod lifecycle;
 pub use lifecycle::{start, stop};
@@ -800,6 +806,29 @@ mod tests {
         open(&mut m);
         assert_eq!(m.step(0x1B, true, false, true).action, Some(Action::Cancel));
         assert_eq!(m.step(0xA2, false, false, true).action, None);
+    }
+    #[test]
+    fn space_shortcut_opens_on_first_press_and_cancels_on_second_press() {
+        let space = u32::from(VK_SPACE.0);
+        let mut machine = Machine {
+            shortcut: crate::settings::Shortcut {
+                key: space,
+                modifiers: 3,
+            },
+            ..Default::default()
+        };
+        machine.seed(5);
+        assert_eq!(
+            machine.step(space, true, false, true).action,
+            Some(Action::Open)
+        );
+        assert_eq!(machine.step(space, true, false, true).action, None);
+        assert!(machine.step(space, false, false, true).swallow);
+        assert_eq!(
+            machine.step(space, true, false, true).action,
+            Some(Action::Cancel)
+        );
+        assert_eq!(machine.step(0xA2, false, false, true).action, None);
     }
     #[test]
     fn external_cancel_passes_navigation_while_modifiers_are_held() {

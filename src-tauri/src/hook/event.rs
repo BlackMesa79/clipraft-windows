@@ -122,6 +122,9 @@ fn finish_event(
     decision: &Decision,
     reserved: bool,
 ) -> bool {
+    if !state.active || decision.action == Some(Action::Open) {
+        super::wheel::reset();
+    }
     crate::diag::panel(true, state.active);
     let swallow = dispatch_action(state, event.key, decision, post_action);
     crate::diag::panel(true, state.active);
@@ -170,7 +173,7 @@ fn dispatch_action(
     false
 }
 
-fn post_action(action: Action) -> bool {
+pub(super) fn post_action(action: Action) -> bool {
     // 新 Open 在钩子观察时立即使旧粘贴过期，不等待 broker 或 UI。
     let generation = if action == Action::Open {
         crate::runtime::new_paste_intent()

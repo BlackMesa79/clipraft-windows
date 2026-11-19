@@ -4,7 +4,10 @@ use anyhow::Context;
 use std::sync::mpsc::{self, SyncSender};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
-struct Registration(HHOOK);
+struct Registration {
+    keyboard: HHOOK,
+    mouse: Option<HHOOK>,
+}
 
 impl Registration {
     fn install() -> Result<Self> {
@@ -17,7 +20,15 @@ impl Registration {
         };
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(event::callback), module, 0) }
             .context("键盘钩子安装失败")?;
-        Ok(Self(hook))
+        let mut registration = Self {
+            keyboard: hook,
+            mouse: None,
+        };
+        registration.mouse = Some(
+            unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(wheel::callback), module, 0) }
+                .context("鼠标滚轮钩子安装失败")?,
+        );
+        Ok(registration)
     }
 
     fn publish_thread(&self) {
@@ -32,10 +43,16 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        if let Some(mouse) = self.mouse {
+            crate::app_events::record(
+                "mouse hook removal failed",
+                unsafe { UnhookWindowsHookEx(mouse) }.context("鼠标滚轮钩子释放失败"),
+            );
+        }
         crate::app_events::record(
             "hook removal failed",
             release_thread(&THREAD, || {
-                unsafe { UnhookWindowsHookEx(self.0) }.context("键盘钩子释放失败")
+                unsafe { UnhookWindowsHookEx(self.keyboard) }.context("键盘钩子释放失败")
             }),
         );
     }

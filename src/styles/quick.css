@@ -21,22 +21,28 @@ html[data-panel='quick'] #app {
   top: 50%;
   transform-origin: center;
 }
-.quick .count {
+.quick .count,
+.quick .cancel-hint {
   position: absolute;
-  right: 24px;
   top: 7px;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--font-caption-size);
   line-height: 16px;
   color: var(--text);
   background: var(--surface);
   border: 0;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   padding: 3px 7px;
+}
+.quick .count {
+  right: 24px;
   font-variant-numeric: tabular-nums;
+}
+.quick .cancel-hint {
+  left: 24px;
 }
 
 .quick .list.wheel {
@@ -61,21 +67,14 @@ html[data-panel='quick'] #app {
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--surface);
-  box-shadow:
-    0 4px 10px #10293438,
-    0 1px 3px #10293424;
+  box-shadow: var(--shadow-quick-card);
   opacity: 1;
-  transition: transform var(--wheel-duration) ease-out;
+  transition: transform var(--motion-quick-duration) ease-out;
   backface-visibility: hidden;
 }
 .quick .wheel-card.selected {
   background: var(--select);
   border-color: var(--focus);
-}
-:root[data-theme='dark'] .quick .wheel-card {
-  box-shadow:
-    0 4px 10px #0008,
-    0 1px 3px #0005;
 }
 .quick .wheel-snap {
   transition: none;
@@ -88,17 +87,17 @@ html[data-panel='quick'] #app {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--font-record-size);
 }
 .quick .index {
   min-width: 18px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--font-caption-size);
 }
 .quick .preview,
 .wheel-icon {
-  width: 44px;
-  height: 38px;
+  width: var(--compact-thumb-width);
+  height: var(--compact-thumb-height);
   flex-shrink: 0;
   display: grid;
   place-items: center;
@@ -111,8 +110,8 @@ html[data-panel='quick'] #app {
 .quick .sensitive-badge,
 .quick .file-status {
   margin-top: 3px;
-  font-size: 10px;
-  color: var(--warning);
+  font-size: var(--font-caption-size);
+  color: var(--sensitive-text);
 }
 .quick .empty {
   position: absolute;
@@ -123,24 +122,22 @@ html[data-panel='quick'] #app {
 }
 .quick .empty h2 {
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--font-subtitle-size);
 }
 .quick .empty p {
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--font-note-size);
 }
 .quick .wheel-capsule {
-  background: var(--error-bg);
-  color: var(--danger);
-  border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--error-bg));
-  border-radius: 10px;
+  background: var(--error-surface);
+  color: var(--error-text);
+  border: 1px solid color-mix(in srgb, var(--error-text) 20%, var(--error-surface));
+  border-radius: var(--radius-notice);
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: var(--font-label-size);
   line-height: 1.5;
   overflow-wrap: anywhere;
-  box-shadow:
-    0 4px 10px #10293430,
-    0 1px 3px #10293418;
+  box-shadow: var(--shadow-quick-notice);
 }
 .quick .wheel-stage > .error {
   position: absolute;
@@ -172,8 +169,8 @@ html[data-panel='quick'] #app {
   height: 24px;
   flex: 0 0 24px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  font-size: 15px;
+  background: color-mix(in srgb, var(--error-text) 12%, transparent);
+  font-size: var(--font-section-size);
   font-weight: 650;
   line-height: 1;
 }
@@ -182,17 +179,12 @@ html[data-panel='quick'] #app {
 }
 .quick .notice-copy strong {
   display: block;
-  font-size: 12px;
+  font-size: var(--font-label-size);
   font-weight: 650;
 }
 .quick .notice-copy p {
   margin: 2px 0 0;
   color: var(--text);
-}
-:root[data-theme='dark'] .quick .wheel-capsule {
-  box-shadow:
-    0 4px 10px #0008,
-    0 1px 3px #0005;
 }
 @media (prefers-reduced-motion: reduce) {
   .quick .wheel-card {

@@ -13,6 +13,7 @@ const VK_V: u32 = 0x56;
 const VK_UP: u32 = 0x26;
 const VK_DOWN: u32 = 0x28;
 const VK_ESC: u32 = 0x1B;
+const VK_SPACE: u32 = 0x20;
 const VK_A: u32 = 0x41;
 
 fn press(m: &mut Machine, key: u32) -> Decision {
@@ -175,6 +176,25 @@ fn escape_autorepeat_stays_paired_until_release() {
     assert!(release(&mut m, VK_ESC).swallow);
     assert!(!press(&mut m, VK_ESC).swallow);
     assert!(!m.active);
+}
+
+#[test]
+fn space_cancels_only_the_active_panel_and_pairs_its_keystroke() {
+    let mut machine = Machine::default();
+    assert!(!press(&mut machine, VK_SPACE).swallow);
+    assert!(!release(&mut machine, VK_SPACE).swallow);
+    open_panel(&mut machine);
+
+    let cancel = press(&mut machine, VK_SPACE);
+    assert_eq!(cancel.action, Some(Action::Cancel));
+    assert!(cancel.swallow);
+    let repeated = press(&mut machine, VK_SPACE);
+    assert_eq!(repeated.action, None);
+    assert!(repeated.swallow);
+    assert_eq!(release(&mut machine, LSHIFT).action, None);
+    assert_eq!(release(&mut machine, LCTRL).action, None);
+    assert!(release(&mut machine, VK_SPACE).swallow);
+    assert!(!press(&mut machine, VK_SPACE).swallow);
 }
 
 #[test]

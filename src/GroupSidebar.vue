@@ -5,7 +5,12 @@ import ContextMenu from './ContextMenu.vue';
 import UiIcon from './UiIcon.vue';
 import { groupColorStyle } from './groupColors';
 import type { Group, HistoryView } from './history';
-const props = defineProps<{ groups: Group[]; view: HistoryView; disabled: boolean }>();
+const props = defineProps<{
+  groups: Group[];
+  view: HistoryView;
+  disabled: boolean;
+  fluent: boolean;
+}>();
 const emit = defineEmits<{
   select: [view: HistoryView];
   changed: [];
@@ -119,11 +124,12 @@ async function remove() {
           :aria-pressed="view === entry[0]"
           :disabled="disabled || saving || editing !== null || deleting !== null"
           @click="emit('select', entry[0])"
-          ><UiIcon v-if="entry[0] === 'all'" name="layers" /><span
+          ><UiIcon v-if="entry[0] === 'all'" :name="fluent ? 'history' : 'layers'" /><span
             v-else
             class="group-dot ungrouped-dot"
+            aria-hidden="true"
           ></span
-          >{{ entry[1] }}</button
+          >{{ fluent && entry[0] === 'all' ? '全部分组' : entry[1] }}</button
         >
         <div class="groups-heading">我的分组</div>
         <template v-for="group in groups" :key="group.id">
@@ -150,7 +156,8 @@ async function remove() {
             :disabled="disabled || saving || editing !== null || deleting !== null"
             @click="emit('select', group.id)"
             @contextmenu.prevent="openMenu(group, $event)"
-            ><span class="group-dot"></span><span class="group-name">{{ group.name }}</span
+            ><span class="group-dot" aria-hidden="true"></span
+            ><span class="group-name">{{ group.name }}</span
             >{{ ' ' }}<span class="group-count">{{ group.count }}</span></button
           >
         </template>

@@ -1,3 +1,4 @@
+import { createAppearanceRecorder } from './appearance-baseline.mjs';
 // 离屏渲染 + 合成 IPC 数据；不操作用户桌面，不代表原生粘贴验收。
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -157,7 +158,9 @@ try {
     await pause(40);
   };
   const selected = () => evaluate("document.querySelector('.item.selected')?.dataset.id");
+  const appearanceRecorder = createAppearanceRecorder(evaluate, out);
   const capture = async (name) => {
+    await appearanceRecorder.capture(name);
     const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 65 });
     const bytes = Buffer.from(shot.data, 'base64');
     assert(bytes.length <= 300 * 1024);
@@ -200,6 +203,16 @@ try {
       ),
     );
     assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
+    assert(
+      await evaluate(`(() => {
+        const hint = document.querySelector('.cancel-hint');
+        const rect = hint.getBoundingClientRect();
+        const count = document.querySelector('.count').getBoundingClientRect();
+        return hint.textContent.trim() === '空格 / 右键取消' &&
+          rect.left >= 0 && rect.top >= 0 && rect.top < innerHeight / 2 &&
+          rect.right < count.left && Math.abs(rect.top - count.top) < 1;
+      })()`),
+    );
     assert.equal(
       await evaluate("window.calls.filter(c=>c.cmd==='resize_quick').at(-1).args.height"),
       height,
@@ -349,10 +362,42 @@ try {
       await evaluate("getComputedStyle(document.querySelector('.preview img')).objectFit"),
       'contain',
     );
+    assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
+    assert.equal(
+      await evaluate("getComputedStyle(document.querySelector('.wheel-card')).borderRadius"),
+      '8px',
+    );
+    assert.equal(
+      await evaluate(
+        "getComputedStyle(document.querySelector('.wheel-card')).getPropertyValue('--motion-quick-duration').trim()",
+      ),
+      '140ms',
+    );
     await capture('wheel-' + theme);
     check(`${theme} 主题：透明根、单行文字、文件名、敏感无计时/倒计时与缩略图隔离`);
   }
+  await evaluate(
+    "window.emitEvent('settings-changed',{...window.settings,skin:'fluent',theme:'dark'})",
+  );
+  await pause(180);
+  assert(
+    await evaluate(
+      "(()=>{const s=n=>getComputedStyle(document.querySelector(n));return s('.quick').backgroundColor==='rgba(0, 0, 0, 0)'&&s('.wheel-card.selected').height==='64px'&&s('.wheel-card.selected').backgroundColor==='rgb(48, 72, 67)'&&s('.cancel-hint').borderTopWidth==='1px'&&s('.wheel-card').boxShadow!=='none';})()",
+    ),
+  );
+  await capture('fluent-dark-wheel');
+  assert.deepEqual(
+    await evaluate(
+      "(()=>{const style=getComputedStyle(document.querySelector('.wheel-card.selected .summary'));return [style.fontSize,style.fontWeight];})()",
+    ),
+    ['13px', '400'],
+  );
+  await evaluate(
+    "window.emitEvent('settings-changed',{...window.settings,skin:'clipraft',theme:'dark'})",
+  );
+  check('U7 Fluent 滚轮保留透明舞台、固定卡高、选中描边与独立阴影');
   await emit(payload({ loading: true, items: [] }));
+  assert.equal(await evaluate("!!document.querySelector('.cancel-hint')"), true);
   const loadingHeight = await evaluate(
     "window.calls.filter(c=>c.cmd==='resize_quick').at(-1).args.height",
   );
@@ -369,6 +414,9 @@ try {
   );
   await capture('wheel-error');
   check('加载/失败胶囊保持同配置窗口几何');
+  await emit(payload({ visible: false, items: [] }));
+  assert.equal(await evaluate("!!document.querySelector('.cancel-hint')"), false);
+  check('取消提示位于面板左上，加载时保留，面板关闭后消失');
   await emit(payload({ visible: false, error: '合成粘贴失败', items: [] }));
   assert(
     await evaluate(
@@ -522,6 +570,7 @@ try {
   };
   await writeFile(path.join(out, 'results.json'), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
+  await appearanceRecorder.finish();
   await send('Browser.close').catch(() => {});
 } finally {
   ws?.close();

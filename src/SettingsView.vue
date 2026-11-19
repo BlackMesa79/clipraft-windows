@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import DataDirectorySettings from './DataDirectorySettings.vue';
+import UiIcon from './UiIcon.vue';
 import ArchiveSettings from './ArchiveSettings.vue';
 import StagingSettings from './StagingSettings.vue';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
@@ -15,6 +16,7 @@ import {
   type SettingOptions,
   type HotkeyReport,
 } from './settings';
+defineProps<{ fluent: boolean }>();
 const emit = defineEmits<{
   saved: [settings: Settings];
   busy: [busy: boolean];
@@ -270,6 +272,7 @@ async function load() {
     const compatible = {
       ...settings,
       theme: settings.theme ?? 'light',
+      skin: settings.skin ?? 'clipraft',
       layout: settings.layout ?? 'list',
       compact: settings.compact ?? false,
       hide_on_blur: settings.hide_on_blur ?? false,
@@ -390,24 +393,26 @@ onUnmounted(() => {
 <template>
   <section class="settings-view" aria-label="设置" :aria-busy="busy">
     <form v-if="draft && options" @submit.prevent="save" novalidate>
-      <div class="settings-body">
-        <nav class="settings-nav" aria-label="设置分类"
-          ><button
-            v-for="entry in categories"
-            :key="entry.id"
-            :disabled="busy"
-            type="button"
-            :aria-current="category === entry.id ? 'page' : undefined"
-            @click="category = entry.id"
-            >{{ entry.label }}</button
-          ><button
-            type="button"
-            class="settings-toggle settings-back"
-            :disabled="busy"
-            @click="leaveSettings()"
-            >返回列表</button
-          ></nav
+      <nav class="settings-nav" aria-label="设置分类">
+        <button
+          v-for="entry in categories"
+          :key="entry.id"
+          :disabled="busy"
+          type="button"
+          :aria-current="category === entry.id ? 'page' : undefined"
+          @click="category = entry.id"
+          >{{ entry.label }}</button
         >
+        <button
+          v-if="!fluent"
+          type="button"
+          class="settings-toggle settings-back"
+          :disabled="busy"
+          @click="leaveSettings()"
+          >返回列表</button
+        >
+      </nav>
+      <div class="settings-pane">
         <label class="settings-category"
           >设置分类<select v-model="category" aria-label="设置分类"
             ><option v-for="entry in categories" :key="entry.id" :value="entry.id">{{
@@ -419,23 +424,35 @@ onUnmounted(() => {
           <fieldset :disabled="busy" v-show="category === 'general'" data-category="general">
             <legend>通用</legend>
             <label class="check"
-              ><input v-model="draft.hide_on_blur" type="checkbox" />主窗口失去焦点时自动隐藏</label
+              ><input
+                v-model="draft.hide_on_blur"
+                type="checkbox"
+                :role="fluent ? 'switch' : undefined"
+              /><span>主窗口失去焦点时自动隐藏</span></label
             >
-            <label class="check"><input v-model="draft.autostart" type="checkbox" />开机自启</label>
+            <label class="check"
+              ><input
+                v-model="draft.autostart"
+                type="checkbox"
+                :role="fluent ? 'switch' : undefined"
+              /><span>开机自启</span></label
+            >
             <label class="check"
               ><input
                 v-model="draft.pause_on_start"
                 type="checkbox"
-              />启动时暂停监听（下次启动生效）</label
+                :role="fluent ? 'switch' : undefined"
+              /><span>启动时暂停监听（下次启动生效）</span></label
             >
             <label class="check"
               ><input
                 v-model="draft.select_first_on_show"
                 type="checkbox"
-              />每次唤出主窗口时选中第一条记录</label
+                :role="fluent ? 'switch' : undefined"
+              /><span>每次唤出主窗口时选中第一条记录</span></label
             >
             <p class="detail-note">包含紧凑模式，按当前筛选结果选择；关闭时记忆上次选中记录。</p>
-            <label class="number-field"
+            <label class="number-field settings-select"
               ><span>主窗口唤出位置</span
               ><select v-model="draft.main_position" aria-label="主窗口唤出位置"
                 ><option value="remember">记忆上次位置</option
@@ -484,23 +501,54 @@ onUnmounted(() => {
           </fieldset>
           <fieldset :disabled="busy" v-show="category === 'appearance'" data-category="appearance">
             <legend>外观</legend>
-            <label class="number-field"
-              ><span>主题</span
-              ><select v-model="draft.theme" aria-label="主题"
-                ><option value="light">浅色青绿</option
-                ><option value="dark">深色蓝灰</option></select
-              ></label
+            <div
+              class="appearance-section"
+              :role="fluent ? 'group' : undefined"
+              :aria-labelledby="fluent ? 'appearance-theme-heading' : undefined"
             >
-            <label class="number-field"
-              ><span>常规布局</span
-              ><select v-model="draft.layout" aria-label="常规布局"
-                ><option value="list">单列列表</option
-                ><option value="cards">双列卡片</option></select
-              ></label
+              <h3 v-if="fluent" id="appearance-theme-heading">主题</h3>
+              <label class="number-field settings-select"
+                ><span><UiIcon name="layers" />皮肤<small>窗口与控件的外观</small></span
+                ><select v-model="draft.skin" aria-label="皮肤"
+                  ><option value="clipraft">片筏默认</option
+                  ><option value="fluent">Fluent</option></select
+                ></label
+              >
+              <label class="number-field settings-select"
+                ><span><UiIcon name="image" />明暗<small>浅色或深色配色</small></span
+                ><select v-model="draft.theme" :aria-label="fluent ? '明暗' : '主题'"
+                  ><option value="light">浅色</option
+                  ><option value="dark">深色</option></select
+                ></label
+              >
+            </div>
+            <div
+              class="appearance-section"
+              :role="fluent ? 'group' : undefined"
+              :aria-labelledby="fluent ? 'appearance-layout-heading' : undefined"
             >
-            <label class="check"
-              ><input v-model="draft.compact" type="checkbox" />紧凑模式（隐藏侧栏与预览）</label
-            >
+              <h3 v-if="fluent" id="appearance-layout-heading">布局</h3>
+              <label class="number-field settings-select"
+                ><span><UiIcon name="layers" />常规布局<small>历史记录的排列方式</small></span
+                ><select v-model="draft.layout" aria-label="常规布局"
+                  ><option value="list">单列列表</option
+                  ><option value="cards">双列卡片</option></select
+                ></label
+              >
+              <label class="check compact-setting"
+                ><input
+                  v-model="draft.compact"
+                  type="checkbox"
+                  :role="fluent ? 'switch' : undefined"
+                  :aria-label="fluent ? '紧凑模式' : undefined"
+                  :aria-describedby="fluent ? 'compact-setting-description' : undefined"
+                /><span v-if="fluent"
+                  ><UiIcon name="compact" />紧凑模式<small id="compact-setting-description"
+                    >隐藏分组侧栏和内嵌预览</small
+                  ></span
+                ><span v-else>紧凑模式（隐藏侧栏与预览）</span></label
+              >
+            </div>
             <p class="detail-note">主题与布局独立；退出紧凑模式恢复常规布局。保存后生效。</p>
           </fieldset>
           <fieldset :disabled="busy" v-show="category === 'privacy'" data-category="privacy">
@@ -510,14 +558,19 @@ onUnmounted(() => {
               会取消所有敏感记录的倒计时，普通历史清理规则仍然适用；恢复正数不改变已取消的倒计时。</p
             >
             <label class="check"
-              ><input v-model="draft.sensitive_detection" type="checkbox" />识别敏感内容</label
+              ><input
+                v-model="draft.sensitive_detection"
+                type="checkbox"
+                :role="fluent ? 'switch' : undefined"
+              /><span>识别敏感内容</span></label
             >
             <label class="check"
               ><input
                 v-model="draft.sensitive_high_entropy"
                 type="checkbox"
+                :role="fluent ? 'switch' : undefined"
                 :disabled="busy"
-              />高熵字符串识别（可能误报，默认关闭）</label
+              /><span>高熵字符串识别（可能误报，默认关闭）</span></label
             >
             <label class="number-field"
               ><span>敏感内容保留时长</span
@@ -530,8 +583,8 @@ onUnmounted(() => {
                 /><span>分钟</span></span
               ><small>0 为不设敏感删除倒计时；范围 0–1440</small></label
             >
-            <p>忽略程序（每行一个 exe 名）</p>
-            <ul class="ignored-apps"
+            <p id="ignored-apps-heading">忽略程序（每行一个 exe 名）</p>
+            <ul class="ignored-apps" aria-labelledby="ignored-apps-heading"
               ><li v-for="(name, index) in draft.ignored_apps" :key="index"
                 ><span>{{ name }}</span
                 ><button
@@ -659,44 +712,56 @@ onUnmounted(() => {
             >
           </fieldset>
         </div>
-      </div>
-      <div class="settings-actions">
-        <div class="settings-feedback">
-          <div v-if="error" class="error" role="alert">{{ error }}</div>
-          <p
-            v-if="validation && (!hotkeyValidation || recordingField || recordOperations)"
-            class="error"
-            role="alert"
-            >{{ validation }}</p
-          >
-          <div v-if="pending" class="delete-confirm" role="alertdialog" aria-label="确认立即清理">
-            <span
-              >将立即删除
-              {{ pending.count }} 条记录。预估后新增或到期的记录可能使实际数量变化。</span
+        <div class="settings-actions">
+          <div class="settings-feedback">
+            <div v-if="error" class="error" role="alert">{{ error }}</div>
+            <p
+              v-if="validation && (!hotkeyValidation || recordingField || recordOperations)"
+              class="error"
+              role="alert"
+              >{{ validation }}</p
             >
-            <button type="button" :disabled="busy || archiveBusy" @click="confirm"
-              >确认保存并清理</button
-            ><button type="button" :disabled="busy" @click="pending = undefined">取消</button>
+            <div v-if="pending" class="delete-confirm" role="alertdialog" aria-label="确认立即清理">
+              <span
+                >将立即删除
+                {{ pending.count }} 条记录。预估后新增或到期的记录可能使实际数量变化。</span
+              >
+              <button type="button" :disabled="busy || archiveBusy" @click="confirm"
+                >确认保存并清理</button
+              ><button type="button" :disabled="busy" @click="pending = undefined">取消</button>
+            </div>
+            <p v-if="status" role="status">{{ status }}</p>
+            <span v-if="!error && !validation && !pending && !status" class="detail-note">{{
+              unsavedSettings ? '有未保存的修改，Esc 取消' : '设置未修改，Esc 返回列表'
+            }}</span>
           </div>
-          <p v-if="status" role="status">{{ status }}</p>
-          <span v-if="!error && !validation && !pending && !status" class="detail-note"
-            >Esc 返回列表，未保存的修改将丢弃</span
-          >
+          <div class="settings-buttons">
+            <template
+              v-for="action in fluent ? ['cancel', 'save'] : ['save', 'cancel']"
+              :key="action"
+            >
+              <button
+                v-if="action === 'save'"
+                type="submit"
+                :disabled="
+                  busy ||
+                  archiveBusy ||
+                  !!validation ||
+                  !!pending ||
+                  (hotkeysChanged && checkBlocked) ||
+                  (fluent && !unsavedSettings)
+                "
+                >{{ busy ? '正在处理…' : '保存' }}</button><button
+                v-else
+                type="button"
+                :disabled="busy"
+                class="settings-cancel"
+                @click="cancel()"
+                >{{ recordingField || recordOperations ? '取消录制' : '取消' }}</button
+              >
+            </template>
+          </div>
         </div>
-        <div class="settings-buttons">
-          <button
-            type="submit"
-            :disabled="
-              busy || archiveBusy || !!validation || !!pending || (hotkeysChanged && checkBlocked)
-            "
-            >{{ busy ? '正在处理…' : '保存' }}</button><button
-            type="button"
-            :disabled="busy"
-            class="settings-cancel"
-            @click="cancel()"
-            >{{ recordingField || recordOperations ? '取消录制' : '取消' }}</button
-          ></div
-        >
       </div>
     </form>
     <div v-else-if="error" class="error" role="alert"
@@ -734,20 +799,20 @@ onUnmounted(() => {
   color: var(--text);
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-button);
   padding: 7px;
   min-width: 0;
 }
 .settings-view :deep(button) {
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: var(--radius-button);
   background: var(--select);
   color: var(--accent);
   padding: 6px 12px;
   cursor: pointer;
 }
 .settings-view :deep(button:disabled) {
-  opacity: 0.5;
+  opacity: var(--opacity-form-disabled);
   cursor: default;
 }
 .check {
@@ -756,16 +821,19 @@ onUnmounted(() => {
   gap: 8px;
   margin: 8px 0;
 }
+.appearance-section {
+  display: contents;
+}
 .number-field {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
   margin: 12px 0;
-  font-size: 13px;
+  font-size: var(--font-body-size);
 }
 .number-field > span {
-  width: 210px;
+  width: var(--settings-label-width);
 }
 .number-field > .duration-input {
   width: auto;
@@ -776,7 +844,7 @@ onUnmounted(() => {
 }
 .number-field input,
 .number-field select {
-  width: 220px;
+  width: var(--settings-input-width);
 }
 .number-field small {
   color: var(--muted);
@@ -826,7 +894,7 @@ onUnmounted(() => {
 }
 .settings-view form {
   display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
+  grid-template-columns: var(--main-sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
   flex: 1;
   min-height: 0;
@@ -835,13 +903,13 @@ onUnmounted(() => {
   margin: 0;
   overflow: hidden;
 }
-.settings-body {
+.settings-pane {
   display: contents;
 }
 .settings-nav {
   grid-column: 1;
   grid-row: 1 / -1;
-  width: 150px;
+  width: var(--main-sidebar-width);
   flex-shrink: 0;
   padding: 20px 10px;
   background: var(--surface);
@@ -859,8 +927,8 @@ onUnmounted(() => {
   border-color: transparent;
 }
 .settings-nav button[aria-current='page'] {
-  background: var(--select);
-  color: var(--accent);
+  background: var(--selected-bg);
+  color: var(--selected-text);
 }
 .settings-category {
   display: none;
@@ -871,7 +939,7 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   overflow: auto;
-  padding: 24px;
+  padding: var(--settings-content-padding);
 }
 .settings-content fieldset {
   margin: 0;
@@ -880,7 +948,7 @@ onUnmounted(() => {
 }
 .settings-content legend {
   padding: 0;
-  font-size: 15px !important;
+  font-size: var(--font-section-size) !important;
   margin-bottom: 16px;
 }
 .settings-actions {
@@ -898,7 +966,7 @@ onUnmounted(() => {
 .settings-feedback > [role='status'] {
   width: 100%;
   color: var(--accent);
-  font-size: 12px;
+  font-size: var(--font-label-size);
 }
 .number-field > .hotkey-record {
   width: auto;
@@ -915,9 +983,9 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .settings-view button.hotkey-problem {
-  color: var(--danger);
-  background: var(--error-bg);
-  border-color: var(--danger);
+  color: var(--error-text);
+  background: var(--error-surface);
+  border-color: var(--error-text);
   font-weight: 600;
 }
 .settings-content input,
@@ -936,7 +1004,7 @@ onUnmounted(() => {
 }
 .settings-feedback {
   min-width: 0;
-  font-size: 12px;
+  font-size: var(--font-label-size);
   overflow-wrap: anywhere;
 }
 .settings-feedback > * + * {
@@ -952,8 +1020,8 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .settings-buttons button[type='submit'] {
-  background: var(--accent);
-  color: var(--bg);
+  background: var(--primary-bg);
+  color: var(--primary-text);
 }
 @media (max-width: 600px) {
   .settings-view form {
@@ -981,7 +1049,7 @@ onUnmounted(() => {
     gap: 12px;
     padding: 12px;
     border-bottom: 1px solid var(--line);
-    font-size: 12px;
+    font-size: var(--font-label-size);
   }
   .settings-category select {
     flex: 1;

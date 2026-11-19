@@ -67,7 +67,7 @@ onUnmounted(() => {
     aria-label="快速粘贴历史"
     :aria-busy="panel.loading"
     :style="{
-      '--wheel-duration': `${wheelGeometry.duration}ms`,
+      '--motion-quick-duration': `${wheelGeometry.duration}ms`,
       '--wheel-card-height': `${wheelGeometry.cardHeight}px`,
     }"
   >

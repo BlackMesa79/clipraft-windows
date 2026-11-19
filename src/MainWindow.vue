@@ -46,8 +46,8 @@ const settings = ref<Settings>(),
   settingOptions = ref<SettingOptions>();
 const appearanceBusy = ref(false);
 const compact = computed(() => settings.value?.compact ?? false);
+const fluent = computed(() => settings.value?.skin === 'fluent');
 const layout = computed(() => settings.value?.layout ?? 'list');
-watch(settings, applyTheme);
 let appearanceGeneration = 0;
 let savedAnchor: { id: string; offset: number } | undefined;
 function rememberAnchor() {
@@ -84,10 +84,11 @@ watch(settingsOpen, async (open) => {
   }
 });
 watch(
-  () => [settings.value?.theme, layout.value, compact.value],
+  () => [settings.value?.theme, fluent.value, layout.value, compact.value],
   async () => {
     const generation = ++appearanceGeneration;
     rememberAnchor();
+    applyTheme(settings.value);
     conceal();
     await nextTick();
     if (generation !== appearanceGeneration) return;
@@ -395,6 +396,14 @@ async function performDelete(ids: string[]) {
 }
 function confirmDelete() {
   if (pendingDelete.value) void performDelete(pendingDelete.value);
+}
+const deleteConfirmation = ref<HTMLElement | null>(null);
+watch(deleteConfirmation, (dialog) => {
+  if (fluent.value) dialog?.querySelector<HTMLButtonElement>('.cancel-delete')?.focus();
+});
+function cancelDelete(): void {
+  pendingDelete.value = null;
+  if (fluent.value) void nextTick(focusSelectedRecord);
 }
 function historyChanged() {
   invalidateFloatingPreview();
@@ -726,6 +735,8 @@ function isPinShortcut(event: KeyboardEvent): boolean {
 function settingsKeydown(event: KeyboardEvent): void {
   if (isPinShortcut(event)) event.preventDefault();
   if (event.key !== 'Escape') return;
+  // 让原生下拉框先撤销临时选择并恢复焦点。
+  if (CSS.supports('selector(select:open)') && document.querySelector('select:open')) return;
   event.preventDefault();
   if (!settingsBusy.value) toggleSettings();
 }
@@ -778,7 +789,7 @@ async function recordKeydown(event: KeyboardEvent): Promise<void> {
   if (pendingDelete.value) {
     if (event.key === 'Escape') {
       event.preventDefault();
-      pendingDelete.value = null;
+      cancelDelete();
     }
     // 确认条按钮仍可通过 Tab / Enter 操作，但不触发列表粘贴。
     return;
@@ -1025,7 +1036,17 @@ onUnmounted(() => {
     ]"
   >
     <header data-tauri-drag-region>
-      <div class="brand" data-tauri-drag-region
+      <button
+        v-if="fluent && settingsOpen"
+        type="button"
+        class="settings-back settings-title-back"
+        aria-label="设置，返回列表"
+        title="返回列表"
+        :disabled="settingsBusy || deleting || busy || organizing"
+        @click="toggleSettings"
+        ><UiIcon name="back" /> 设置</button
+      >
+      <div v-else class="brand" data-tauri-drag-region
         ><span class="brand-mark"><img :src="brandIcon" alt="" /></span
         ><div
           ><h1>{{ brandName }}</h1
@@ -1071,6 +1092,7 @@ onUnmounted(() => {
         v-if="!settingsOpen"
         v-show="!compact"
         :groups="groups"
+        :fluent="fluent"
         :view="view"
         :disabled="deleting || mutationBusy || busy || !!pendingDelete"
         @select="selectView"
@@ -1139,7 +1161,9 @@ onUnmounted(() => {
                 :title="`${option.label}（←/→ 切换类型）`"
                 :disabled="deleting || organizing || !!pendingDelete"
                 @click="kind = option.value"
-                >{{ compact && option.value === null ? '全部类型' : option.label }}</button
+                >{{
+                  compact && !fluent && option.value === null ? '全部类型' : option.label
+                }}</button
               > </div
             ><span class="count">已加载 {{ items.length }} 条</span></div
           >
@@ -1151,6 +1175,7 @@ onUnmounted(() => {
         <div v-if="startupError" class="error" role="alert">{{ startupError }}</div>
         <SettingsView
           v-if="settingsOpen"
+          :fluent="fluent"
           @saved="settings = $event"
           @busy="settingsBusy = $event"
           @recording="settingsRecording = $event"
@@ -1162,6 +1187,7 @@ onUnmounted(() => {
         >
         <div
           v-if="!settingsOpen && pendingDelete"
+          ref="deleteConfirmation"
           class="delete-confirm"
           role="alertdialog"
           aria-label="确认删除"
@@ -1171,11 +1197,24 @@ onUnmounted(() => {
             >将删除 {{ pendingDelete.length }} 条，其中
             {{ protectedDeleteCount }} 条受清理保护</span
           >
-          <button type="button" @click="confirmDelete">确认</button
-          ><button type="button" @click="pendingDelete = null">取消</button>
+          <template
+            v-for="action in fluent ? ['cancel', 'confirm'] : ['confirm', 'cancel']"
+            :key="action"
+          >
+            <button
+              v-if="action === 'cancel'"
+              class="cancel-delete"
+              type="button"
+              @click="cancelDelete"
+              >取消</button
+            ><button v-else class="confirm-delete" type="button" @click="confirmDelete"
+              >确认</button
+            >
+          </template>
         </div>
         <ContextMenu
           v-if="!settingsOpen && contextMenu"
+          :fluent="fluent"
           :key="contextMenu.id + ':' + contextMenu.x + ':' + contextMenu.y"
           :x="contextMenu.x"
           :y="contextMenu.y"
@@ -1206,27 +1245,34 @@ onUnmounted(() => {
           ><p v-if="!filtered">{{ quickKey?.label }} 打开快速面板</p></section
         >
         <div v-else-if="!settingsOpen" class="workspace">
-          <HistoryList
-            ref="historyList"
-            :items="items"
-            :groups="groups"
-            :selected="selected"
-            :selected-ids="selectedIds"
-            :quick="false"
-            :filtered="filtered"
-            :loading="pageLoading"
-            :has-more="hasMore"
-            :disabled="deleting || organizing || !!pendingDelete"
-            @choose="choose"
-            @context="openContext"
-            @paste="paste(false)"
-            @scroll="
-              contextMenu = null;
-              checkLoadMore();
-              schedulePreviewGeometry();
-            "
-            @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})"
-          />
+          <div class="history-pane">
+            <header v-if="fluent" class="history-list-heading">
+              <h2>{{ filtered ? '筛选结果' : '最近复制' }}</h2>
+              <span>已加载 {{ items.length }} 条</span>
+            </header>
+            <HistoryList
+              ref="historyList"
+              :items="items"
+              :groups="groups"
+              :selected="selected"
+              :selected-ids="selectedIds"
+              :quick="false"
+              :fluent="fluent"
+              :filtered="filtered"
+              :loading="pageLoading"
+              :has-more="hasMore"
+              :disabled="deleting || organizing || !!pendingDelete"
+              @choose="choose"
+              @context="openContext"
+              @paste="paste(false)"
+              @scroll="
+                contextMenu = null;
+                checkLoadMore();
+                schedulePreviewGeometry();
+              "
+              @thumbnail-loaded="invoke('thumbnail_loaded').catch(() => {})"
+            />
+          </div>
           <aside v-if="active && !compact" class="detail" aria-label="选中项预览">
             <div ref="detailRoot" class="detail-scroll" :key="active.id">
               <div v-if="active.sensitive" class="sensitive-actions"
@@ -1250,77 +1296,83 @@ onUnmounted(() => {
                   @click="loadDetail"
                   ><UiIcon name="refresh" /><span class="sr-only">刷新状态</span></button
                 ></div
-              ><h2
-                v-if="!active.sensitive && active.kind !== 'image' && !active.is_link"
-                class="preview-title"
-                >{{ active.summary }}</h2
-              >
-              <div
-                v-if="active.sensitive && (active.kind === 'image' || imageSource)"
-                class="sensitive-image"
-              >
+              ><div class="preview-content"
+                ><h2
+                  v-if="!active.sensitive && active.kind !== 'image' && !active.is_link"
+                  class="preview-title"
+                  >{{ active.summary }}</h2
+                >
+                <div
+                  v-if="active.sensitive && (active.kind === 'image' || imageSource)"
+                  class="sensitive-image"
+                >
+                  <PreviewImage
+                    v-if="imageSource"
+                    :source="imageSource"
+                    large
+                    @loaded="invoke('preview_loaded').catch(() => {})"
+                  />
+                  <p v-else-if="!detailLoading && !detailError" class="detail-note"
+                    >记录没有可用的图片预览</p
+                  >
+                  <p class="detail-note">{{
+                    revealed ? '正在显示原图' : '图片已用马赛克遮挡，点击“显示原文”查看原图。'
+                  }}</p>
+                </div>
                 <PreviewImage
-                  v-if="imageSource"
-                  :source="imageSource"
+                  v-else-if="
+                    active.kind === 'image' ||
+                    active.thumbnail ||
+                    active.preview ||
+                    active.placeholder
+                  "
+                  :hash="active.preview || active.thumbnail"
+                  :placeholder="active.placeholder"
                   large
                   @loaded="invoke('preview_loaded').catch(() => {})"
                 />
-                <p v-else-if="!detailLoading && !detailError" class="detail-note"
-                  >记录没有可用的图片预览</p
+                <p
+                  v-if="
+                    !active.sensitive &&
+                    active.kind === 'image' &&
+                    !active.preview &&
+                    active.thumbnail
+                  "
+                  class="detail-note"
+                  >旧记录：显示缩略图</p
                 >
-                <p class="detail-note">{{
-                  revealed ? '正在显示原图' : '图片已用马赛克遮挡，点击“显示原文”查看原图。'
-                }}</p>
-              </div>
-              <PreviewImage
-                v-else-if="
-                  active.kind === 'image' ||
-                  active.thumbnail ||
-                  active.preview ||
-                  active.placeholder
-                "
-                :hash="active.preview || active.thumbnail"
-                :placeholder="active.placeholder"
-                large
-                @loaded="invoke('preview_loaded').catch(() => {})"
-              />
-              <p
-                v-if="
-                  !active.sensitive &&
-                  active.kind === 'image' &&
-                  !active.preview &&
-                  active.thumbnail
-                "
-                class="detail-note"
-                >旧记录：显示缩略图</p
-              >
-              <p v-if="detailLoading" role="status">正在读取详情…</p>
-              <p v-else-if="detailError" class="error" role="alert">{{ detailError }}</p>
-              <template v-else-if="detail">
-                <template v-if="active.kind === 'text' || active.kind === 'rich'">
-                  <RichPreview v-if="detail.rich" :content="detail.rich" />
-                  <template v-else>
-                    <p v-if="detail.truncated" class="detail-note">仅显示前 20000 个字符</p>
-                    <pre class="text-detail">{{ detail.text || '此记录没有纯文本内容' }}</pre>
+                <p v-if="detailLoading" role="status">正在读取详情…</p>
+                <p v-else-if="detailError" class="error" role="alert">{{ detailError }}</p>
+                <template v-else-if="detail">
+                  <template v-if="active.kind === 'text' || active.kind === 'rich'">
+                    <RichPreview v-if="detail.rich" :content="detail.rich" />
+                    <template v-else>
+                      <p v-if="detail.truncated" class="detail-note">仅显示前 20000 个字符</p>
+                      <pre class="text-detail">{{ detail.text || '此记录没有纯文本内容' }}</pre>
+                    </template>
                   </template>
-                </template>
-                <ul v-if="active.kind === 'files'" class="file-detail">
-                  <li v-for="(file, index) in detail.files" :key="file.path"
-                    ><span :class="['file-status', { missing: file.exists !== true }]">{{
-                      file.exists === true ? '存在' : file.exists === false ? '已失效' : '无法检查'
-                    }}</span
-                    ><span>{{ file.path }}</span
-                    ><div v-if="!active.sensitive && !canOpenSingleFile" class="file-actions"
-                      ><button
-                        type="button"
-                        :disabled="fileActionBusy || file.exists === false"
-                        @click="runFileAction('open', index)"
-                        >打开</button
-                      ></div
-                    ></li
-                  >
-                </ul>
-              </template>
+                  <ul v-if="active.kind === 'files'" class="file-detail">
+                    <li v-for="(file, index) in detail.files" :key="file.path"
+                      ><span :class="['file-status', { missing: file.exists !== true }]">{{
+                        file.exists === true
+                          ? '存在'
+                          : file.exists === false
+                            ? '已失效'
+                            : '无法检查'
+                      }}</span
+                      ><span>{{ file.path }}</span
+                      ><div v-if="!active.sensitive && !canOpenSingleFile" class="file-actions"
+                        ><button
+                          type="button"
+                          :disabled="fileActionBusy || file.exists === false"
+                          @click="runFileAction('open', index)"
+                          >打开</button
+                        ></div
+                      ></li
+                    >
+                  </ul>
+                </template></div
+              >
             </div>
             <div class="detail-bottom">
               <div class="detail-origin"
@@ -1338,7 +1390,7 @@ onUnmounted(() => {
                   class="paste-primary"
                   :disabled="busy || deleting || organizing || !!pendingDelete"
                   @click="paste(false)"
-                  >粘贴到原窗口</button
+                  >粘贴此条记录</button
                 >
                 <div v-if="canOpenLink" class="link-actions preview-secondary">
                   <button
@@ -1353,8 +1405,8 @@ onUnmounted(() => {
                 <div v-if="canOpenSingleFile" class="single-file-actions preview-secondary">
                   <button
                     type="button"
-                    title="用默认应用打开"
-                    aria-label="用默认应用打开"
+                    :title="detail?.files[0]?.is_directory ? '打开目录' : '用默认应用打开'"
+                    :aria-label="detail?.files[0]?.is_directory ? '打开目录' : '用默认应用打开'"
                     :disabled="
                       !!fileActionBlocked ||
                       detailLoading ||
@@ -1362,7 +1414,7 @@ onUnmounted(() => {
                       detail.files[0]?.exists === false
                     "
                     @click="runFileAction('open', 0)"
-                    >打开文件</button
+                    >{{ detail?.files[0]?.is_directory ? '打开目录' : '打开文件' }}</button
                   >
                 </div>
               </div>
@@ -1381,7 +1433,7 @@ onUnmounted(() => {
         @click="toggleSettings"
         ><UiIcon name="settings" /> 设置</button
       >
-      <span v-else>本地加密保存</span
+      <span v-else-if="!compact">本地加密保存</span
       ><span class="keyboard-hint" title="↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴"
         >↑↓ 选择 · ←→ 类型 · Ctrl+↑↓ 分组 · Enter 粘贴</span
       >

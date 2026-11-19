@@ -177,7 +177,7 @@ function openReplacement(): void {
   padding-top: 12px;
 }
 h3 {
-  font-size: 15px;
+  font-size: var(--font-section-size);
   margin: 0 0 10px;
 }
 .archive-actions {

@@ -11,6 +11,7 @@ fn u2_ac1_legacy_json_defaults_without_losing_existing_preferences() {
     };
     let mut json = serde_json::to_value(&old).unwrap();
     for key in [
+        "skin",
         "theme",
         "layout",
         "compact",
@@ -35,6 +36,7 @@ fn u2_ac2_all_appearance_combinations_survive_database_reopen() {
                 for hide_on_blur in [false, true] {
                     for main_position in [MainPosition::Remember, MainPosition::Mouse] {
                         let expected = Settings {
+                            skin: clipraft_windows::settings::Skin::Fluent,
                             theme,
                             layout,
                             compact,
@@ -61,6 +63,7 @@ fn u2_ac2_all_appearance_combinations_survive_database_reopen() {
 #[test]
 fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
     for (key, invalid) in [
+        ("skin", "\"SECRET_INVALID\""),
         ("theme", "\"SECRET_INVALID\""),
         ("layout", "null"),
         ("compact", "1"),
@@ -90,6 +93,7 @@ fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
         let defaults = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(json[key], defaults[key]);
         for other in [
+            "skin",
             "theme",
             "layout",
             "compact",

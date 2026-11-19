@@ -3,6 +3,8 @@ defineProps<{ name: string }>();
 const paths: Record<string, string> = {
   copy: 'M8 8h12v13H8z M15 8V3H3v13h5',
   layers: 'm12 3 10 5-10 5L2 8z M2 12l10 5 10-5 M2 16l10 5 10-5',
+  history: 'M3 12a9 9 0 1 1 2.64 6.36 M3 6v6h6 M12 7v5l3 2',
+  back: 'M20 12H4m0 0 6-6m-6 6 6 6',
   search: 'M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z m-2 4 7 7',
   text: 'M5 5h14 M12 5v15 M8 20h8',
   files: 'M13 3H5v18h14V9z M13 3v6h6 M8 14h8 M8 17h5',
@@ -14,7 +16,7 @@ const paths: Record<string, string> = {
   compact: 'M3 4h18v16H3z M8 4v16 M12 9h5 M12 13h5 M12 17h5',
   expand: 'M3 4h18v16H3z M9 4v16 M13 8h5v8h-5z',
   settings:
-    'M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2',
+    'M10.2 5.1 10.1 2.5 13.9 2.5 13.8 5.1 17 7 19.3 5.6 21.2 8.8 18.9 10.2 18.9 13.8 21.2 15.2 19.3 18.4 17 17 13.8 18.9 13.9 21.5 10.1 21.5 10.2 18.9 7 17 4.7 18.4 2.8 15.2 5.1 13.8 5.1 10.2 2.8 8.8 4.7 5.6 7 7Z M14.7 12a2.7 2.7 0 1 1-5.4 0 2.7 2.7 0 1 1 5.4 0Z',
 };
 </script>
 

@@ -13,6 +13,7 @@ const props = defineProps<{
   files?: string[];
   canOpenLink?: boolean;
   linkBusy?: boolean;
+  fluent?: boolean;
 }>();
 const expanded = ref(false);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -195,7 +196,7 @@ onUnmounted(() => {
         @click="emit('keepSensitive')"
         >{{ allSensitiveKept ? '已取消敏感删除倒计时' : '取消敏感删除倒计时' }}</button
       >
-      <button type="button" role="menuitem" @click="emit('delete')">删除</button>
+      <button v-if="!fluent" type="button" role="menuitem" @click="emit('delete')">删除</button>
       <button type="button" role="menuitem" @click="emit('paste')">粘贴</button>
       <button
         v-if="canOpenLink"
@@ -212,6 +213,12 @@ onUnmounted(() => {
         >
         <button type="button" role="menuitem" @click="emit('revealFile', 0)"
           >在资源管理器中定位</button
+        >
+      </template>
+      <template v-if="fluent">
+        <div role="separator" class="menu-separator"></div>
+        <button type="button" role="menuitem" class="delete-record" @click="emit('delete')"
+          >删除记录</button
         >
       </template>
     </slot>

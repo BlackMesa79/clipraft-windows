@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 const now = ref(Date.now());
+const MAX_DATE_MS = 8_640_000_000_000_000;
+const recordTime = new Intl.DateTimeFormat('zh-CN', {
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
 let clock: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
   clock = setInterval(() => {
@@ -25,6 +31,7 @@ const props = defineProps<{
   selected: number;
   selectedIds: Set<string>;
   quick: boolean;
+  fluent: boolean;
   filtered?: boolean;
   loading: boolean;
   hasMore: boolean;
@@ -152,7 +159,14 @@ defineExpose({ element });
       <span v-if="!quick && item.pinned" class="compact-pin" title="置顶" aria-label="置顶"
         ><UiIcon name="pin"
       /></span>
-      <span v-if="index === selected" class="selected-mark">↵</span>
+      <time
+        v-if="fluent && item.created && item.created > 0 && item.created <= MAX_DATE_MS"
+        class="record-time"
+        >{{ recordTime.format(item.created) }}</time
+      >
+      <span v-if="index === selected && (!fluent || selectedIds.size > 1)" class="selected-mark"
+        >↵</span
+      >
     </button>
     <p v-if="!quick" class="detail-note" role="status">{{
       loading

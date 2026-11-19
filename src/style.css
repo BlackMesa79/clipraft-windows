@@ -1,6 +1,6 @@
 @import './styles/tokens.css';
 :root {
-  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-family: var(--font-ui);
   color: var(--color-text);
   background: var(--color-page);
   font-synthesis: none;
@@ -135,7 +135,7 @@ header p {
   height: 50px;
   width: 74px;
   flex-shrink: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-thumbnail);
   overflow: hidden;
   background: repeating-conic-gradient(#dce2e5 0% 25%, #fff 0% 50%) 50%/12px 12px;
   display: grid;
@@ -164,7 +164,7 @@ header p {
   color: #913e2e;
   border: 1px solid #e8c9c0;
   background: #fff2ee;
-  border-radius: 7px;
+  border-radius: var(--radius-feedback);
 }
 .empty {
   flex: 1;
@@ -201,7 +201,7 @@ footer button {
   cursor: pointer;
 }
 footer button:disabled {
-  opacity: 0.4;
+  opacity: var(--opacity-footer-disabled);
   cursor: default;
 }
 .workspace {

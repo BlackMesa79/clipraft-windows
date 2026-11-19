@@ -212,7 +212,7 @@ onUnmounted(() => {
 .directory-path {
   overflow-wrap: anywhere;
   user-select: text;
-  font-size: 13px;
+  font-size: var(--font-body-size);
 }
 .directory-actions {
   display: flex;

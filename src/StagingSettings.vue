@@ -65,7 +65,7 @@ function prepare(root: string): void {
   margin-top: 18px;
 }
 h3 {
-  font-size: 15px;
+  font-size: var(--font-section-size);
 }
 .staging-actions {
   display: flex;
@@ -75,7 +75,7 @@ h3 {
 .staging-path {
   overflow-wrap: anywhere;
   user-select: text;
-  font-size: 13px;
+  font-size: var(--font-body-size);
 }
 ul {
   padding-left: 18px;

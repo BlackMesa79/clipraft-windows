@@ -1,0 +1,214 @@
+@import './fluent-main.css';
+@import './fluent-settings.css';
+
+:root[data-skin='fluent'] {
+  --fluent-base: #f3f5f4;
+  --fluent-card: #f8faf9;
+  --bg: #fbfcfb;
+  --surface: #fff;
+  --line: #dce3e0;
+  --text: #202927;
+  --muted: #52635e;
+  --accent: #176b64;
+  --focus: #176b64;
+  --select: #e3f0ec;
+  --warning: #795118;
+  --danger: #942f2f;
+  --primary-text: #fff;
+  --fluent-primary-hover: #125b55;
+  --control-bg: var(--surface);
+  --control-border: #aabbb4;
+  --switch-border: var(--control-border);
+  --switch-width: 39px;
+  --switch-height: 20px;
+  --switch-radius: var(--radius-pill);
+  --switch-thumb-size: 12px;
+  --switch-thumb-radius: 50%;
+  --record-hover-bg: #eef3f0;
+  --preview-border: var(--line);
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  --font-body-size: 14px;
+  --font-caption-size: 12px;
+  --font-note-size: 12px;
+  --radius-button: 4px;
+  --radius-control: 4px;
+  --radius-input: 4px;
+  --radius-search: 4px;
+  --radius-filter: 4px;
+  --radius-navigation: 4px;
+  --radius-type-icon: 4px;
+  --radius-thumbnail: 4px;
+  --radius-dialog: 8px;
+  --radius-menu: 8px;
+  --fluent-panel-radius: 8px;
+  --fluent-panel-inset: 8px;
+  --main-sidebar-width: 174px;
+  --list-row-min-height: 64px;
+  --list-preview-width: 52px;
+  --list-preview-height: 42px;
+  --list-type-icon-size: 36px;
+  --list-type-glyph-size: 18px;
+  --settings-input-width: 175px;
+  --cards-row-height: 104px;
+  --cards-preview-height: 40px;
+  --compact-row: 58px;
+  --shadow-menu: 0 9px 26px #18292a30, 0 2px 5px #18292a18;
+  --preview-shadow: 0 4px 10px #18292a30, 0 1px 3px #18292a18;
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+:root[data-skin='fluent'][data-theme='dark'] {
+  --fluent-base: #202927;
+  --fluent-card: #2a3432;
+  --bg: #252f2d;
+  --surface: #2c3735;
+  --line: #43514d;
+  --text: #eff5f3;
+  --muted: #b5c5bf;
+  --accent: #83d5c3;
+  --focus: #8bdccb;
+  --select: #304843;
+  --warning: #f1c480;
+  --danger: #ffa89f;
+  --control-border: #738580;
+  --primary-text: #122a24;
+  --fluent-primary-hover: #96dfcf;
+  --record-hover-bg: #34423f;
+  --shadow-menu: 0 9px 26px #0008, 0 2px 5px #0006;
+  --preview-shadow: 0 4px 10px #0008, 0 1px 3px #0006;
+}
+
+[data-skin='fluent'] :is(.archive-dialog, .staging-cleanup-dialog, .floating-preview),
+[data-skin='fluent'] .main-window .context-menu {
+  background: var(--surface);
+}
+[data-skin='fluent'] .context-menu button {
+  min-height: var(--control-min-height);
+}
+[data-skin='fluent'] .context-menu .delete-record {
+  color: var(--danger);
+}
+[data-skin='fluent'] .floating-preview header {
+  padding: 10px 14px;
+}
+[data-skin='fluent'] .floating-title {
+  margin: 0;
+  font-size: var(--font-body-size);
+  font-weight: 600;
+  color: var(--text);
+}
+[data-skin='fluent'] .floating-content {
+  padding: 14px;
+}
+[data-skin='fluent'] .floating-shell .preview-arrow::after {
+  background: var(--surface);
+}
+[data-skin='fluent'] .quick :is(.count, .cancel-hint) {
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+[data-skin='fluent'] .quick .wheel-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--fluent-card);
+  color: var(--accent);
+  border-radius: var(--radius-type-icon);
+}
+
+@supports (appearance: base-select) {
+  [data-skin='fluent'] select,
+  [data-skin='fluent'] select::picker(select) {
+    appearance: base-select;
+  }
+  [data-skin='fluent'] select::picker(select) {
+    padding: 4px;
+    margin-block: 4px;
+    max-height: min(260px, 50vh);
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: var(--shadow-menu);
+    color: var(--text);
+    background: var(--surface);
+    min-inline-size: anchor-size(width);
+    overscroll-behavior: contain;
+  }
+  [data-skin='fluent'] select::picker-icon {
+    content: '';
+    width: 6px;
+    height: 6px;
+    align-self: center;
+    margin-block-end: 4px;
+    margin-inline: auto 2px;
+    border-right: 1px solid currentColor;
+    border-bottom: 1px solid currentColor;
+    transform: rotate(45deg);
+  }
+  [data-skin='fluent'] select:open::picker-icon {
+    transform: rotate(225deg) translate(-2px, -2px);
+  }
+  [data-skin='fluent'] option {
+    min-height: 32px;
+    padding: 4px 14px;
+    border-radius: 4px;
+  }
+  [data-skin='fluent'] option::checkmark {
+    display: none;
+  }
+  [data-skin='fluent'] option:checked {
+    background: var(--select);
+    box-shadow: inset 3px 0 var(--accent);
+  }
+  [data-skin='fluent'] option:hover {
+    background: var(--record-hover-bg);
+  }
+  [data-skin='fluent'] option:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-skin='fluent'] .main-window :is(button, input, select) {
+    transition:
+      background-color 100ms ease-out,
+      color 100ms ease-out;
+  }
+  [data-skin='fluent'] :is(.main-content, .settings-view) {
+    animation: fluent-page 130ms var(--motion-ease);
+  }
+  [data-skin='fluent'] :is(.archive-dialog, .staging-cleanup-dialog, .delete-confirm) {
+    animation: fluent-flyout 160ms var(--motion-ease);
+  }
+  [data-skin='fluent'] :is(.context-menu, .floating-preview) {
+    animation: fluent-page 160ms var(--motion-ease);
+  }
+  @supports (appearance: base-select) {
+    [data-skin='fluent'] select::picker(select) {
+      animation: fluent-flyout 160ms var(--motion-ease);
+    }
+  }
+}
+@keyframes fluent-page {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fluent-flyout {
+  from {
+    opacity: 0;
+    translate: 0 -3px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-skin='fluent'] .quick .wheel-card {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  :root[data-skin='fluent'][data-theme] {
+    --focus: Highlight;
+  }
+  [data-skin='fluent'] :is(.quick .wheel-card.selected, select option:checked) {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
