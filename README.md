@@ -4,12 +4,13 @@
   <p><strong>ClipRaft · 你的内容，随时可用。</strong></p>
   <p>Windows 剪贴板管理器 · 快速粘贴 · 多格式历史 · 本地加密</p>
   <p>
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.6.2/ClipRaft-0.6.2-windows-x64.zip"><strong>下载 0.6.2 预发布版 · Windows x64</strong></a> ·
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.6.2">发布说明</a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.7.0/ClipRaft-0.7.0-windows-x64.zip"><strong>下载 0.7.0 · Windows x64</strong></a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.7.0">发布说明</a> ·
     <a href="https://github.com/BlackMesa79/clipraft-windows/issues">问题反馈</a>
   </p>
   <p>
     <a href="#界面预览">界面预览</a> ·
+    <a href="#主题风格">主题风格</a> ·
     <a href="#核心功能">核心功能</a> ·
     <a href="#快速上手">快速上手</a> ·
     <a href="#常用快捷键">常用快捷键</a>
@@ -41,6 +42,27 @@
 <p align="center"><sub>紧凑模式 · 小窗口浏览历史　｜　3D 滚轮快捷面板 · 按住选择，松手粘贴</sub></p>
 
 以上预览均使用示例数据，随页面主题展示浅色或深色外观。
+
+## 主题风格
+
+片筏剪贴板提供不同的界面主题。主题展示沿用相同的历史内容与操作结构，后续可在此补充更多风格。
+
+### Fluent
+
+Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持浅色、深色、常规与紧凑布局，并可调整背景透出强度。
+
+<p align="center">
+  <img src="docs/images/fluent-main.jpg" alt="Fluent 主题主面板，展示分组、历史记录和内容预览" width="960">
+</p>
+<p align="center"><sub>主面板</sub></p>
+
+<p align="center">
+  <img src="docs/images/fluent-compact.jpg" alt="Fluent 主题紧凑布局，展示搜索、分组和历史记录" width="400">
+  <img src="docs/images/fluent-settings.jpg" alt="Fluent 主题设置页，展示分类导航与主题设置控件" width="500">
+</p>
+<p align="center"><sub>紧凑布局　｜　设置</sub></p>
+
+当前默认主题名为「素笺」，Fluent 可在「设置 → 外观 → 皮肤」中选择。
 
 ## 核心功能
 
@@ -89,7 +111,7 @@
 
 ## 快速上手
 
-> **0.6.2 预发布版**已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.6.2/ClipRaft-0.6.2-windows-x64.zip) · [发布说明与校验值](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.6.2)。当前仍处于早期测试阶段。
+> **0.7.0** 已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.7.0/ClipRaft-0.7.0-windows-x64.zip) · [发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.7.0)。
 
 **运行环境：** Windows x64，需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。当前以 Windows 11 为主要验证环境，Windows 10 兼容性仍待进一步验证。
 
@@ -130,7 +152,7 @@
 
 以下功能尚未实现，具体方案和排期可能调整：
 
-- **主题与背景扩展**：Fluent 风格、窗口材质和自定义背景图。
+- **主题与背景扩展**：自定义背景图及更多界面主题。
 - **加密云备份**：在本机加密后上传历史快照，支持按备份版本恢复。
 - **多设备同步**：通过端到端加密同步记录，让已授权设备接续使用。
 
