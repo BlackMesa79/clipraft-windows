@@ -254,10 +254,13 @@ try {
   await waitImage();
   const fileClear = await image();
   assert.notEqual(fileClear, fileMasked);
-  assert(
-    await evaluate(
-      "document.querySelector('.file-detail').textContent.includes('C:/synthetic/image.png')",
-    ),
+  assert.deepEqual(
+    await evaluate(`[
+      document.querySelector('.file-detail .file-heading strong')?.textContent,
+      document.querySelector('.file-detail .file-parent')?.textContent,
+      document.querySelector('.file-detail .file-parent')?.title,
+    ]`),
+    ['image.png', 'C:/synthetic', 'C:/synthetic/image.png'],
   );
   await capture('file-revealed');
   await button('隐藏原文');

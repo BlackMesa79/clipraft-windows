@@ -65,7 +65,10 @@ function safeImage(source: string | null): string | undefined {
 .rich-picture img {
   display: block;
   max-width: 100%;
+  max-height: min(42vh, 320px);
   height: auto;
+  object-fit: contain;
+  object-position: left center;
   border-radius: var(--radius-media);
 }
 .rich-picture figcaption {

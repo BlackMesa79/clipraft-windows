@@ -124,7 +124,7 @@ async function remove() {
           :aria-pressed="view === entry[0]"
           :disabled="disabled || saving || editing !== null || deleting !== null"
           @click="emit('select', entry[0])"
-          ><UiIcon v-if="entry[0] === 'all'" :name="fluent ? 'history' : 'layers'" /><span
+          ><UiIcon v-if="entry[0] === 'all'" class="group-all-icon" name="layers" /><span
             v-else
             class="group-dot ungrouped-dot"
             aria-hidden="true"

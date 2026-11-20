@@ -1,6 +1,7 @@
 export interface Settings {
   skin: 'clipraft' | 'fluent';
   theme: 'light' | 'dark';
+  backdrop_strength: number;
   layout: 'list' | 'cards';
   compact: boolean;
   hide_on_blur: boolean;
@@ -48,9 +49,13 @@ export function tightened(next: Settings, old: Settings): boolean {
   );
 }
 
+const MAX_BACKDROP_TRANSPARENCY = 36;
+
 export function applyTheme(settings?: Settings) {
   document.documentElement.dataset.skin = settings?.skin ?? 'clipraft';
   document.documentElement.dataset.theme = settings?.theme ?? 'light';
+  const backdropOpacity = ((settings?.backdrop_strength ?? 22) * MAX_BACKDROP_TRANSPARENCY) / 100;
+  document.documentElement.style.setProperty('--fluent-backdrop-opacity', `${backdropOpacity}%`);
 }
 
 const presetShortcuts: Record<string, [number, number]> = {

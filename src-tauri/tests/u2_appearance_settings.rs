@@ -13,6 +13,7 @@ fn u2_ac1_legacy_json_defaults_without_losing_existing_preferences() {
     for key in [
         "skin",
         "theme",
+        "backdrop_strength",
         "layout",
         "compact",
         "hide_on_blur",

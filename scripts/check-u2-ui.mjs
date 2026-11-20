@@ -741,7 +741,84 @@ try {
   await test('R03 紧凑分组与类型字号、行高一致', async () => {
     await metrics(390);
     await nav();
-    await appearance({ compact: true });
+    await appearance({ compact: true, skin: 'fluent' });
+    const groupSelect = await evaluate(`(() => {
+      const select = document.querySelector('.compact-groups select');
+      const style = getComputedStyle(select);
+      const selected = getComputedStyle(select.options[select.selectedIndex]);
+      const option = getComputedStyle(select.options[1]);
+      return {
+        baseSelectSupported: CSS.supports('appearance', 'base-select'),
+        appearance: style.appearance,
+        background: style.backgroundColor,
+        image: style.backgroundImage,
+        borderBottom: style.borderBottomColor,
+        radius: style.borderRadius,
+        paddingRight: style.paddingRight,
+        pickerRadius: getComputedStyle(select, '::picker(select)').borderRadius,
+        pickerShadow: getComputedStyle(select, '::picker(select)').boxShadow,
+        pickerBackground: getComputedStyle(select, '::picker(select)').backgroundColor,
+        optionColor: option.color,
+        optionBackground: option.backgroundColor,
+        selectedBackground: selected.backgroundColor,
+      };
+    })()`);
+    assert.equal(groupSelect.appearance, groupSelect.baseSelectSupported ? 'base-select' : 'none');
+    assert.equal(groupSelect.background, 'rgb(255, 255, 255)');
+    assert.equal(groupSelect.image === 'none', groupSelect.baseSelectSupported);
+    assert.equal(groupSelect.borderBottom, 'rgb(170, 187, 180)');
+    assert.equal(groupSelect.radius, '4px');
+    assert.equal(groupSelect.paddingRight, groupSelect.baseSelectSupported ? '8px' : '30px');
+    assert.equal(groupSelect.optionColor, 'rgb(32, 41, 39)');
+    assert.equal(groupSelect.optionBackground, 'rgb(255, 255, 255)');
+    assert.equal(groupSelect.selectedBackground, 'rgb(227, 240, 236)');
+    if (groupSelect.baseSelectSupported) {
+      assert.equal(groupSelect.pickerRadius, '8px');
+      assert.notEqual(groupSelect.pickerShadow, 'none');
+      assert.equal(groupSelect.pickerBackground, 'rgb(255, 255, 255)');
+      const selectPoint = await evaluate(
+        "(()=>{const r=document.querySelector('.compact-groups select').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()",
+      );
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await send('Input.dispatchMouseEvent', {
+          type,
+          ...selectPoint,
+          button: 'left',
+          clickCount: 1,
+        });
+      }
+      await until(
+        () => evaluate("!!document.querySelector('.compact-groups select:open')"),
+        '紧凑分组 Fluent picker 未打开',
+      );
+      await capture('u7-fluent-compact-group-picker');
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'ArrowDown',
+        code: 'ArrowDown',
+        windowsVirtualKeyCode: 40,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'ArrowDown',
+        code: 'ArrowDown',
+        windowsVirtualKeyCode: 40,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'Escape',
+        code: 'Escape',
+        windowsVirtualKeyCode: 27,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Escape',
+        code: 'Escape',
+        windowsVirtualKeyCode: 27,
+      });
+      assert.equal(await evaluate("document.querySelector('.compact-groups select').value"), 'all');
+    }
+    await capture('u7-fluent-compact-group-select');
     assert.equal(
       await evaluate("getComputedStyle(document.querySelector('.compact-groups')).fontSize"),
       await evaluate("getComputedStyle(document.querySelector('.filter-label')).fontSize"),
@@ -3601,6 +3678,13 @@ try {
     assert.equal(await evaluate('document.documentElement.dataset.skin'), 'clipraft');
     await click('.settings-view button[type=submit]');
     await until(() => evaluate("document.documentElement.dataset.skin==='fluent'"), '皮肤未生效');
+    assert.equal(
+      await evaluate(
+        "document.querySelector('[aria-label=皮肤] option[value=clipraft]').textContent",
+      ),
+      '素笺',
+    );
+    assert.equal(await evaluate('window.settings.skin'), 'fluent');
     assert.deepEqual(
       await evaluate(
         "[...document.querySelectorAll('.appearance-section h3')].map(n=>n.textContent)",
@@ -3741,6 +3825,18 @@ try {
       }
       assert.equal(new Set(markers.map(({ color }) => color)).size, 3);
       assert(await evaluate("!!document.querySelector('[data-group-view=all] > svg')"));
+      assert.deepEqual(
+        await evaluate(`(() => {
+          const icon = document.querySelector('[data-group-view="all"] > svg');
+          return [
+            icon.querySelector('path').getAttribute('d'),
+            getComputedStyle(icon).width,
+            getComputedStyle(icon).height,
+            getComputedStyle(icon).strokeWidth,
+          ];
+        })()`),
+        ['m12 3 10 5-10 5L2 8z M2 12l10 5 10-5 M2 16l10 5 10-5', '16px', '16px', '1.5px'],
+      );
       assert.equal(
         await evaluate("document.querySelector('[data-group-view=all]').textContent.trim()"),
         '全部分组',
@@ -3849,8 +3945,329 @@ try {
           })()`),
           `${skin}/${theme}/${category} 的开关未对齐控件列`,
         );
+        if (category !== 'appearance') continue;
+        const labels = await evaluate(`[...document.querySelectorAll(
+          '[data-category="appearance"] .appearance-label-copy',
+        )].map((label) => {
+          const title = document.createRange();
+          title.selectNode(label.firstChild);
+          const bounds = title.getBoundingClientRect();
+          const description = label.querySelector('small').getBoundingClientRect();
+          return {
+            title: label.firstChild.textContent.trim(),
+            lines: title.getClientRects().length,
+            stacked: bounds.bottom <= description.top + 1 &&
+              Math.abs(bounds.left - description.left) < 1,
+          };
+        })`);
+        assert.equal(labels.length, 5);
+        for (const label of labels) {
+          assert.equal(label.lines, 1, `${width}px ${label.title}标题发生折行`);
+          assert(label.stacked, `${width}px ${label.title}说明未与标题上下对齐`);
+        }
+        await capture(`u7-fluent-appearance-labels-${width}`);
       }
     }
+  });
+  await test('U7 Fluent 材质回退、亚克力表面与减少动效', async () => {
+    await metrics();
+    await nav();
+    await appearance({ skin: 'fluent' });
+    await until(
+      () => evaluate("document.documentElement.dataset.nativeMaterial==='solid'"),
+      '材质回退状态未同步',
+    );
+    const acrylic = await evaluate(`(() => {
+      const menu = document.createElement('div');
+      menu.className = 'context-menu';
+      document.querySelector('.main-window').append(menu);
+      const filter = getComputedStyle(menu).backdropFilter;
+      menu.remove();
+      return filter;
+    })()`);
+    assert(acrylic.includes('blur(18px)'), acrylic);
+    await evaluate('window.nativeBackdrop = true');
+    await appearance({ backdrop_strength: 40 });
+    await until(
+      () => evaluate("document.documentElement.dataset.nativeMaterial==='host-backdrop'"),
+      '主窗材质状态未同步',
+    );
+    const backdrop = await evaluate(`(() => {
+      const frame = getComputedStyle(document.querySelector('.main-window'));
+      const pixel = document.createElement('canvas').getContext('2d');
+      pixel.fillStyle = frame.backgroundColor;
+      pixel.fillRect(0, 0, 1, 1);
+      const frameAlpha = pixel.getImageData(0, 0, 1, 1).data[3];
+      const content = getComputedStyle(document.querySelector('.main-content'));
+      pixel.fillStyle = content.backgroundColor;
+      pixel.fillRect(0, 0, 1, 1);
+      return {
+        root: getComputedStyle(document.documentElement).backgroundColor,
+        frameAlpha,
+        contentAlpha: pixel.getImageData(0, 0, 1, 1).data[3],
+        windowBorder: frame.borderTopColor,
+        content: content.backgroundColor,
+        dividers: [
+          getComputedStyle(document.querySelector('.main-content')).borderTopColor,
+          getComputedStyle(document.querySelector('.workspace')).borderTopColor,
+          getComputedStyle(document.querySelector('.history-pane')).borderRightColor,
+        ],
+        structural: [...document.querySelectorAll('.main-window > header, .app-body, .group-sidebar, .main-statusbar, .list, .detail')]
+          .map(element => getComputedStyle(element).backgroundColor),
+      };
+    })()`);
+    assert.equal(backdrop.root, 'rgba(0, 0, 0, 0)');
+    assert(Math.abs(backdrop.frameAlpha - 218) <= 1);
+    assert(Math.abs((255 - backdrop.contentAlpha) * 2 - (255 - backdrop.frameAlpha)) <= 1);
+    assert.equal(backdrop.windowBorder, 'rgba(0, 0, 0, 0)');
+    assert.deepEqual(backdrop.dividers, Array(3).fill('rgba(0, 0, 0, 0)'));
+    assert.deepEqual(backdrop.structural, Array(6).fill('rgba(0, 0, 0, 0)'));
+    // 无头浏览器用合成背景演示内容区与外侧的透出差异。
+    await evaluate(`document.body.style.backgroundImage =
+      'radial-gradient(ellipse at 0% 20%, #5d7782, transparent 68%), linear-gradient(120deg, #c4cdd1, #a5b2a8 70%, #586964)'`);
+    await capture('u7-soft-backdrop-main');
+    await click('.settings-toggle');
+    const settingsBackdrop = await evaluate(`(() => ({
+      wrapper: getComputedStyle(document.querySelector('.main-content')).backgroundColor,
+      header: getComputedStyle(document.querySelector('.main-window > header')).backgroundColor,
+      nav: getComputedStyle(document.querySelector('.settings-nav')).backgroundColor,
+      pane: getComputedStyle(document.querySelector('.settings-pane')).backgroundColor,
+      paneBorder: getComputedStyle(document.querySelector('.settings-pane')).borderTopColor,
+      content: getComputedStyle(document.querySelector('.settings-content')).backgroundColor,
+      fieldset: getComputedStyle(document.querySelector('.settings-content fieldset')).backgroundColor,
+      slider: document.querySelector('input[type=range][aria-label="背景透出"]')?.value,
+      sliderMax: document.querySelector('input[type=range][aria-label="背景透出"]')?.max,
+      appearanceIcons: [...document.querySelectorAll('[data-category="appearance"] .appearance-icon-slot')]
+        .map((icon) => getComputedStyle(icon).display),
+      appearanceIconSlotWidth: getComputedStyle(
+        document.querySelector('[data-category="appearance"]'),
+      ).getPropertyValue('--appearance-icon-slot-width'),
+    }))()`);
+    assert.equal(settingsBackdrop.wrapper, 'rgba(0, 0, 0, 0)');
+    assert.equal(settingsBackdrop.nav, settingsBackdrop.header);
+    assert.equal(settingsBackdrop.nav, 'rgba(0, 0, 0, 0)');
+    assert.equal(settingsBackdrop.pane, backdrop.content);
+    assert.equal(settingsBackdrop.paneBorder, 'rgba(0, 0, 0, 0)');
+    assert.equal(settingsBackdrop.content, 'rgba(0, 0, 0, 0)');
+    assert.equal(settingsBackdrop.fieldset, 'rgba(0, 0, 0, 0)');
+    assert.equal(settingsBackdrop.slider, '40');
+    assert.equal(settingsBackdrop.sliderMax, '100');
+    assert.equal(settingsBackdrop.appearanceIcons.length, 4);
+    assert(settingsBackdrop.appearanceIcons.every((display) => display === 'none'));
+    assert.equal(settingsBackdrop.appearanceIconSlotWidth, '0px');
+    await capture('u7-settings-unified-backdrop');
+    await evaluate("document.body.style.removeProperty('background-image')");
+    await evaluate(
+      "[...document.querySelectorAll('.settings-nav button')].find(button => button.textContent.trim() === '外观').click()",
+    );
+    await evaluate(`(() => {
+      const slider = document.querySelector('input[type=range][aria-label="背景透出"]');
+      slider.value = '31';
+      slider.dispatchEvent(new Event('input', {bubbles:true}));
+      slider.dispatchEvent(new Event('change', {bubbles:true}));
+    })()`);
+    await until(
+      () =>
+        evaluate(
+          "getComputedStyle(document.querySelector('input[type=range][aria-label=\"背景透出\"]')).getPropertyValue('--range-progress') === '31%'",
+        ),
+      '滑块轨道进度未按百分比同步',
+    );
+    await evaluate(`(() => {
+      const slider = document.querySelector('input[type=range][aria-label="背景透出"]');
+      slider.value = '100';
+      slider.dispatchEvent(new Event('input', {bubbles:true}));
+      slider.dispatchEvent(new Event('change', {bubbles:true}));
+    })()`);
+    await click('.settings-view button[type=submit]');
+    await until(() => evaluate('window.settings.backdrop_strength === 100'), '背景透出未保存');
+    await until(
+      () =>
+        evaluate(
+          "document.documentElement.style.getPropertyValue('--fluent-backdrop-opacity') === '36%'",
+        ),
+      '背景透出未同步到窗口材质',
+    );
+    assert(
+      await evaluate(`(() => {
+        const pixel = document.createElement('canvas').getContext('2d');
+        pixel.fillStyle = getComputedStyle(document.querySelector('.main-window')).backgroundColor;
+        pixel.fillRect(0, 0, 1, 1);
+        return pixel.getImageData(0, 0, 1, 1).data[3] === 163;
+      })()`),
+      '100% 时主窗未保留旧 60 档的底色',
+    );
+    await evaluate(
+      "[...document.querySelectorAll('.settings-nav button')].find(button => button.textContent.trim() === '外观').click()",
+    );
+    const sliderLayout = await evaluate(`(() => {
+      const label = document.querySelector('.backdrop-setting > span:first-child');
+      const range = document.querySelector('.backdrop-control input[type=range]');
+      const row = document.querySelector('.backdrop-setting').getBoundingClientRect();
+      const control = document.querySelector('.backdrop-control').getBoundingClientRect();
+      const slider = range.getBoundingClientRect();
+      return {
+        labelWidth: label.getBoundingClientRect().width,
+        labelWhiteSpace: getComputedStyle(label).whiteSpace,
+        labelAlign: getComputedStyle(label).alignItems,
+        labelTextAlign: getComputedStyle(label).textAlign,
+        rowCenter: row.top + row.height / 2,
+        controlCenter: control.top + control.height / 2,
+        sliderCenter: slider.top + slider.height / 2,
+        rangeWidth: range.getBoundingClientRect().width,
+        rangeAppearance: getComputedStyle(range).appearance,
+        rangeHeight: getComputedStyle(range).height,
+        rangePaddingBottom: getComputedStyle(range).paddingBottom,
+        rangeBackground: getComputedStyle(range).backgroundColor,
+        rangeBorder: getComputedStyle(range).borderWidth,
+        appearanceLabelWidths: [
+          ...document.querySelectorAll(
+            '[data-category="appearance"] .settings-select > span, [data-category="appearance"] .compact-setting > span',
+          ),
+        ].map((label) => label.getBoundingClientRect().width),
+        iconSlot: (() => {
+          const appearance = document.querySelector('[data-category="appearance"]');
+          const label = appearance.querySelector('.settings-select > .appearance-label');
+          const icon = label.querySelector('.appearance-icon-slot');
+          appearance.style.setProperty('--appearance-icon-slot-width', '20px');
+          appearance.style.setProperty('--appearance-icon-slot-gap', '8px');
+          appearance.style.setProperty('--appearance-icon-display', 'block');
+          const result = {
+            display: getComputedStyle(icon).display,
+            columns: getComputedStyle(label).gridTemplateColumns,
+            gap: getComputedStyle(label).columnGap,
+          };
+          appearance.style.removeProperty('--appearance-icon-slot-width');
+          appearance.style.removeProperty('--appearance-icon-slot-gap');
+          appearance.style.removeProperty('--appearance-icon-display');
+          return result;
+        })(),
+      };
+    })()`);
+    assert(sliderLayout.labelWidth > 200, JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.labelWhiteSpace, 'nowrap');
+    assert.equal(sliderLayout.labelAlign, 'center');
+    assert.equal(sliderLayout.labelTextAlign, 'left');
+    assert(
+      Math.abs(sliderLayout.rowCenter - sliderLayout.controlCenter) < 1,
+      JSON.stringify(sliderLayout),
+    );
+    assert(
+      Math.abs(sliderLayout.controlCenter - sliderLayout.sliderCenter) < 1,
+      JSON.stringify(sliderLayout),
+    );
+    assert(sliderLayout.rangeWidth >= 240, JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.rangeAppearance, 'none', JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.rangeHeight, '24px', JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.rangePaddingBottom, '0px', JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.rangeBackground, 'rgba(0, 0, 0, 0)', JSON.stringify(sliderLayout));
+    assert.equal(sliderLayout.rangeBorder, '0px', JSON.stringify(sliderLayout));
+    assert(
+      sliderLayout.appearanceLabelWidths.every((width) => width > 200),
+      JSON.stringify(sliderLayout.appearanceLabelWidths),
+    );
+    assert.equal(sliderLayout.iconSlot.display, 'block');
+    assert(
+      sliderLayout.iconSlot.columns.startsWith('20px '),
+      JSON.stringify(sliderLayout.iconSlot),
+    );
+    assert.equal(sliderLayout.iconSlot.gap, '8px');
+    await capture('u7-fluent-backdrop-slider');
+    await evaluate("document.documentElement.dataset.nativeMaterial = 'solid'");
+    assert.deepEqual(
+      await evaluate(`[
+        getComputedStyle(document.querySelector('.main-content')).animationName,
+        getComputedStyle(document.querySelector('.settings-view')).animationName,
+        getComputedStyle(document.querySelector('.settings-content fieldset')).animationName,
+        getComputedStyle(document.querySelector('.settings-content fieldset')).transitionDuration
+      ]`),
+      ['none', 'none', 'none', '0s'],
+    );
+    await send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+    });
+    assert.equal(
+      await evaluate(
+        "getComputedStyle(document.querySelector('.settings-content fieldset')).transitionDuration",
+      ),
+      '0s',
+    );
+    await send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+    });
+  });
+  await test('U7 Fluent 主窗图片文件详情可滚动查看长图', async () => {
+    await metrics();
+    await nav('?fluent-fixture');
+    await appearance({ skin: 'fluent' });
+    await evaluate(`(() => {
+      const original = window.__TAURI_INTERNALS__.convertFileSrc;
+      window.__TAURI_INTERNALS__.convertFileSrc = hash => hash === 'tall'
+        ? 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="160" height="800"><rect width="160" height="800" fill="#277d77"/></svg>')
+        : original(hash);
+      window.rows[2] = {...window.rows[2], thumbnail: 'tall', preview: 'tall'};
+      window.rows[1] = {
+        ...window.rows[1],
+        kind: 'files',
+        summary: '甲 乙,丙.txt, 第二张.png',
+        files: ['C:/synthetic/甲 乙,丙.txt', 'C:/synthetic/第二张.png'],
+        thumbnail: 'tall',
+        preview: 'tall'
+      };
+      const originalInvoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = (cmd, args) => cmd === 'item_detail'
+        ? Promise.resolve({text:'',files:window.rows[1].files.map(path => ({path,exists:true})),truncated:false})
+        : originalInvoke(cmd, args);
+      window.emitEvent('history-changed');
+    })()`);
+    await click('[data-id="row-1"]');
+    await until(
+      () => evaluate("document.querySelector('.detail img')?.naturalHeight === 800"),
+      '高图片预览未解码',
+    );
+    const preview = await evaluate(`(() => ({
+      title: document.querySelector('.files-preview-title')?.textContent.trim(),
+      fileNames: [...document.querySelectorAll('.file-copy strong')].map(node => node.textContent),
+      parents: [...document.querySelectorAll('.file-parent')].map(node => node.textContent),
+      detailImage: document.querySelector('.detail .large-preview img')?.getBoundingClientRect().height,
+      previewCardBottom: document.querySelector('.files-preview-content').getBoundingClientRect().bottom,
+      lastFileBottom: document.querySelector('.file-entry:last-child').getBoundingClientRect().bottom,
+      detailOverflow: getComputedStyle(document.querySelector('.detail')).overflow,
+      scrollOverflow: getComputedStyle(document.querySelector('.detail-scroll')).overflow,
+      imageMaxHeight: getComputedStyle(document.querySelector('.detail .large-preview img')).maxHeight,
+      frameMaxHeight: getComputedStyle(document.querySelector('.detail .large-preview')).maxHeight,
+      scrollHeight: document.querySelector('.detail-scroll').scrollHeight,
+      clientHeight: document.querySelector('.detail-scroll').clientHeight,
+      cardOverflow: getComputedStyle(document.querySelector('.preview-content')).overflow
+    }))()`);
+    assert.equal(preview.title, '2 个项目');
+    assert.deepEqual(preview.fileNames, ['甲 乙,丙.txt', '第二张.png']);
+    assert.deepEqual(preview.parents, ['C:/synthetic', 'C:/synthetic']);
+    assert(preview.detailImage > 320, JSON.stringify(preview));
+    assert(preview.previewCardBottom >= preview.lastFileBottom, JSON.stringify(preview));
+    assert.equal(preview.detailOverflow, 'hidden');
+    assert.equal(preview.scrollOverflow, 'auto');
+    assert.equal(preview.imageMaxHeight, 'none');
+    assert.equal(preview.frameMaxHeight, 'none');
+    assert(preview.scrollHeight > preview.clientHeight, JSON.stringify(preview));
+    assert.equal(preview.cardOverflow, 'visible');
+    await capture('u7-fluent-files-preview');
+    await click('[data-id="row-2"]');
+    await until(
+      () => evaluate("document.querySelector('.detail img')?.naturalHeight === 800"),
+      '图片记录的长图未解码',
+    );
+    const image = await evaluate(`(() => {
+      const scroll = document.querySelector('.detail-scroll');
+      scroll.scrollTop = scroll.scrollHeight;
+      const card = document.querySelector('.preview-content').getBoundingClientRect();
+      const frame = document.querySelector('.detail .large-preview').getBoundingClientRect();
+      return {cardBottom: card.bottom, frameBottom: frame.bottom, scrollBottom: scroll.getBoundingClientRect().bottom, scrolled: scroll.scrollTop};
+    })()`);
+    assert(image.scrolled > 0, JSON.stringify(image));
+    assert(image.cardBottom > image.frameBottom, JSON.stringify(image));
+    assert(image.cardBottom <= image.scrollBottom, JSON.stringify(image));
+    await capture('u7-fluent-long-image-bottom');
   });
   await test('U7 其余设置分类适配宽窄布局与表单控件', async () => {
     const categories = [
@@ -3962,6 +4379,7 @@ try {
         })()`),
       );
       await selectCategory('storage', '数据存储');
+      await pause(150);
       const point = await evaluate(`(() => {
         const button = document.querySelector('[data-start-archive]');
         button.scrollIntoView({block:'center'});
@@ -4038,6 +4456,13 @@ try {
       ),
       'rgb(44, 55, 53)',
     );
+    const floating = await evaluate(`({
+      margins: [document.documentElement, document.body, document.querySelector('#app'), document.querySelector('.floating-shell')]
+        .map(element => getComputedStyle(element).backgroundColor),
+      materialCalls: window.calls.filter(call => call.cmd === 'sync_window_material').length,
+    })`);
+    assert.deepEqual(floating.margins, Array(4).fill('rgba(0, 0, 0, 0)'));
+    assert.equal(floating.materialCalls, 0);
     await pause(180);
     await capture('fluent-dark-floating');
   });

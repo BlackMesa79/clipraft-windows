@@ -706,9 +706,18 @@
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-control);
-  padding: 6px 8px;
+  padding: 6px 26px 6px 8px;
   background: var(--bg);
   color: var(--text);
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 50%,
+    calc(100% - 8px) 50%;
+  background-size: 4px 4px;
+  background-repeat: no-repeat;
 }
 .main-window.compact > header {
   padding: 0 12px;
@@ -891,18 +900,6 @@
 }
 .main-window .filter-label {
   min-width: 24px;
-}
-.main-window .compact-groups select {
-  appearance: none;
-  padding-right: 26px;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-  background-position:
-    calc(100% - 12px) 50%,
-    calc(100% - 8px) 50%;
-  background-size: 4px 4px;
-  background-repeat: no-repeat;
 }
 .main-window .menu-separator {
   border-top: 1px solid var(--line);

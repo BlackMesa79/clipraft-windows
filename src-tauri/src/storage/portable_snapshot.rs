@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 const PORTABLE_SETTINGS: &[&str] = &[
     "skin",
     "theme",
+    "backdrop_strength",
     "layout",
     "compact",
     "hide_on_blur",

@@ -81,6 +81,23 @@
 [data-skin='fluent'] .main-window .context-menu {
   background: var(--surface);
 }
+[data-skin='fluent'] option {
+  min-height: 32px;
+  padding: 4px 14px;
+  color: var(--text);
+  background: var(--surface);
+}
+[data-skin='fluent'] option:checked {
+  background: var(--select);
+  box-shadow: inset 3px 0 var(--accent);
+}
+[data-skin='fluent'] option:hover {
+  background: var(--record-hover-bg);
+}
+[data-skin='fluent'] option:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
 [data-skin='fluent'] .context-menu button {
   min-height: var(--control-min-height);
 }
@@ -119,6 +136,14 @@
   [data-skin='fluent'] select::picker(select) {
     appearance: base-select;
   }
+  [data-skin='fluent'] .main-window.compact .compact-groups select,
+  [data-skin='fluent'] .main-window.compact .compact-groups select::picker(select) {
+    appearance: base-select;
+  }
+  [data-skin='fluent'] .main-window.compact .compact-groups select {
+    padding-right: 8px;
+    background-image: none;
+  }
   [data-skin='fluent'] select::picker(select) {
     padding: 4px;
     margin-block: 4px;
@@ -146,61 +171,37 @@
   [data-skin='fluent'] select:open::picker-icon {
     transform: rotate(225deg) translate(-2px, -2px);
   }
-  [data-skin='fluent'] option {
-    min-height: 32px;
-    padding: 4px 14px;
-    border-radius: 4px;
-  }
   [data-skin='fluent'] option::checkmark {
     display: none;
   }
-  [data-skin='fluent'] option:checked {
-    background: var(--select);
-    box-shadow: inset 3px 0 var(--accent);
-  }
-  [data-skin='fluent'] option:hover {
-    background: var(--record-hover-bg);
-  }
-  [data-skin='fluent'] option:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: -2px;
+}
+@supports (backdrop-filter: blur(1px)) {
+  [data-skin='fluent'] :is(.main-window .context-menu, .archive-dialog, .staging-cleanup-dialog) {
+    background: color-mix(in srgb, var(--surface) 84%, transparent);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+    backdrop-filter: blur(18px) saturate(140%);
   }
 }
-@media (prefers-reduced-motion: no-preference) {
-  [data-skin='fluent'] .main-window :is(button, input, select) {
-    transition:
-      background-color 100ms ease-out,
-      color 100ms ease-out;
+@media (forced-colors: active) {
+  :root[data-skin='fluent'][data-native-material='host-backdrop'] {
+    --fluent-backdrop-surface: Canvas;
+    --fluent-backdrop-content: Canvas;
   }
-  [data-skin='fluent'] :is(.main-content, .settings-view) {
-    animation: fluent-page 130ms var(--motion-ease);
-  }
-  [data-skin='fluent'] :is(.archive-dialog, .staging-cleanup-dialog, .delete-confirm) {
-    animation: fluent-flyout 160ms var(--motion-ease);
-  }
-  [data-skin='fluent'] :is(.context-menu, .floating-preview) {
-    animation: fluent-page 160ms var(--motion-ease);
-  }
-  @supports (appearance: base-select) {
-    [data-skin='fluent'] select::picker(select) {
-      animation: fluent-flyout 160ms var(--motion-ease);
-    }
+  [data-skin='fluent'] :is(.main-window .context-menu, .archive-dialog, .staging-cleanup-dialog) {
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }
-@keyframes fluent-page {
-  from {
-    opacity: 0;
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-skin='fluent'][data-native-material='host-backdrop'] {
+    --fluent-backdrop-surface: var(--fluent-base);
+    --fluent-backdrop-content: var(--bg);
   }
-}
-@keyframes fluent-flyout {
-  from {
-    opacity: 0;
-    translate: 0 -3px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  [data-skin='fluent'] .quick .wheel-card {
-    transition: none;
+  [data-skin='fluent'] :is(.main-window .context-menu, .archive-dialog, .staging-cleanup-dialog) {
+    background: var(--surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }
 @media (forced-colors: active) {

@@ -20,6 +20,7 @@ mod hotkey_check;
 mod image_normalize;
 mod item_detail;
 mod link_actions;
+mod main_material;
 mod main_position;
 pub mod model;
 mod owned_files;
@@ -233,6 +234,29 @@ fn get_settings(state: tauri::State<'_, Arc<State>>) -> Result<settings::Setting
 #[tauri::command]
 fn get_setting_options() -> settings::SettingOptions {
     settings::options()
+}
+#[tauri::command]
+async fn sync_window_material(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<bool, String> {
+    if window.label() != "main" || state.smoke {
+        return Err("此窗口不能同步原生材质".into());
+    }
+    let settings = state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "设置不可用".to_string())?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = sender.send(main_material::sync_main(&window, &settings));
+    })
+    .map_err(|error| error.to_string())?;
+    receiver
+        .recv()
+        .map_err(|_| "原生材质同步线程已退出".to_string())
 }
 #[tauri::command]
 fn startup_error(state: tauri::State<'_, Arc<State>>) -> Result<Option<String>, String> {
@@ -622,6 +646,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             data_directory::commands::migrate_data_directory,
             get_settings,
             get_setting_options,
+            sync_window_material,
             set_hotkey_recording,
             runtime::archive_commands::activate_restored_archive,
             runtime::cleanup_commands::scan_archive_staging,

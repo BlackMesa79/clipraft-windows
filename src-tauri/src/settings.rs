@@ -179,6 +179,8 @@ pub struct Settings {
     pub skin: Skin,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default = "default_backdrop_strength")]
+    pub backdrop_strength: u32,
     #[serde(default)]
     pub layout: Layout,
     #[serde(default)]
@@ -209,6 +211,7 @@ impl Default for Settings {
         Self {
             skin: Skin::Clipraft,
             theme: Theme::Light,
+            backdrop_strength: default_backdrop_strength(),
             layout: Layout::List,
             compact: false,
             hide_on_blur: false,
@@ -236,6 +239,9 @@ impl Default for Settings {
         }
     }
 }
+fn default_backdrop_strength() -> u32 {
+    22
+}
 #[derive(Clone, Serialize)]
 pub struct Range {
     pub min: u64,
@@ -249,6 +255,7 @@ pub fn ranges() -> BTreeMap<&'static str, Range> {
         ("max_days", 0, 3650, 1),
         ("sensitive_ttl_minutes", 0, 1440, 1),
         ("quick_visible_count", 3, 15, 1),
+        ("backdrop_strength", 0, 100, 1),
     ]
     .into_iter()
     .map(|(key, min, max, step)| (key, Range { min, max, step }))
@@ -347,6 +354,7 @@ fn field_label(key: &str) -> &str {
         "max_days" => "保留天数",
         "sensitive_ttl_minutes" => "敏感内容保留时长",
         "quick_visible_count" => "快速面板可见条数",
+        "backdrop_strength" => "背景透出",
         _ => key,
     }
 }
@@ -612,7 +620,28 @@ mod tests {
         assert!(!s.autostart && !s.pause_on_start && s.sensitive_detection);
         assert_eq!(s.ignored_apps.len(), 4);
         assert_eq!((s.sensitive_ttl_minutes, s.quick_visible_count), (10, 5));
+        assert_eq!(s.backdrop_strength, 22);
         assert_eq!(options().defaults, s);
+    }
+    #[test]
+    fn backdrop_strength_is_bounded_and_persisted() {
+        for strength in [0, 22, 50, 100] {
+            let settings = Settings {
+                backdrop_strength: strength,
+                ..Settings::default()
+            };
+            settings.validate().unwrap();
+            assert_eq!(
+                Settings::from_rows(&rows(&settings), |_| {}).unwrap(),
+                settings
+            );
+        }
+        assert!(Settings {
+            backdrop_strength: 101,
+            ..Settings::default()
+        }
+        .validate()
+        .is_err());
     }
     #[test]
     fn serde_roundtrip() {

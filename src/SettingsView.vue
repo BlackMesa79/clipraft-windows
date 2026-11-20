@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import DataDirectorySettings from './DataDirectorySettings.vue';
 import UiIcon from './UiIcon.vue';
+import SettingToggle from './SettingToggle.vue';
 import ArchiveSettings from './ArchiveSettings.vue';
 import StagingSettings from './StagingSettings.vue';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
@@ -423,34 +424,22 @@ onUnmounted(() => {
         <div class="settings-content">
           <fieldset :disabled="busy" v-show="category === 'general'" data-category="general">
             <legend>通用</legend>
-            <label class="check"
-              ><input
-                v-model="draft.hide_on_blur"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-              /><span>主窗口失去焦点时自动隐藏</span></label
-            >
-            <label class="check"
-              ><input
-                v-model="draft.autostart"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-              /><span>开机自启</span></label
-            >
-            <label class="check"
-              ><input
-                v-model="draft.pause_on_start"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-              /><span>启动时暂停监听（下次启动生效）</span></label
-            >
-            <label class="check"
-              ><input
-                v-model="draft.select_first_on_show"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-              /><span>每次唤出主窗口时选中第一条记录</span></label
-            >
+            <SettingToggle
+              v-model="draft.hide_on_blur"
+              :fluent="fluent"
+              label="主窗口失去焦点时自动隐藏"
+            />
+            <SettingToggle v-model="draft.autostart" :fluent="fluent" label="开机自启" />
+            <SettingToggle
+              v-model="draft.pause_on_start"
+              :fluent="fluent"
+              label="启动时暂停监听（下次启动生效）"
+            />
+            <SettingToggle
+              v-model="draft.select_first_on_show"
+              :fluent="fluent"
+              label="每次唤出主窗口时选中第一条记录"
+            />
             <p class="detail-note">包含紧凑模式，按当前筛选结果选择；关闭时记忆上次选中记录。</p>
             <label class="number-field settings-select"
               ><span>主窗口唤出位置</span
@@ -508,17 +497,44 @@ onUnmounted(() => {
             >
               <h3 v-if="fluent" id="appearance-theme-heading">主题</h3>
               <label class="number-field settings-select"
-                ><span><UiIcon name="layers" />皮肤<small>窗口与控件的外观</small></span
+                ><span class="appearance-label"
+                  ><UiIcon class="appearance-icon-slot" name="layers" /><span
+                    class="appearance-label-copy"
+                    >皮肤<small>窗口与控件的外观</small></span
+                  ></span
                 ><select v-model="draft.skin" aria-label="皮肤"
-                  ><option value="clipraft">片筏默认</option
+                  ><option value="clipraft">素笺</option
                   ><option value="fluent">Fluent</option></select
                 ></label
               >
               <label class="number-field settings-select"
-                ><span><UiIcon name="image" />明暗<small>浅色或深色配色</small></span
+                ><span class="appearance-label"
+                  ><UiIcon class="appearance-icon-slot" name="image" /><span
+                    class="appearance-label-copy"
+                    >明暗<small>浅色或深色配色</small></span
+                  ></span
                 ><select v-model="draft.theme" :aria-label="fluent ? '明暗' : '主题'"
                   ><option value="light">浅色</option
                   ><option value="dark">深色</option></select
+                ></label
+              >
+              <label v-if="fluent" class="number-field backdrop-setting"
+                ><span class="appearance-label"
+                  ><span class="appearance-label-copy"
+                    >背景透出强度<small>提高后可看到更多桌面背景</small></span
+                  ></span
+                ><span class="backdrop-control"
+                  ><input
+                    v-model.number="draft.backdrop_strength"
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    aria-label="背景透出"
+                    :style="{
+                      '--range-progress': `${draft.backdrop_strength}%`,
+                    }"
+                  /><output>{{ draft.backdrop_strength }}/100</output></span
                 ></label
               >
             </div>
@@ -529,25 +545,26 @@ onUnmounted(() => {
             >
               <h3 v-if="fluent" id="appearance-layout-heading">布局</h3>
               <label class="number-field settings-select"
-                ><span><UiIcon name="layers" />常规布局<small>历史记录的排列方式</small></span
+                ><span class="appearance-label"
+                  ><UiIcon class="appearance-icon-slot" name="layers" /><span
+                    class="appearance-label-copy"
+                    >常规布局<small>历史记录的排列方式</small></span
+                  ></span
                 ><select v-model="draft.layout" aria-label="常规布局"
                   ><option value="list">单列列表</option
                   ><option value="cards">双列卡片</option></select
                 ></label
               >
-              <label class="check compact-setting"
-                ><input
-                  v-model="draft.compact"
-                  type="checkbox"
-                  :role="fluent ? 'switch' : undefined"
-                  :aria-label="fluent ? '紧凑模式' : undefined"
-                  :aria-describedby="fluent ? 'compact-setting-description' : undefined"
-                /><span v-if="fluent"
-                  ><UiIcon name="compact" />紧凑模式<small id="compact-setting-description"
-                    >隐藏分组侧栏和内嵌预览</small
-                  ></span
-                ><span v-else>紧凑模式（隐藏侧栏与预览）</span></label
-              >
+              <SettingToggle
+                v-model="draft.compact"
+                class="compact-setting"
+                :fluent="fluent"
+                label="紧凑模式（隐藏侧栏与预览）"
+                fluent-label="紧凑模式"
+                description="隐藏分组侧栏和内嵌预览"
+                description-id="compact-setting-description"
+                icon="compact"
+              />
             </div>
             <p class="detail-note">主题与布局独立；退出紧凑模式恢复常规布局。保存后生效。</p>
           </fieldset>
@@ -557,21 +574,17 @@ onUnmounted(() => {
               >忽略列表与敏感识别保存后对后续复制生效，不删除已有历史。保留时长设为 0
               会取消所有敏感记录的倒计时，普通历史清理规则仍然适用；恢复正数不改变已取消的倒计时。</p
             >
-            <label class="check"
-              ><input
-                v-model="draft.sensitive_detection"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-              /><span>识别敏感内容</span></label
-            >
-            <label class="check"
-              ><input
-                v-model="draft.sensitive_high_entropy"
-                type="checkbox"
-                :role="fluent ? 'switch' : undefined"
-                :disabled="busy"
-              /><span>高熵字符串识别（可能误报，默认关闭）</span></label
-            >
+            <SettingToggle
+              v-model="draft.sensitive_detection"
+              :fluent="fluent"
+              label="识别敏感内容"
+            />
+            <SettingToggle
+              v-model="draft.sensitive_high_entropy"
+              :fluent="fluent"
+              label="高熵字符串识别（可能误报，默认关闭）"
+              :disabled="busy"
+            />
             <label class="number-field"
               ><span>敏感内容保留时长</span
               ><span class="duration-input"

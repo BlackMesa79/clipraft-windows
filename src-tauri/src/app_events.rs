@@ -105,7 +105,11 @@ pub(crate) fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent
             }
             schedule_blur_check(window);
         }
-        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+        tauri::WindowEvent::Moved(_) => {
+            record("preview reposition failed", reposition_preview(window));
+        }
+        tauri::WindowEvent::Resized(_) => {
+            crate::main_material::resize_main(window);
             record("preview reposition failed", reposition_preview(window));
         }
         tauri::WindowEvent::CloseRequested { api, .. } => {

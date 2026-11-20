@@ -70,6 +70,7 @@ fn create_main(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
         WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
             .title("片筏剪贴板")
             .icon(crate::tray_status::icon()?)?
+            .transparent(true)
             .decorations(false)
             .inner_size(1000.0, 700.0)
             .visible(false)

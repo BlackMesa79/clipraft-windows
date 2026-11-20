@@ -26,6 +26,7 @@ import { cycleFilter, panelNavigation, type PanelNavigation } from './mainKeyboa
 import { brandName } from './brand';
 import brandIcon from './assets/brand.svg?inline';
 import {
+  filename,
   kindLabel,
   type Item,
   type HistoryFilter,
@@ -50,6 +51,10 @@ const fluent = computed(() => settings.value?.skin === 'fluent');
 const layout = computed(() => settings.value?.layout ?? 'list');
 let appearanceGeneration = 0;
 let savedAnchor: { id: string; offset: number } | undefined;
+function fileParent(path: string): string {
+  const leaf = filename(path);
+  return path.slice(0, path.length - leaf.length).replace(/[\\/]+$/, '') || path;
+}
 function rememberAnchor() {
   const list = listRoot.value;
   const top = list?.getBoundingClientRect().top ?? 0;
@@ -84,11 +89,27 @@ watch(settingsOpen, async (open) => {
   }
 });
 watch(
-  () => [settings.value?.theme, fluent.value, layout.value, compact.value],
+  () => [
+    settings.value?.theme,
+    settings.value?.backdrop_strength,
+    fluent.value,
+    layout.value,
+    compact.value,
+  ],
   async () => {
     const generation = ++appearanceGeneration;
     rememberAnchor();
     applyTheme(settings.value);
+    if (!fluent.value) document.documentElement.dataset.nativeMaterial = 'solid';
+    void invoke<boolean>('sync_window_material')
+      .then((backdrop) => {
+        if (generation === appearanceGeneration) {
+          document.documentElement.dataset.nativeMaterial = backdrop ? 'host-backdrop' : 'solid';
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Window material sync failed', error);
+      });
     conceal();
     await nextTick();
     if (generation !== appearanceGeneration) return;
@@ -1296,9 +1317,14 @@ onUnmounted(() => {
                   @click="loadDetail"
                   ><UiIcon name="refresh" /><span class="sr-only">刷新状态</span></button
                 ></div
-              ><div class="preview-content"
+              ><div
+                class="preview-content"
+                :class="{ 'files-preview-content': active.kind === 'files' }"
+                ><h2 v-if="active.kind === 'files'" class="preview-title files-preview-title">{{
+                  detail?.files.length ? detail.files.length + ' 个项目' : '文件记录'
+                }}</h2
                 ><h2
-                  v-if="!active.sensitive && active.kind !== 'image' && !active.is_link"
+                  v-else-if="!active.sensitive && active.kind !== 'image' && !active.is_link"
                   class="preview-title"
                   >{{ active.summary }}</h2
                 >
@@ -1352,18 +1378,24 @@ onUnmounted(() => {
                     </template>
                   </template>
                   <ul v-if="active.kind === 'files'" class="file-detail">
-                    <li v-for="(file, index) in detail.files" :key="file.path"
-                      ><span :class="['file-status', { missing: file.exists !== true }]">{{
-                        file.exists === true
-                          ? '存在'
-                          : file.exists === false
-                            ? '已失效'
-                            : '无法检查'
-                      }}</span
-                      ><span>{{ file.path }}</span
+                    <li v-for="(file, index) in detail.files" :key="file.path" class="file-entry"
+                      ><div class="file-copy"
+                        ><div class="file-heading"
+                          ><strong :title="file.path">{{ filename(file.path) }}</strong
+                          ><span :class="['file-status', { missing: file.exists !== true }]">{{
+                            file.exists === true
+                              ? '存在'
+                              : file.exists === false
+                                ? '已失效'
+                                : '无法检查'
+                          }}</span></div
+                        ><small class="file-parent" :title="file.path">{{
+                          fileParent(file.path)
+                        }}</small></div
                       ><div v-if="!active.sensitive && !canOpenSingleFile" class="file-actions"
                         ><button
                           type="button"
+                          :aria-label="'打开 ' + filename(file.path)"
                           :disabled="fileActionBusy || file.exists === false"
                           @click="runFileAction('open', index)"
                           >打开</button
