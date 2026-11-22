@@ -1,0 +1,72 @@
+@media (forced-colors: none) {
+  :root .main-window[data-custom-background],
+  :root
+    .main-window[data-custom-background]:not(.settings-open)
+    :is(
+      header,
+      .group-sidebar,
+      .main-content,
+      .workspace,
+      .history-pane,
+      .list,
+      .detail,
+      .detail-bottom,
+      .preview-content,
+      .main-statusbar
+    ) {
+    border-color: transparent;
+  }
+  :root .main-window[data-custom-background]:not(.settings-open),
+  .background-preview.has-wallpaper {
+    --main-background-tint: color-mix(in srgb, var(--bg) var(--main-background-scrim), transparent);
+    background:
+      linear-gradient(var(--main-background-tint), var(--main-background-tint)),
+      var(--main-background-image) var(--main-background-position) / var(--main-background-fit)
+        no-repeat var(--bg);
+  }
+  :root .main-window[data-custom-background]:not(.settings-open) {
+    /* 透明边框仍占宽度，壁纸从外沿定位，避免露出一像素底色。 */
+    background-origin: border-box;
+    --wallpaper-pane-fill: color-mix(in srgb, var(--bg) 28%, transparent);
+    --wallpaper-record-fill: color-mix(in srgb, var(--bg) 86%, transparent);
+    --wallpaper-preview-fill: color-mix(in srgb, var(--bg) 78%, transparent);
+    --muted: color-mix(in srgb, var(--text) 86%, var(--bg));
+  }
+  :root .main-window[data-custom-background]:not(.settings-open) .main-content {
+    background-color: var(--wallpaper-pane-fill);
+  }
+  :root .main-window[data-custom-background] :is(.group-sidebar, .main-statusbar) {
+    background-color: transparent;
+    --muted: var(--text);
+  }
+  :root .main-window[data-custom-background]:not(.settings-open) > header {
+    --muted: var(--text);
+  }
+  :root .main-window[data-custom-background]:not(.settings-open) .item:not(.selected, :hover) {
+    background-color: var(--wallpaper-record-fill);
+  }
+  :root .main-window[data-custom-background] .detail {
+    background-color: var(--wallpaper-preview-fill);
+  }
+  :root[data-skin='fluent'] .main-window[data-custom-background] .detail {
+    background-color: transparent;
+  }
+  :root[data-skin='fluent'] .main-window[data-custom-background] .preview-content {
+    background-color: var(--wallpaper-preview-fill);
+  }
+  :root[data-skin='fluent'] .main-window[data-custom-background].cards-layout:not(.compact) {
+    --wallpaper-record-fill: color-mix(in srgb, var(--surface) 86%, transparent);
+  }
+  /* 设置页的导航沿用窗口底色，内容和操作区共享同一张实色底板。 */
+  :root .main-window[data-custom-background].settings-open .settings-nav {
+    background-color: transparent;
+  }
+  :root
+    .main-window[data-custom-background].settings-open
+    :is(.settings-content, .settings-actions) {
+    background-color: var(--bg);
+  }
+  :root .main-window[data-custom-background].settings-open .settings-content fieldset {
+    background-color: transparent;
+  }
+}

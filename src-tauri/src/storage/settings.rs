@@ -4,11 +4,17 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 impl Storage {
     pub fn load_settings(&self) -> Result<Settings> {
-        let mut query = self.conn.prepare("SELECT key,value FROM settings")?;
+        let mut query = self
+            .conn
+            .prepare("SELECT key,value FROM settings WHERE key NOT IN (?1,?2)")?;
         let rows = query
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
+            .query_map(
+                [
+                    super::background::REGULAR_KEY,
+                    super::background::COMPACT_KEY,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         Settings::from_rows(&rows, crate::diag::write)
     }

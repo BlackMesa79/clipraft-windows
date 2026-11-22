@@ -5,6 +5,7 @@ mod app_tray;
 mod appearance;
 pub mod archive;
 mod autostart;
+mod background;
 mod capture_policy;
 mod capture_source;
 mod clipboard;
@@ -240,6 +241,7 @@ async fn sync_window_material(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<State>>,
+    custom_background: Option<bool>,
 ) -> Result<bool, String> {
     if window.label() != "main" || state.smoke {
         return Err("此窗口不能同步原生材质".into());
@@ -251,7 +253,11 @@ async fn sync_window_material(
         .map_err(|_| "设置不可用".to_string())?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        let _ = sender.send(main_material::sync_main(&window, &settings));
+        let _ = sender.send(main_material::sync_main(
+            &window,
+            &settings,
+            custom_background.unwrap_or_default(),
+        ));
     })
     .map_err(|error| error.to_string())?;
     receiver
@@ -661,6 +667,10 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             archive_service::cancel_archive_task,
             check_hotkeys,
             update_settings,
+            background::get_main_background,
+            background::import_main_background,
+            background::set_main_background_options,
+            background::remove_main_background,
             preview_cleanup,
             startup_error,
             list_items,

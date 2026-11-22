@@ -45,6 +45,13 @@ pub(super) fn select_existing() -> Result<Option<PathBuf>> {
 pub(crate) fn select_archive(owner: Option<isize>) -> Result<Option<PathBuf>> {
     select_path(owner, "选择片筏密码归档", FOS_FILEMUSTEXIST)
 }
+pub(crate) fn select_background(owner: isize) -> Result<Option<PathBuf>> {
+    select_path(
+        Some(owner),
+        "选择背景图片（PNG、JPEG、WebP）",
+        FOS_FILEMUSTEXIST,
+    )
+}
 pub(crate) fn select_archive_folder(owner: Option<isize>) -> Result<Option<PathBuf>> {
     select_folder(owner, "选择归档或恢复新目录的父文件夹")
 }

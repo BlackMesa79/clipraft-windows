@@ -7,6 +7,7 @@ export const settingsMock = `(() => {
   window.settings=JSON.parse(JSON.stringify(defaults)); window.settingUpdates=[];window.cleanupPreviews=[];window.hotkeyChecks=[];
   window.directoryStatus={current:'D:/synthetic/current',default:'D:/synthetic/default',custom:true,enabled:false,previous:null};
   window.directoryRequests=[];
+  window.backgroundAssets={regular:null,compact:null};
   const invoke=window.__TAURI_INTERNALS__.invoke;
   window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
     if(cmd==='archive_task_status')return null;
@@ -26,7 +27,21 @@ export const settingsMock = `(() => {
       return;
     }
     if(cmd==='sync_main_layout')return;
-    if(cmd==='sync_window_material')return window.nativeBackdrop ?? false;
+    if(cmd==='sync_window_material'){
+      window.lastMaterialRequest=args;
+      return window.nativeBackdrop ?? false;
+    }
+    if(cmd==='get_main_background')return window.backgroundAssets[args.layout];
+    if(cmd==='import_main_background'){
+      if(window.backgroundImportError)throw Error('合成图片解码失败');
+      if(window.backgroundImport)window.backgroundAssets[args.layout]=window.backgroundImport;
+      return window.backgroundImport ?? null;
+    }
+    if(cmd==='set_main_background_options'){
+      window.backgroundAssets[args.layout]={...window.backgroundAssets[args.layout],options:args.options};
+      return;
+    }
+    if(cmd==='remove_main_background'){window.backgroundAssets[args.layout]=null;return;}
     if(cmd==='get_settings')return JSON.parse(JSON.stringify(window.settings));
     if(cmd==='get_setting_options')return options;
     if(cmd==='startup_error')return null;

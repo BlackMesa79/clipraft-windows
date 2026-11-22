@@ -1,3 +1,5 @@
+mod background;
+pub(crate) use background::{BackgroundLayout, BackgroundOptions, MainBackground};
 #[cfg(test)]
 mod compression_tests;
 pub mod crypto;

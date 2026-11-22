@@ -11,6 +11,8 @@ async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
 }
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import './styles/main.css';
+import './styles/main-background.css';
+import { backgroundStyle, useMainBackground } from './mainBackground';
 import PreviewImage from './PreviewImage.vue';
 import RichPreview from './RichPreview.vue';
 import { createItemDetail } from './itemDetail';
@@ -49,7 +51,18 @@ const appearanceBusy = ref(false);
 const compact = computed(() => settings.value?.compact ?? false);
 const fluent = computed(() => settings.value?.skin === 'fluent');
 const layout = computed(() => settings.value?.layout ?? 'list');
+const { backgrounds, backgroundLoading, setBackground } = useMainBackground();
+const backgroundLayout = computed(() => (compact.value ? 'compact' : 'regular'));
+const background = computed(() =>
+  settings.value ? backgrounds[backgroundLayout.value].asset : null,
+);
+const hasBackground = computed(() => !!background.value);
+const backgroundStyles = computed(() => {
+  const asset = background.value;
+  return asset ? backgroundStyle(asset.jpeg, asset.options) : undefined;
+});
 let appearanceGeneration = 0;
+let materialSync = Promise.resolve();
 let savedAnchor: { id: string; offset: number } | undefined;
 function fileParent(path: string): string {
   const leaf = filename(path);
@@ -89,6 +102,36 @@ watch(settingsOpen, async (open) => {
   }
 });
 watch(
+  [
+    fluent,
+    hasBackground,
+    () => settings.value?.theme,
+    () => settings.value?.backdrop_strength,
+    layout,
+    compact,
+  ],
+  ([useFluent, customBackground], _, onCleanup) => {
+    let current = true;
+    onCleanup(() => {
+      current = false;
+    });
+    if (!useFluent || customBackground) document.documentElement.dataset.nativeMaterial = 'solid';
+    materialSync = materialSync
+      .then(async () => {
+        if (!current) return;
+        const backdrop = await invoke<boolean>('sync_window_material', { customBackground });
+        if (current) {
+          document.documentElement.dataset.nativeMaterial =
+            backdrop && !customBackground ? 'host-backdrop' : 'solid';
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Window material sync failed', error);
+      });
+  },
+  { flush: 'pre' },
+);
+watch(
   () => [
     settings.value?.theme,
     settings.value?.backdrop_strength,
@@ -100,16 +143,6 @@ watch(
     const generation = ++appearanceGeneration;
     rememberAnchor();
     applyTheme(settings.value);
-    if (!fluent.value) document.documentElement.dataset.nativeMaterial = 'solid';
-    void invoke<boolean>('sync_window_material')
-      .then((backdrop) => {
-        if (generation === appearanceGeneration) {
-          document.documentElement.dataset.nativeMaterial = backdrop ? 'host-backdrop' : 'solid';
-        }
-      })
-      .catch((error: unknown) => {
-        console.error('Window material sync failed', error);
-      });
     conceal();
     await nextTick();
     if (generation !== appearanceGeneration) return;
@@ -1055,6 +1088,8 @@ onUnmounted(() => {
       'main-window',
       { compact, 'cards-layout': layout === 'cards', 'settings-open': settingsOpen },
     ]"
+    :data-custom-background="hasBackground || undefined"
+    :style="backgroundStyles"
   >
     <header data-tauri-drag-region>
       <button
@@ -1197,6 +1232,10 @@ onUnmounted(() => {
         <SettingsView
           v-if="settingsOpen"
           :fluent="fluent"
+          :backgrounds="backgrounds"
+          :background-layout="backgroundLayout"
+          :background-loading="backgroundLoading"
+          @background-changed="setBackground"
           @saved="settings = $event"
           @busy="settingsBusy = $event"
           @recording="settingsRecording = $event"

@@ -3709,13 +3709,14 @@ try {
         const track = getComputedStyle(control);
         const thumb = getComputedStyle(control, '::before');
         return {
-          start: track.justifyContent,
+          startsAtLeadingEdge: track.flexDirection === 'row' &&
+            ['flex-start', 'flow-start'].includes(track.justifyContent),
           travel: new DOMMatrix(thumb.transform === 'none' ? '' : thumb.transform).m41,
           available: control.clientWidth - parseFloat(track.paddingLeft) -
             parseFloat(track.paddingRight) - parseFloat(thumb.width)
         };
       })()`);
-    assert.deepEqual(await switchStyle(), { start: 'flex-start', travel: 0, available: 19 });
+    assert.deepEqual(await switchStyle(), { startsAtLeadingEdge: true, travel: 0, available: 19 });
     await capture('fluent-settings-switch-off');
     await click('.compact-setting [role=switch]');
     assert(await evaluate("document.querySelector('.compact-setting [role=switch]').checked"));
@@ -3889,13 +3890,16 @@ try {
       assert.deepEqual(
         await evaluate(`[...document.querySelectorAll('.settings-content label.check > input')].map(control => {
           const style = getComputedStyle(control);
+          const aligned = control.role === 'switch'
+            ? style.flexDirection === 'row' && ['flex-start', 'flow-start'].includes(style.justifyContent)
+            : style.justifyContent === 'center';
           return [control.getAttribute('role'), style.width, style.height, style.borderRadius,
-            getComputedStyle(control, '::before').borderRadius, style.justifyContent];
+            getComputedStyle(control, '::before').borderRadius, aligned];
         })`),
         Array.from({ length: 7 }, () =>
           skin === 'fluent'
-            ? ['switch', '39px', '20px', '20px', '50%', 'flex-start']
-            : [null, '15px', '15px', '4px', '0px', 'center'],
+            ? ['switch', '39px', '20px', '20px', '50%', true]
+            : [null, '15px', '15px', '4px', '0px', true],
         ),
       );
       const focused =
@@ -4515,6 +4519,346 @@ try {
     await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
     assert.deepEqual(await style(), before);
     await send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] });
+  });
+  const prepareWallpaper = (layout = 'regular') =>
+    evaluate(`(() => {
+      const compact = ${JSON.stringify(layout)} === 'compact';
+      const canvas = document.createElement('canvas');
+      canvas.width = compact ? 390 : 800;
+      canvas.height = compact ? 700 : 560;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(canvas.width / 800, canvas.height / 560);
+      const gradient = ctx.createLinearGradient(0, 0, 800, 560);
+      gradient.addColorStop(0, compact ? '#158568' : '#172038');
+      gradient.addColorStop(.38, '#926ba7');
+      gradient.addColorStop(.7, '#e28cba');
+      gradient.addColorStop(1, '#faf1df');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 800, 560);
+      ctx.strokeStyle = '#22273e';
+      ctx.lineWidth = 3;
+      for (let x = -100; x < 900; x += 95) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + 260, 560);
+        ctx.stroke();
+      }
+      window.backgroundImport = {jpeg: canvas.toDataURL('image/jpeg').split(',')[1],
+        options: {fit: 'cover', position: 'center', scrim: 78}};
+    })()`);
+  const backgroundSection = '.background-settings';
+  const wallpaperButton = (label) =>
+    evaluate(`Array.from(document.querySelectorAll('${backgroundSection} button'))
+      .find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`);
+  const openWallpaperSettings = async () => {
+    await evaluate("window.emitEvent('open-settings')");
+    await until(() => evaluate("!!document.querySelector('.settings-nav')"), '设置页未加载');
+    await click('.settings-nav button:nth-child(2)');
+  };
+  const wallpaperStyle = (selector, property = 'backgroundImage') =>
+    evaluate(
+      `getComputedStyle(document.querySelector(${JSON.stringify(selector)}))[${JSON.stringify(property)}]`,
+    );
+
+  const assertWallpaperSettings = async () => {
+    assert.equal((await wallpaperStyle('.main-window')) === 'none', true, '设置页仍绘制壁纸');
+    assert.equal(await wallpaperStyle('.settings-nav', 'backgroundColor'), 'rgba(0, 0, 0, 0)');
+    assert.equal(
+      await wallpaperStyle('.settings-content', 'backgroundColor'),
+      await wallpaperStyle('.settings-actions', 'backgroundColor'),
+    );
+    assert.equal(
+      await wallpaperStyle('.settings-content fieldset', 'backgroundColor'),
+      'rgba(0, 0, 0, 0)',
+    );
+  };
+
+  await test('U8 背景图片导入、调整、失败回退和移除', async () => {
+    await metrics();
+    await nav();
+    await prepareWallpaper();
+    const section = backgroundSection;
+    const preview = `${section} .background-preview`;
+    await openWallpaperSettings();
+    await wallpaperButton('选择图片');
+    await until(
+      () => evaluate(`!!document.querySelector('${preview}.has-wallpaper')`),
+      '设置页未绘制背景预览',
+    );
+    assert.match(await wallpaperStyle(preview), /data:image\/jpeg/);
+    await change(`${section} select:nth-of-type(1)`, 'contain');
+    await change(`${section} label:nth-of-type(2) select`, 'bottom');
+    await evaluate(`(() => {
+      const slider = document.querySelector('${section} input[type=range]');
+      slider.value = '71';
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await wallpaperButton('应用背景调整');
+    await until(
+      () => evaluate("window.backgroundAssets.regular.options.position === 'bottom'"),
+      '调整未保存',
+    );
+    assert.equal(await wallpaperStyle(preview, 'backgroundSize'), 'auto, contain');
+    assert.equal(await evaluate('window.backgroundAssets.regular.options.scrim'), 71);
+    const previous = await wallpaperStyle(preview);
+    await evaluate('window.backgroundImportError=true');
+    await wallpaperButton('替换图片');
+    await until(
+      () => evaluate(`!!document.querySelector('${section} [role=alert]')`),
+      '损坏图片无反馈',
+    );
+    assert.equal(await wallpaperStyle(preview), previous);
+    await evaluate('window.backgroundImportError=false;window.backgroundImport=null');
+    await wallpaperButton('替换图片');
+    assert.equal(await wallpaperStyle(preview), previous);
+
+    await evaluate('window.nativeBackdrop=true');
+    await appearance({ skin: 'fluent', theme: 'dark' });
+    assert.equal(await evaluate('document.documentElement.dataset.nativeMaterial'), 'solid');
+    assert.equal(await evaluate('window.lastMaterialRequest.customBackground'), true);
+    await evaluate(`document.querySelector('${section}').scrollIntoView()`);
+    await capture('u8-background-settings');
+    await send('Emulation.setEmulatedMedia', {
+      features: [{ name: 'forced-colors', value: 'active' }],
+    });
+    try {
+      assert.equal(await wallpaperStyle(preview), 'none');
+    } finally {
+      await send('Emulation.setEmulatedMedia', { features: [] });
+    }
+    await wallpaperButton('移除图片');
+    await until(
+      () => evaluate("document.documentElement.dataset.nativeMaterial === 'host-backdrop'"),
+      'Fluent 桌面背景未恢复',
+    );
+    assert.equal(await wallpaperStyle('.main-window'), 'none');
+    assert.equal(await evaluate('window.backgroundAssets.regular'), null);
+  });
+  await test('U8 壁纸与两套皮肤的设置底板、历史分层和三种布局', async () => {
+    await metrics();
+    await nav();
+    await prepareWallpaper();
+    await openWallpaperSettings();
+    await wallpaperButton('选择图片');
+    await until(
+      () =>
+        evaluate("document.querySelector('.main-window').hasAttribute('data-custom-background')"),
+      '背景图片未生效',
+    );
+    await click('.background-target[data-layout=compact]');
+    await prepareWallpaper('compact');
+    await wallpaperButton('选择图片');
+    await until(() => evaluate('!!window.backgroundAssets.compact'), '紧凑背景未保存');
+    for (const skin of ['clipraft', 'fluent']) {
+      await appearance({ skin, theme: 'light', compact: false });
+      await click('.settings-nav button:nth-child(1)');
+      await capture(`u8-wallpaper-${skin}-settings`);
+      await assertWallpaperSettings();
+      await evaluate("document.querySelector('.settings-buttons button[type=button]').click()");
+      await until(() => evaluate("!!document.querySelector('.workspace')"), '未返回历史页');
+      for (const theme of ['light', 'dark']) {
+        for (const [layout, compact] of [
+          ['list', false],
+          ['cards', false],
+          ['list', true],
+        ]) {
+          await metrics(compact ? 390 : 1000);
+          await appearance({ theme, layout, compact });
+          if (theme === 'light' && layout === 'list' && !compact) {
+            await capture(`u8-wallpaper-${skin}-history`);
+          }
+          assert.match(await wallpaperStyle('.main-window'), /data:image\/jpeg/);
+          assert(
+            await evaluate(`(() => {
+              const style = getComputedStyle(document.querySelector('.main-window'));
+              return style.backgroundImage.includes(window.backgroundAssets.${compact ? 'compact' : 'regular'}.jpeg);
+            })()`),
+          );
+          assert(await evaluate("!!document.querySelector('.item.selected')"));
+          const structuralBorders = await evaluate(`(() => {
+            const elements = document.querySelectorAll('.main-window, .main-window > header, .main-content, .workspace, .group-sidebar, .history-pane, .list, .detail-bottom, .preview-content, .main-statusbar');
+            return [...elements].filter(element => {
+              const style = getComputedStyle(element);
+              return ['Top', 'Right', 'Bottom', 'Left'].some(side => parseFloat(style['border' + side + 'Width']) > 0
+                && style['border' + side + 'Color'] !== 'rgba(0, 0, 0, 0)');
+            }).map(element => element.className);
+          })()`);
+          assert.deepEqual(structuralBorders, []);
+          const alpha = await evaluate(`(() => {
+            const ctx = document.createElement('canvas').getContext('2d');
+            const selectors = ['.main-content', '.item:not(.selected, :hover)', '.item.selected'];
+            if (!${compact}) selectors.push(${JSON.stringify(skin === 'fluent' ? '.preview-content' : '.detail')});
+            return selectors.map(selector => {
+              ctx.clearRect(0, 0, 1, 1);
+              ctx.fillStyle = getComputedStyle(document.querySelector(selector)).backgroundColor;
+              ctx.fillRect(0, 0, 1, 1);
+              return ctx.getImageData(0, 0, 1, 1).data[3];
+            });
+          })()`);
+          assert.deepEqual(
+            alpha,
+            compact ? [71, 219, 255] : [71, 219, 255, 199],
+            `${skin}/${theme}/${compact ? 'compact' : layout}`,
+          );
+        }
+      }
+      await send('Emulation.setEmulatedMedia', {
+        features: [{ name: 'forced-colors', value: 'active' }],
+      });
+      try {
+        assert.equal(await wallpaperStyle('.main-window'), 'none');
+      } finally {
+        await send('Emulation.setEmulatedMedia', { features: [] });
+      }
+      await metrics();
+      await openWallpaperSettings();
+      await click('.settings-nav button:nth-child(1)');
+      await assertWallpaperSettings();
+    }
+  });
+  await test('U8 普通和紧凑背景独立配置、显示和移除', async () => {
+    await metrics();
+    await nav();
+    await appearance({ skin: 'fluent' });
+    await prepareWallpaper();
+    await openWallpaperSettings();
+    assert(
+      await evaluate(`(() => {
+        const backgrounds = document.querySelector('.background-settings');
+        return backgrounds.querySelector('h3').textContent === '自定义背景'
+          && backgrounds.previousElementSibling.getAttribute('aria-labelledby') === 'appearance-theme-heading'
+          && backgrounds.nextElementSibling.getAttribute('aria-labelledby') === 'appearance-layout-heading';
+      })()`),
+    );
+    assert.equal(
+      await wallpaperStyle('.background-controls', 'backgroundColor'),
+      await wallpaperStyle('.appearance-section > label.settings-select', 'backgroundColor'),
+    );
+    assert(
+      await evaluate(`(() => {
+        const headings = [...document.querySelectorAll('[data-category=appearance] h3')];
+        const fonts = headings.map(heading => {
+          const {fontFamily, fontSize, fontWeight, fontStretch, letterSpacing} = getComputedStyle(heading);
+          return [fontFamily, fontSize, fontWeight, fontStretch, letterSpacing].join('|');
+        });
+        return fonts.length === 3 && new Set(fonts).size === 1;
+      })()`),
+      '自定义背景标题的字号、字重和字宽应与主题、布局一致',
+    );
+    await wallpaperButton('选择图片');
+    await until(() => evaluate('!!window.backgroundAssets.regular'), '普通背景未保存');
+    await evaluate("document.querySelector('.settings-buttons button[type=button]').click()");
+    await evaluate('window.nativeBackdrop=true');
+    await appearance({ compact: true });
+    assert.equal(await wallpaperStyle('.main-window'), 'none');
+    assert.equal(await evaluate('window.lastMaterialRequest.customBackground'), false);
+    await openWallpaperSettings();
+    assert.equal(
+      await evaluate(
+        "document.querySelector('.background-target[aria-pressed=true]').dataset.layout",
+      ),
+      'compact',
+    );
+    await prepareWallpaper('compact');
+    await wallpaperButton('选择图片');
+    await until(
+      () => evaluate("!!document.querySelector('[data-layout=compact] .has-wallpaper')"),
+      '竖图未预览',
+    );
+    await change('.background-controls select', 'contain');
+    await wallpaperButton('应用背景调整');
+    await until(
+      () => evaluate("window.backgroundAssets.compact.options.fit === 'contain'"),
+      '紧凑布局调整未保存',
+    );
+    assert.equal(await evaluate('window.backgroundAssets.regular.options.fit'), 'cover');
+    await evaluate("document.querySelector('.settings-content').scrollTop = 0");
+    await capture('u8-background-layouts');
+    await metrics(390);
+    await capture('u8-background-layouts-narrow');
+    assert.equal(
+      await evaluate(`(() => {
+        const pane = document.querySelector('.settings-content');
+        return pane.scrollWidth > pane.clientWidth;
+      })()`),
+      false,
+    );
+    await click('.background-target[data-layout=regular]');
+    await wallpaperButton('移除图片');
+    await until(() => evaluate('window.backgroundAssets.regular === null'), '普通背景未移除');
+    await evaluate("document.querySelector('.settings-buttons button[type=button]').click()");
+    assert.match(await wallpaperStyle('.main-window'), /data:image\/jpeg/);
+    assert.equal(await wallpaperStyle('.main-window', 'backgroundSize'), 'auto, contain');
+    await capture('u8-wallpaper-portrait');
+    await metrics();
+    await appearance({ compact: false });
+    assert.equal(await wallpaperStyle('.main-window'), 'none');
+  });
+  await test('U8 壁纸贴合窗口上下沿，无底色细线', async () => {
+    await metrics();
+    await nav();
+    await evaluate(`(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 160;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#154886';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      window.backgroundImport = {jpeg: canvas.toDataURL('image/jpeg').split(',')[1],
+        options: {fit: 'cover', position: 'center', scrim: 78}};
+    })()`);
+    await openWallpaperSettings();
+    await wallpaperButton('选择图片');
+    await until(() => evaluate('!!window.backgroundAssets.regular'), '普通背景未保存');
+    await click('.background-target[data-layout=compact]');
+    await wallpaperButton('选择图片');
+    await until(() => evaluate('!!window.backgroundAssets.compact'), '紧凑背景未保存');
+    await evaluate("document.querySelector('.settings-buttons button[type=button]').click()");
+    await until(() => evaluate("!!document.querySelector('.workspace')"), '未返回历史页');
+
+    const edgePixels = async (x, y) => {
+      const shot = await send('Page.captureScreenshot', {
+        format: 'png',
+        clip: { x, y, width: 1, height: 5, scale: 1 },
+      });
+      return evaluate(`(async () => {
+        const image = new Image();
+        image.src = ${JSON.stringify('data:image/png;base64,' + shot.data)};
+        await image.decode();
+        const canvas = document.createElement('canvas');
+        canvas.width = 1;
+        canvas.height = 5;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(image, 0, 0);
+        const row = y => [...ctx.getImageData(0, y, 1, 1).data].slice(0, 3);
+        return [row(0), row(4)];
+      })()`);
+    };
+    const assertContinuousEdges = async (x, description) => {
+      for (const y of [0, 695]) {
+        const [first, last] = await edgePixels(x, y);
+        assert(
+          first.every((channel, index) => Math.abs(channel - last[index]) <= 2),
+          `${description} y=${y}: ${first} 与 ${last}`,
+        );
+      }
+    };
+    for (const [width, compact] of [
+      [1000, false],
+      [390, true],
+    ]) {
+      await metrics(width);
+      for (const skin of ['fluent', 'clipraft']) {
+        for (const theme of ['light', 'dark']) {
+          await appearance({ skin, theme, compact });
+          await assertContinuousEdges(Math.floor(width / 2), `${skin}/${theme}/${width}`);
+        }
+      }
+    }
+    await metrics();
+    await appearance({ skin: 'fluent', theme: 'dark', compact: false });
+    await openWallpaperSettings();
+    await assertContinuousEdges(500, 'Fluent 深色设置页');
   });
   await writeFile(
     path.join(out, 'results.json'),

@@ -7,6 +7,8 @@ use zeroize::Zeroizing;
 
 // 新设置默认不迁移，必须在此显式评审；自启动始终由目标机器重新选择。
 const PORTABLE_SETTINGS: &[&str] = &[
+    super::background::REGULAR_KEY,
+    super::background::COMPACT_KEY,
     "skin",
     "theme",
     "backdrop_strength",

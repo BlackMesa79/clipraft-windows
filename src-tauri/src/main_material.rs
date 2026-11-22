@@ -22,15 +22,15 @@ fn set(window: HWND, attribute: DWMWINDOWATTRIBUTE, value: i32) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn prepare_frame(raw: isize) {
+    frame::prepare(crate::platform::hwnd(raw));
+}
+
 fn clear(window: HWND, raw: isize) {
     surface::clear(raw);
-    if let Err(error) = frame::restore(window) {
-        diag::write(format!("main native frame restore failed: {error:#}"));
-    }
     for (attribute, value) in [
         (DWMWA_USE_HOSTBACKDROPBRUSH, 0),
         (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0),
-        (DWMWA_BORDER_COLOR, DWMWA_COLOR_DEFAULT as i32),
     ] {
         if let Err(error) = set(window, attribute, value) {
             diag::write(format!("main backdrop reset failed: {error:#}"));
@@ -38,13 +38,13 @@ fn clear(window: HWND, raw: isize) {
     }
 }
 
-pub fn sync_main(window: &WebviewWindow, settings: &Settings) -> bool {
+pub fn sync_main(window: &WebviewWindow, settings: &Settings, custom_background: bool) -> bool {
     let Ok(window_handle) = window.hwnd() else {
         return false;
     };
     let raw = window_handle.0 as isize;
     let hwnd = crate::platform::hwnd(raw);
-    if settings.skin == Skin::Clipraft {
+    if settings.skin == Skin::Clipraft || custom_background {
         clear(hwnd, raw);
         return false;
     }
@@ -66,12 +66,6 @@ pub fn sync_main(window: &WebviewWindow, settings: &Settings) -> bool {
             "main HostBackdrop unavailable, using solid Fluent surface: {error:#}"
         ));
         return false;
-    }
-    if let Err(error) = set(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE as i32) {
-        diag::write(format!("main backdrop border update failed: {error:#}"));
-    }
-    if let Err(error) = frame::extend_client_top(hwnd) {
-        diag::write(format!("main client top extension failed: {error:#}"));
     }
     true
 }

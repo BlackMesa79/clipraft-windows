@@ -7,6 +7,8 @@ import UiIcon from './UiIcon.vue';
 import SettingToggle from './SettingToggle.vue';
 import ArchiveSettings from './ArchiveSettings.vue';
 import StagingSettings from './StagingSettings.vue';
+import BackgroundSettings from './BackgroundSettings.vue';
+import type { BackgroundLayout, Backgrounds, MainBackground } from './mainBackground';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
 import {
   shortcutLabel,
@@ -17,9 +19,15 @@ import {
   type SettingOptions,
   type HotkeyReport,
 } from './settings';
-defineProps<{ fluent: boolean }>();
+defineProps<{
+  fluent: boolean;
+  backgrounds: Backgrounds;
+  backgroundLayout: BackgroundLayout;
+  backgroundLoading: boolean;
+}>();
 const emit = defineEmits<{
   saved: [settings: Settings];
+  backgroundChanged: [layout: BackgroundLayout, background: MainBackground | null];
   busy: [busy: boolean];
   recording: [active: boolean];
   cancel: [];
@@ -29,8 +37,11 @@ const draft = ref<Settings>(),
   options = ref<SettingOptions>();
 const error = ref(''),
   status = ref(''),
-  busy = ref(false),
+  saving = ref(false),
   pending = ref<{ settings: Settings; count: number }>();
+const backgroundBusy = ref(false);
+const directoryBusy = ref(false);
+const busy = computed(() => saving.value || backgroundBusy.value || directoryBusy.value);
 const appName = ref('');
 const archiveBusy = ref(false);
 const cleanupBusy = ref(false);
@@ -264,7 +275,7 @@ watch(
 );
 async function load() {
   error.value = '';
-  busy.value = true;
+  saving.value = true;
   try {
     const [settings, opts] = await Promise.all([
       invoke<Settings>('get_settings'),
@@ -289,7 +300,7 @@ async function load() {
   } catch (e) {
     error.value = String(e);
   } finally {
-    busy.value = false;
+    saving.value = false;
   }
 }
 function addApp() {
@@ -319,7 +330,7 @@ async function save() {
     return;
   error.value = '';
   status.value = '';
-  busy.value = true;
+  saving.value = true;
   try {
     if (hotkeysChanged.value && !(await checkHotkeys())) {
       category.value = 'hotkeys';
@@ -335,7 +346,7 @@ async function save() {
   } catch (e) {
     error.value = String(e);
   } finally {
-    busy.value = false;
+    saving.value = false;
   }
 }
 async function submit(next: Settings) {
@@ -354,7 +365,7 @@ async function submit(next: Settings) {
 async function confirm() {
   if (!pending.value || busy.value || archiveBusy.value) return;
   const next = pending.value.settings;
-  busy.value = true;
+  saving.value = true;
   error.value = '';
   try {
     await submit(next);
@@ -362,7 +373,7 @@ async function confirm() {
     error.value = String(e);
     pending.value = undefined;
   } finally {
-    busy.value = false;
+    saving.value = false;
   }
 }
 onMounted(async () => {
@@ -457,7 +468,7 @@ onUnmounted(() => {
             <DataDirectorySettings
               :disabled="busy || archiveBusy || cleanupBusy"
               :unsaved="unsavedSettings"
-              @busy="busy = $event"
+              @busy="directoryBusy = $event"
             />
             <ArchiveSettings
               :disabled="busy || cleanupBusy"
@@ -518,7 +529,9 @@ onUnmounted(() => {
                   ><option value="dark">深色</option></select
                 ></label
               >
-              <label v-if="fluent" class="number-field backdrop-setting"
+              <label
+                v-if="fluent && !backgrounds[backgroundLayout].asset"
+                class="number-field backdrop-setting"
                 ><span class="appearance-label"
                   ><span class="appearance-label-copy"
                     >背景透出强度<small>提高后可看到更多桌面背景</small></span
@@ -538,6 +551,13 @@ onUnmounted(() => {
                 ></label
               >
             </div>
+            <BackgroundSettings
+              :backgrounds="backgrounds"
+              :active-layout="backgroundLayout"
+              :disabled="busy || backgroundLoading || archiveBusy || cleanupBusy"
+              @busy="backgroundBusy = $event"
+              @changed="(layout, asset) => emit('backgroundChanged', layout, asset)"
+            />
             <div
               class="appearance-section"
               :role="fluent ? 'group' : undefined"

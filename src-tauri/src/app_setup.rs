@@ -46,9 +46,10 @@ fn create_windows(
     app.manage(appearance::WindowLayout::default());
     app.manage(compact_preview::PreviewState::default());
     let main = create_main(app, root)?;
+    let main_hwnd = main.hwnd()?.0 as isize;
+    crate::main_material::prepare_frame(main_hwnd);
     create_preview(app, &main, root)?;
     let quick = create_quick(app, root)?;
-    let main_hwnd = main.hwnd()?.0 as isize;
     let quick_hwnd = quick.hwnd()?.0 as isize;
     state.main.store(main_hwnd, Ordering::Release);
     state.quick.store(quick_hwnd, Ordering::Release);
@@ -72,6 +73,8 @@ fn create_main(app: &tauri::App, root: &Path) -> Result<WebviewWindow> {
             .icon(crate::tray_status::icon()?)?
             .transparent(true)
             .decorations(false)
+            // Tao 的额外阴影框会预留边缘，主窗轮廓由 DWM 处理。
+            .shadow(false)
             .inner_size(1000.0, 700.0)
             .visible(false)
             .focused(false)

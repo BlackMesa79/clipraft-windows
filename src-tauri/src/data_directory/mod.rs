@@ -6,7 +6,7 @@ pub(crate) mod commands;
 mod config;
 mod database;
 mod dialog;
-pub(crate) use dialog::{select_archive, select_archive_folder};
+pub(crate) use dialog::{select_archive, select_archive_folder, select_background};
 mod files;
 mod migration;
 mod paths;

@@ -235,7 +235,6 @@ pub(super) fn resize(raw: isize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::main_material::frame;
     use windows::{
         core::w,
         Win32::{
@@ -244,7 +243,7 @@ mod tests {
                 Dwm::{
                     DwmGetWindowAttribute, DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_BORDER_COLOR,
                     DWMWA_COLOR_DEFAULT, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-                    DWMWA_USE_HOSTBACKDROPBRUSH,
+                    DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
                 },
                 Gdi::ClientToScreen,
             },
@@ -289,13 +288,68 @@ mod tests {
         ]
     }
 
-    fn verify_client_top(window: HWND) {
-        let [left, top, right, bottom] = client_insets(window);
-        assert!(top > 0, "hidden window should have a top inset");
-        frame::extend_client_top(window).expect("extend client top");
-        assert_eq!(client_insets(window), [left, 0, right, bottom]);
-        frame::restore(window).expect("restore original insets");
-        assert_eq!(client_insets(window), [left, top, right, bottom]);
+    fn corner_preference(window: HWND) -> i32 {
+        let mut preference = 0_i32;
+        unsafe {
+            DwmGetWindowAttribute(
+                window,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&mut preference as *mut i32).cast(),
+                size_of::<i32>() as u32,
+            )
+            .expect("读取主窗 DWM 圆角设置");
+        }
+        preference
+    }
+
+    #[test]
+    #[ignore = "需要 Windows 11 和 WebView2，仅验证隐藏主窗的原生状态与尺寸"]
+    fn hidden_main_frame_survives_wallpaper_and_skin_switches() {
+        let app = tauri::Builder::default()
+            .any_thread()
+            .build(tauri::generate_context!())
+            .unwrap();
+        let profile = std::env::temp_dir().join(format!(
+            "clipraft-wallpaper-frame-{}-{}",
+            std::process::id(),
+            crate::storage::unix_millis()
+        ));
+        let window = tauri::WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::default())
+            .transparent(true)
+            .decorations(false)
+            .shadow(false)
+            .visible(false)
+            .focused(false)
+            .data_directory(profile)
+            .build()
+            .unwrap();
+        let handle = crate::platform::hwnd(window.hwnd().unwrap().0 as isize);
+        let raw = handle.0 as isize;
+        super::super::prepare_frame(raw);
+        let frame_insets = [0; 4];
+        assert_eq!(client_insets(handle), frame_insets);
+        assert_eq!(corner_preference(handle), DWMWCP_ROUND.0);
+
+        let mut settings = crate::settings::Settings::default();
+        let mut width = 640;
+        for skin in [
+            crate::settings::Skin::Clipraft,
+            crate::settings::Skin::Fluent,
+        ] {
+            settings.skin = skin;
+            for has_wallpaper in [false, true, false] {
+                super::super::sync_main(&window, &settings, has_wallpaper);
+                window
+                    .set_size(tauri::PhysicalSize::new(width, 460))
+                    .unwrap();
+                assert_eq!(client_insets(handle), frame_insets);
+                assert_eq!(corner_preference(handle), DWMWCP_ROUND.0);
+                width += 24;
+            }
+        }
+        clear(raw);
+        assert!(!window.is_visible().unwrap());
+        window.destroy().unwrap();
     }
 
     #[test]
@@ -339,7 +393,6 @@ mod tests {
             .expect("host backdrop surface should be created");
         super::super::set(window.0, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE as i32)
             .expect("native window border should be disabled");
-        verify_client_top(window.0);
         assert!(active(raw));
         resize(raw).expect("hidden surface should resize");
         set_appearance(Theme::Dark, 40).expect("hidden surface tint should update");
