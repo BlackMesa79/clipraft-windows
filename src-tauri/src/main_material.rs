@@ -1,6 +1,6 @@
 use crate::{
     diag,
-    settings::{Settings, Skin},
+    settings::{ColorScheme, Settings, Skin},
 };
 use anyhow::{Context, Result};
 use std::mem::size_of;
@@ -38,7 +38,12 @@ fn clear(window: HWND, raw: isize) {
     }
 }
 
-pub fn sync_main(window: &WebviewWindow, settings: &Settings, custom_background: bool) -> bool {
+pub(crate) fn sync_main(
+    window: &WebviewWindow,
+    settings: &Settings,
+    custom_background: bool,
+    color_scheme: ColorScheme,
+) -> bool {
     let Ok(window_handle) = window.hwnd() else {
         return false;
     };
@@ -48,8 +53,9 @@ pub fn sync_main(window: &WebviewWindow, settings: &Settings, custom_background:
         clear(hwnd, raw);
         return false;
     }
+    let theme = settings.theme.resolve(color_scheme);
     if surface::active(raw) {
-        return surface::set_appearance(settings.theme, settings.backdrop_strength)
+        return surface::set_appearance(theme, settings.backdrop_strength)
             .and_then(|()| surface::resize(raw))
             .is_ok();
     }
@@ -59,7 +65,7 @@ pub fn sync_main(window: &WebviewWindow, settings: &Settings, custom_background:
     if let Err(error) = set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0)
         .and_then(|()| set(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, 1))
         .context("启用 HostBackdropBrush 失败")
-        .and_then(|()| surface::create(raw, settings.theme, settings.backdrop_strength))
+        .and_then(|()| surface::create(raw, theme, settings.backdrop_strength))
     {
         clear(hwnd, raw);
         diag::write(format!(

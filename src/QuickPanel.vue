@@ -6,7 +6,8 @@ import QuickWheel from './QuickWheel.vue';
 import { wheelGeometry, wheelHeight } from './quickWheel';
 import UiIcon from './UiIcon.vue';
 import { createPanelState, type PanelState } from './panel';
-import { applyTheme, type Settings, type SettingOptions } from './settings';
+import { type Settings, type SettingOptions } from './settings';
+import { useAppearance } from './useAppearance';
 import './styles/quick.css';
 import { createPanelDiagnostics } from './panelDiagnostics';
 
@@ -23,7 +24,7 @@ watch(
 );
 const settings = ref<Settings>(),
   settingOptions = ref<SettingOptions>();
-watch(settings, applyTheme);
+useAppearance(settings);
 const panelVisible = computed(() => panel.value.visible);
 const noticeOnly = computed(() => !panelVisible.value && !!error.value);
 const panelRoot = ref<HTMLElement | null>(null);

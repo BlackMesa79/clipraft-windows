@@ -20,6 +20,7 @@ pub mod hook;
 mod hotkey_check;
 mod image_normalize;
 mod item_detail;
+mod latest_release;
 mod link_actions;
 mod main_material;
 mod main_position;
@@ -238,10 +239,10 @@ fn get_setting_options() -> settings::SettingOptions {
 }
 #[tauri::command]
 async fn sync_window_material(
-    app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<State>>,
     custom_background: Option<bool>,
+    color_scheme: settings::ColorScheme,
 ) -> Result<bool, String> {
     if window.label() != "main" || state.smoke {
         return Err("此窗口不能同步原生材质".into());
@@ -252,11 +253,13 @@ async fn sync_window_material(
         .map(|settings| settings.clone())
         .map_err(|_| "设置不可用".to_string())?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let app = window.app_handle().clone();
     app.run_on_main_thread(move || {
         let _ = sender.send(main_material::sync_main(
             &window,
             &settings,
             custom_background.unwrap_or_default(),
+            color_scheme,
         ));
     })
     .map_err(|error| error.to_string())?;
@@ -684,6 +687,10 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             item_detail,
             file_actions::file_action,
             link_actions::open_link,
+            link_actions::open_release_page,
+            latest_release::get_latest_release_tag,
+            latest_release::get_release_update_notes,
+            latest_release::list_release_notes,
             reveal_item,
             set_sensitive,
             keep_sensitive,

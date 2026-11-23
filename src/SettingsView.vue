@@ -8,6 +8,8 @@ import SettingToggle from './SettingToggle.vue';
 import ArchiveSettings from './ArchiveSettings.vue';
 import StagingSettings from './StagingSettings.vue';
 import BackgroundSettings from './BackgroundSettings.vue';
+import AboutSettings from './AboutSettings.vue';
+import type { Updates } from './updates';
 import type { BackgroundLayout, Backgrounds, MainBackground } from './mainBackground';
 import { createHotkeyRecording, type HotkeyField } from './hotkeyRecording';
 import {
@@ -24,6 +26,7 @@ defineProps<{
   backgrounds: Backgrounds;
   backgroundLayout: BackgroundLayout;
   backgroundLoading: boolean;
+  updates: Updates;
 }>();
 const emit = defineEmits<{
   saved: [settings: Settings];
@@ -52,6 +55,7 @@ const categories = [
   { id: 'privacy', label: '隐私' },
   { id: 'hotkeys', label: '快捷键' },
   { id: 'storage', label: '数据存储' },
+  { id: 'about', label: '关于' },
 ];
 const category = ref('general');
 const unsavedSettings = computed(
@@ -284,6 +288,7 @@ async function load() {
     const compatible = {
       ...settings,
       theme: settings.theme ?? 'light',
+      auto_check_updates: settings.auto_check_updates === true,
       skin: settings.skin ?? 'clipraft',
       layout: settings.layout ?? 'list',
       compact: settings.compact ?? false,
@@ -522,11 +527,12 @@ onUnmounted(() => {
                 ><span class="appearance-label"
                   ><UiIcon class="appearance-icon-slot" name="image" /><span
                     class="appearance-label-copy"
-                    >明暗<small>浅色或深色配色</small></span
+                    >明暗<small>浅色、深色或跟随 Windows</small></span
                   ></span
                 ><select v-model="draft.theme" :aria-label="fluent ? '明暗' : '主题'"
                   ><option value="light">浅色</option
-                  ><option value="dark">深色</option></select
+                  ><option value="dark">深色</option
+                  ><option value="system">跟随系统</option></select
                 ></label
               >
               <label
@@ -743,6 +749,16 @@ onUnmounted(() => {
               返回搜索；Enter 粘贴，Shift+Enter 纯文本粘贴，Esc
               清空搜索或隐藏。搜索框有文字时左右键移动光标，按上下键进入列表后可切换类型。</p
             >
+          </fieldset>
+          <fieldset v-show="category === 'about'" :disabled="busy" data-category="about">
+            <legend>关于</legend>
+            <AboutSettings :updates="updates">
+              <SettingToggle
+                v-model="draft.auto_check_updates"
+                :fluent="fluent"
+                label="启动时自动检查更新"
+              />
+            </AboutSettings>
           </fieldset>
         </div>
         <div class="settings-actions">

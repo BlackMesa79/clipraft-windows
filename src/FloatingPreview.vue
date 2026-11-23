@@ -6,7 +6,8 @@ import PreviewImage from './PreviewImage.vue';
 import RichPreview from './RichPreview.vue';
 import type { RichPreview as RichContent } from './richPreview';
 import { kindLabel, type Item } from './history';
-import { applyTheme, type Settings } from './settings';
+import type { Settings } from './settings';
+import { useAppearance } from './useAppearance';
 import { createDetailImage } from './detailImage';
 interface Content {
   generation?: number;
@@ -66,6 +67,8 @@ function measureHeight() {
 
 const stops: UnlistenFn[] = [];
 const contentRevision = ref(0);
+const appearance = ref<Settings>();
+useAppearance(appearance);
 let revision = 0,
   themeRevision = 0,
   disposed = false;
@@ -107,7 +110,7 @@ onMounted(async () => {
     stops.push(
       await listen<Settings>('settings-changed', ({ payload }) => {
         themeRevision++;
-        applyTheme(payload);
+        appearance.value = payload;
       }),
     );
     const version = revision,
@@ -117,7 +120,7 @@ onMounted(async () => {
       invoke<Settings>('get_settings'),
     ]);
     if (disposed) return;
-    if (themeRevision === themeVersion) applyTheme(settings);
+    if (themeRevision === themeVersion) appearance.value = settings;
     if (revision === version) receive(snapshot);
   } catch {
     if (!disposed) error.value = '预览读取失败，重新选择记录后重试';

@@ -155,8 +155,40 @@ try {
       mock +
       settingsMock +
       `
+    const query = new URLSearchParams(location.search);
+    if (query.has('auto-update')) window.settings.auto_check_updates = true;
+    if (query.has('system-theme')) Object.assign(window.settings, {skin:'fluent',theme:'system'});
+    if (query.has('compact-about')) Object.assign(window.settings, {skin:'fluent',theme:'dark',compact:true});
+    window.releaseChecks = [];
+    window.releasePageChecks = 0;
+    window.releaseNotesTags = [];
+    const releaseBody = ['前言', '## 更新内容', '- 合成发布说明 <b>纯文本</b>',
+      '### 细节', '保留子节', '## 下载与运行', '下载命令'].join(String.fromCharCode(10));
+    window.releaseReply = {status:200, body:{tag_name:'v0.8.10',draft:false,prerelease:false,body:releaseBody}};
+    const networkFetch = window.fetch.bind(window);
+    window.fetch = async (url, init) => {
+      if (url !== 'https://api.github.com/repos/BlackMesa79/clipraft-windows/releases/latest') return networkFetch(url, init);
+      window.releaseChecks.push({credentials:init.credentials,redirect:init.redirect,referrerPolicy:init.referrerPolicy});
+      if (window.releaseReply.offline) throw Error('合成断网');
+      if (window.releaseReply.pending) return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), {once:true}));
+      return new Response(JSON.stringify(window.releaseReply.body ?? {}),{status:window.releaseReply.status});
+    };
     const invokeWithSettings=window.__TAURI_INTERNALS__.invoke;
     window.__TAURI_INTERNALS__.invoke=async(cmd,args)=>{
+      if(cmd==='plugin:app|version' && query.has('cross-updates')) return '0.6.9';
+      if(cmd==='list_release_notes') {
+        if(window.releaseHistoryOffline) throw Error('合成发布历史读取失败');
+        return window.releaseHistory ?? {releases:[],complete:true};
+      }
+      if(cmd==='get_latest_release_tag') {
+        window.releasePageChecks++;
+        if(window.releasePageOffline) throw Error('合成发布页断网');
+        return window.releasePageTag ?? null;
+      }
+      if(cmd==='get_release_update_notes') {
+        window.releaseNotesTags.push(args.tag);
+        return window.releasePageNotes ?? '';
+      }
       if(cmd==='get_settings'&&location.search.includes('holdappearance')) {
         const snapshot=await invokeWithSettings(cmd,args);
         return new Promise(resolve=>window.releaseAppearance=()=>resolve(snapshot));
@@ -3896,7 +3928,7 @@ try {
           return [control.getAttribute('role'), style.width, style.height, style.borderRadius,
             getComputedStyle(control, '::before').borderRadius, aligned];
         })`),
-        Array.from({ length: 7 }, () =>
+        Array.from({ length: 8 }, () =>
           skin === 'fluent'
             ? ['switch', '39px', '20px', '20px', '50%', true]
             : [null, '15px', '15px', '4px', '0px', true],
@@ -3927,6 +3959,7 @@ try {
         ['general', '通用'],
         ['privacy', '隐私'],
         ['appearance', '外观'],
+        ['about', '关于'],
       ]) {
         if (skin !== 'fluent') continue;
         if (width === 390) await change('select[aria-label=设置分类]', category);
@@ -4859,6 +4892,318 @@ try {
     await appearance({ skin: 'fluent', theme: 'dark', compact: false });
     await openWallpaperSettings();
     await assertContinuousEdges(500, 'Fluent 深色设置页');
+  });
+  const setSystemScheme = (value) =>
+    send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
+  const assertColorScheme = (scheme) =>
+    until(
+      () => evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(scheme)}`),
+      '窗口未切换至' + scheme,
+    );
+  await test('0.8.1 系统明暗同步三个窗口与 Fluent 材质，固定配色仍优先', async () => {
+    try {
+      for (const panel of ['main', 'quick', 'preview']) {
+        await setSystemScheme('light');
+        await metrics();
+        if (panel === 'preview') await floatingNav('&system-theme=1');
+        if (panel !== 'preview') await nav(`?panel=${panel}&system-theme=1`);
+        await assertColorScheme('light');
+        await setSystemScheme('dark');
+        await assertColorScheme('dark');
+        if (panel === 'main') {
+          await until(
+            () => evaluate("window.lastMaterialRequest?.colorScheme === 'dark'"),
+            'Fluent 原生材质未收到深色',
+          );
+        }
+        await setSystemScheme('light');
+        await assertColorScheme('light');
+        await appearance({ theme: 'dark' });
+        await assertColorScheme('dark');
+        await setSystemScheme('dark');
+        await setSystemScheme('light');
+        await pause(100);
+        assert.equal(await evaluate('document.documentElement.dataset.theme'), 'dark', panel);
+      }
+    } finally {
+      await send('Emulation.setEmulatedMedia', { features: [] });
+    }
+  });
+  const openCategory = async (label) => {
+    await click('.settings-toggle');
+    await until(() => evaluate("!!document.querySelector('.settings-nav')"), '设置分类未显示');
+    await evaluate(
+      `[...document.querySelectorAll('.settings-nav button')].find(button => button.textContent.trim() === ${JSON.stringify(label)}).click()`,
+    );
+  };
+  const aboutStatus = (text) =>
+    until(
+      () =>
+        evaluate(`(() => {
+        const about = document.querySelector('[data-category=about]');
+        return about?.checkVisibility() && about.innerText.includes(${JSON.stringify(text)});
+      })()`),
+      '关于页面未显示：' + text,
+    );
+  const assertAboutCard = async () =>
+    assert(
+      await evaluate(`(() => {
+        const card = document.querySelector('.about-release-card');
+        const name = card.querySelector('strong').getBoundingClientRect();
+        const version = card.querySelector('.about-version span').getBoundingClientRect();
+        const button = card.querySelector('.about-check').getBoundingClientRect();
+        const bounds = card.getBoundingClientRect();
+        const style = getComputedStyle(card);
+        const right = bounds.right - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth);
+        return style.borderRightStyle === 'solid' && version.top >= name.bottom &&
+          button.left >= Math.max(name.right, version.right) && Math.abs(button.right - right) <= 1;
+      })()`),
+      '名称、版本和检查按钮未按卡片左右布局对齐',
+    );
+  const assertThemeChoices = async () => {
+    const theme = await evaluate(`(() => {
+      const select = document.querySelector('[data-category=appearance] select[aria-label=明暗], [data-category=appearance] select[aria-label=主题]');
+      return {
+        options: [...select.options].map(option => [option.value, option.textContent]),
+        extra: [...select.childNodes].filter(node => node.nodeType === Node.TEXT_NODE)
+          .map(node => node.textContent.trim()).filter(Boolean),
+      };
+    })()`);
+    assert.deepEqual(theme.options, [
+      ['light', '浅色'],
+      ['dark', '深色'],
+      ['system', '跟随系统'],
+    ]);
+    assert.deepEqual(theme.extra, []);
+  };
+  await test('0.8.1 旧设置默认不联网，保存后下次启动检查并提示新版', async () => {
+    await metrics();
+    await nav();
+    assert.equal(await evaluate("!!document.querySelector('.settings-update-badge')"), false);
+    await openCategory('外观');
+    await assertThemeChoices();
+    await change('[data-category=appearance] select[aria-label=主题]', 'system');
+    await evaluate(
+      "[...document.querySelectorAll('.settings-nav button')].find(button => button.textContent.trim() === '关于').click()",
+    );
+    await aboutStatus('当前版本 0.8.1');
+    assert.equal(await evaluate('window.releaseChecks.length'), 0);
+    await click('[data-category=about] input[type=checkbox]');
+    await click('.settings-buttons button[type=submit]');
+    await until(
+      () =>
+        evaluate(
+          'window.settings.auto_check_updates === true && window.settings.theme === "system"',
+        ),
+      '设置未保存',
+    );
+    assert.equal(await evaluate('window.releaseChecks.length'), 0);
+    await nav('?auto-update=1');
+    await until(
+      () =>
+        evaluate(
+          "!!document.querySelector('.sidebar-bottom .settings-toggle .settings-update-badge')",
+        ),
+      '启动时未提示新版',
+    );
+    assert.equal(
+      await evaluate("document.querySelector('.settings-toggle').getAttribute('aria-description')"),
+      '有新版本 0.8.10',
+    );
+    assert.equal(await evaluate("document.querySelectorAll('.main-statusbar button').length"), 0);
+    for (const [skin, theme, shape, accent, ink] of [
+      ['clipraft', 'light', 'ui-update-line', 'rgb(39, 125, 119)', 'rgb(39, 125, 119)'],
+      ['clipraft', 'dark', 'ui-update-line', 'rgb(156, 189, 209)', 'rgb(156, 189, 209)'],
+      ['fluent', 'light', 'ui-update-fluent', 'rgb(23, 107, 100)', 'rgb(255, 255, 255)'],
+      ['fluent', 'dark', 'ui-update-fluent', 'rgb(131, 213, 195)', 'rgb(18, 42, 36)'],
+    ]) {
+      await appearance({ skin, theme });
+      const badge = await evaluate(`(() => {
+        const icon = document.querySelector('svg.settings-update-badge');
+        const button = icon.closest('.settings-toggle');
+        const shapes = [...icon.querySelectorAll('g')].filter(group => getComputedStyle(group).display !== 'none');
+        const style = getComputedStyle(icon);
+        const buttonStyle = getComputedStyle(button);
+        const right = button.getBoundingClientRect().right - parseFloat(buttonStyle.paddingRight)
+          - parseFloat(buttonStyle.borderRightWidth);
+        return {
+          size: [style.width, style.height], color: style.color, shapes: shapes.map(group => group.getAttribute('class')),
+          stroke: getComputedStyle(shapes[0].querySelector('path')).stroke,
+          alignedRight: Math.abs(icon.getBoundingClientRect().right - right) < 1,
+        };
+      })()`);
+      assert.deepEqual(badge, {
+        size: ['14px', '14px'],
+        color: accent,
+        shapes: [shape],
+        stroke: ink,
+        alignedRight: true,
+      });
+      if (theme === 'light') await capture(`v081-settings-update-right-${skin}`);
+    }
+    assert.deepEqual(await evaluate('window.releaseChecks'), [
+      { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' },
+    ]);
+    await openCategory('关于');
+    await aboutStatus('发现新版本 0.8.10');
+    assert.equal(
+      await evaluate("document.querySelector('.release-notes').textContent"),
+      '- 合成发布说明 <b>纯文本</b>\n### 细节\n保留子节',
+    );
+    assert.deepEqual(await evaluate('window.releaseNotesTags'), []);
+    assert.equal(await evaluate("!!document.querySelector('.release-notes b')"), false);
+    assert.equal(
+      await evaluate("window.calls.filter(call=>call.cmd==='open_release_page').length"),
+      0,
+    );
+    await click('.about-open-release');
+    assert.equal(
+      await evaluate("window.calls.filter(call=>call.cmd==='open_release_page').length"),
+      1,
+    );
+  });
+  await test('0.8.1 手动检查处理正式版、预发布和断网，允许重试', async () => {
+    await metrics();
+    await nav();
+    await openCategory('关于');
+    await evaluate('window.releasePageOffline = true');
+    for (const [reply, message] of [
+      [{ status: 200, body: { tag_name: 'v0.8.1' } }, '暂无可用更新'],
+      [{ status: 200, body: { tag_name: 'v0.7.9' } }, '暂无可用更新'],
+      [
+        { status: 200, body: { tag_name: 'v9.0.0-beta.1', prerelease: true } },
+        '暂无可用的正式版本',
+      ],
+      [{ status: 200, body: { tag_name: 'invalid' } }, '无法识别 GitHub 返回的版本号'],
+      [{ status: 404 }, '暂无可用的正式版本'],
+      [{ offline: true }, '请检查网络后重试'],
+    ]) {
+      await evaluate(`window.releaseReply=${JSON.stringify(reply)}`);
+      await click('.about-check');
+      await aboutStatus(message);
+    }
+    assert.equal(await evaluate('window.releaseChecks.length'), 6);
+    assert.equal(await evaluate('window.releasePageChecks'), 1);
+    assert.equal(
+      await evaluate("document.querySelector('.about-open-release').textContent.trim()"),
+      '打开 GitHub 发布页',
+    );
+  });
+  await test('0.8.1 API 返回 403 或 429 时从发布页判断版本', async () => {
+    await metrics();
+    await nav();
+    await appearance({ skin: 'fluent' });
+    await openCategory('关于');
+    await evaluate("window.releaseReply={status:403}; window.releasePageTag='v0.8.0'");
+    await click('.about-check');
+    await aboutStatus('暂无可用更新');
+    await assertAboutCard();
+    await capture('v081-about-fluent-light');
+    await evaluate(
+      "window.releaseReply={status:429}; window.releasePageTag='v0.8.10'; window.releasePageNotes='- 发布页回退已取到更新内容'",
+    );
+    await click('.about-check');
+    await aboutStatus('发现新版本 0.8.10');
+    await aboutStatus('发布页回退已取到更新内容');
+    assert.equal(await evaluate('window.releasePageChecks'), 2);
+    assert.deepEqual(await evaluate('window.releaseNotesTags'), ['v0.8.10']);
+    assert.equal(
+      await evaluate("document.querySelector('.about-open-release').textContent.trim()"),
+      '前往 GitHub 下载',
+    );
+    await evaluate(
+      "window.releaseReply={status:200,body:{tag_name:'v0.8.10',body:'没有更新标题的长正文'}}; window.releasePageNotes=''",
+    );
+    await click('.about-check');
+    await aboutStatus('可前往 GitHub 查看完整发布说明');
+    assert.equal(await evaluate("!!document.querySelector('.release-notes')"), false);
+    assert.deepEqual(await evaluate('window.releaseNotesTags'), ['v0.8.10', 'v0.8.10']);
+  });
+  await test('0.8.1 慢请求期间禁止重复检查，超时后可再次发起', async () => {
+    await metrics();
+    await nav();
+    await openCategory('关于');
+    await evaluate(
+      'window.releaseReply={pending:true};const originalTimeout = window.setTimeout;window.setTimeout=(callback, delay, ...args)=>originalTimeout(callback,delay===10000?900:delay,...args)',
+    );
+    await click('.about-check');
+    await aboutStatus('正在连接 GitHub');
+    assert(await evaluate("document.querySelector('.about-check').disabled"));
+    await click('.about-check');
+    assert.equal(await evaluate('window.releaseChecks.length'), 1);
+    await aboutStatus('检查更新超时');
+    await evaluate("window.releaseReply={status:200,body:{tag_name:'v0.8.1'}}");
+    await click('.about-check');
+    await aboutStatus('暂无可用更新');
+    assert.equal(await evaluate('window.releaseChecks.length'), 2);
+  });
+  await test('0.8.1 跨版本更新内容按正式版本降序分组，历史失败时仍可下载', async () => {
+    await metrics();
+    await nav('?cross-updates=1');
+    await openCategory('关于');
+    await aboutStatus('当前版本 0.6.9');
+    await evaluate(`window.releaseReply={status:429};
+      window.releasePageTag='v0.8.0';
+      window.releaseHistory={complete:true,releases:[
+        {tag:'v0.6.9',notes:'当前版本不显示'},
+        {tag:'v0.7.0',notes:'Fluent 主题'},
+        {tag:'v0.7.5-beta.1',notes:'预发布不显示'},
+        {tag:'v0.8.0',notes:'自定义背景'},
+        {tag:'0.7.0',notes:'重复项不显示'},
+        {tag:'v0.9.0',notes:'超出最新正式版不显示'},
+      ]};`);
+    await click('.about-check');
+    await aboutStatus('自定义背景');
+    const groups = () =>
+      evaluate(`[...document.querySelectorAll('.about-release-notes')].map(node => [
+        node.querySelector('h4').textContent.trim(), node.querySelector('.release-notes')?.textContent.trim()
+      ])`);
+    assert.deepEqual(await groups(), [
+      ['0.8.0', '自定义背景'],
+      ['0.7.0', 'Fluent 主题'],
+    ]);
+    assert.deepEqual(await evaluate('window.releaseNotesTags'), []);
+    await evaluate("window.releaseHistoryOffline=true; window.releasePageNotes='自定义背景'");
+    await click('.about-check');
+    await aboutStatus('部分发布记录暂未读取');
+    assert.deepEqual(await groups(), [['0.8.0', '自定义背景']]);
+    assert.equal(
+      await evaluate("document.querySelector('.about-open-release').textContent.trim()"),
+      '前往 GitHub 下载',
+    );
+  });
+  await test('0.8.1 紧凑 Fluent 关于页可操作且发布说明正常换行', async () => {
+    await metrics(390);
+    await nav('?compact-about=1&auto-update=1');
+    await until(
+      () =>
+        evaluate(
+          "!!document.querySelector('.main-statusbar .settings-toggle .settings-update-badge')",
+        ),
+      '紧凑设置入口未显示新版角标',
+    );
+    assert.equal(await evaluate("document.querySelectorAll('.main-statusbar button').length"), 2);
+    await click('.main-statusbar .settings-toggle');
+    await until(
+      () => evaluate("!!document.querySelector('.settings-category select')"),
+      '紧凑设置未显示',
+    );
+    await change('.settings-category select', 'appearance');
+    await assertThemeChoices();
+    await change('.settings-category select', 'about');
+    await aboutStatus('当前版本 0.8.1');
+    await evaluate(
+      "window.releaseReply.body.body = '## 更新内容' + String.fromCharCode(10) + 'long-content-'.repeat(35)",
+    );
+    await click('.about-check');
+    await aboutStatus('发现新版本 0.8.10');
+    await assertAboutCard();
+    assert(
+      await evaluate(
+        "document.querySelector('[data-category=about]').scrollWidth <= document.querySelector('[data-category=about]').clientWidth",
+      ),
+    );
+    await capture('v081-about-compact-dark');
   });
   await writeFile(
     path.join(out, 'results.json'),

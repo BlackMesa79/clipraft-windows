@@ -11,6 +11,7 @@ const PORTABLE_SETTINGS: &[&str] = &[
     super::background::COMPACT_KEY,
     "skin",
     "theme",
+    "auto_check_updates",
     "backdrop_strength",
     "layout",
     "compact",

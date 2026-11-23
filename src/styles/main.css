@@ -1146,6 +1146,18 @@
   align-items: center;
   gap: 9px;
 }
+.settings-toggle-label {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  gap: 5px;
+}
+.settings-toggle-label .settings-update-badge {
+  width: 14px;
+  height: 14px;
+  margin-inline-start: auto;
+  color: var(--accent);
+}
 .main-window .item.selected {
   border-color: var(--selected-text);
 }

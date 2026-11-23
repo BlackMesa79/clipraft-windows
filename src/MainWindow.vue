@@ -19,7 +19,9 @@ import { createItemDetail } from './itemDetail';
 import { createCompactPreview } from './compactPreview';
 import HistoryList from './HistoryList.vue';
 import SettingsView from './SettingsView.vue';
-import { applyTheme, shortcutLabel, type Settings, type SettingOptions } from './settings';
+import { shortcutLabel, type Settings, type SettingOptions } from './settings';
+import { useAppearance } from './useAppearance';
+import { useUpdates } from './updates';
 import ContextMenu from './ContextMenu.vue';
 import GroupSidebar from './GroupSidebar.vue';
 import UiIcon from './UiIcon.vue';
@@ -47,6 +49,14 @@ const settingsOpen = ref(false),
   startupError = ref('');
 const settings = ref<Settings>(),
   settingOptions = ref<SettingOptions>();
+const colorScheme = useAppearance(settings);
+const updates = useUpdates(() =>
+  settings.value ? settings.value.auto_check_updates === true : undefined,
+);
+const { updateState } = updates;
+const updateHint = computed(() =>
+  updateState.value.kind === 'available' ? `有新版本 ${updateState.value.version}` : undefined,
+);
 const appearanceBusy = ref(false);
 const compact = computed(() => settings.value?.compact ?? false);
 const fluent = computed(() => settings.value?.skin === 'fluent');
@@ -102,15 +112,8 @@ watch(settingsOpen, async (open) => {
   }
 });
 watch(
-  [
-    fluent,
-    hasBackground,
-    () => settings.value?.theme,
-    () => settings.value?.backdrop_strength,
-    layout,
-    compact,
-  ],
-  ([useFluent, customBackground], _, onCleanup) => {
+  [fluent, hasBackground, colorScheme, () => settings.value?.backdrop_strength, layout, compact],
+  ([useFluent, customBackground, colorScheme], _, onCleanup) => {
     let current = true;
     onCleanup(() => {
       current = false;
@@ -119,7 +122,10 @@ watch(
     materialSync = materialSync
       .then(async () => {
         if (!current) return;
-        const backdrop = await invoke<boolean>('sync_window_material', { customBackground });
+        const backdrop = await invoke<boolean>('sync_window_material', {
+          customBackground,
+          colorScheme,
+        });
         if (current) {
           document.documentElement.dataset.nativeMaterial =
             backdrop && !customBackground ? 'host-backdrop' : 'solid';
@@ -142,7 +148,6 @@ watch(
   async () => {
     const generation = ++appearanceGeneration;
     rememberAnchor();
-    applyTheme(settings.value);
     conceal();
     await nextTick();
     if (generation !== appearanceGeneration) return;
@@ -1167,10 +1172,15 @@ onUnmounted(() => {
           type="button"
           class="settings-toggle"
           aria-label="设置"
+          :aria-description="updateHint"
+          :title="updateHint"
           :disabled="settingsBusy || deleting || busy || organizing || !!pendingDelete"
           @click="toggleSettings"
-          ><UiIcon name="settings" /> 设置</button
-        >
+          ><UiIcon name="settings" />
+          <span class="settings-toggle-label"
+            >设置<UiIcon v-if="updateHint" name="update" class="settings-update-badge"
+          /></span>
+        </button>
       </GroupSidebar>
       <section class="main-content">
         <div v-if="!settingsOpen" class="search-tools">
@@ -1235,6 +1245,7 @@ onUnmounted(() => {
           :backgrounds="backgrounds"
           :background-layout="backgroundLayout"
           :background-loading="backgroundLoading"
+          :updates="updates"
           @background-changed="setBackground"
           @saved="settings = $event"
           @busy="settingsBusy = $event"
@@ -1500,12 +1511,17 @@ onUnmounted(() => {
         type="button"
         class="settings-toggle"
         aria-label="设置"
+        :aria-description="updateHint"
+        :title="updateHint"
         :disabled="settingsBusy || deleting || busy || organizing || !!pendingDelete"
         @click="toggleSettings"
-        ><UiIcon name="settings" /> 设置</button
-      >
-      <span v-else-if="!compact">本地加密保存</span
-      ><span class="keyboard-hint" title="↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴"
+        ><UiIcon name="settings" />
+        <span class="settings-toggle-label"
+          >设置<UiIcon v-if="updateHint" name="update" class="settings-update-badge"
+        /></span>
+      </button>
+      <span v-else>本地加密保存</span>
+      <span class="keyboard-hint" title="↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴"
         >↑↓ 选择 · ←→ 类型 · Ctrl+↑↓ 分组 · Enter 粘贴</span
       >
       <button

@@ -13,6 +13,7 @@ fn u2_ac1_legacy_json_defaults_without_losing_existing_preferences() {
     for key in [
         "skin",
         "theme",
+        "auto_check_updates",
         "backdrop_strength",
         "layout",
         "compact",
@@ -31,7 +32,7 @@ fn u2_ac2_all_appearance_combinations_survive_database_reopen() {
         .join("../.test-data")
         .join(format!("u2-settings-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
-    for theme in [Theme::Light, Theme::Dark] {
+    for theme in [Theme::Light, Theme::Dark, Theme::System] {
         for layout in [Layout::List, Layout::Cards] {
             for compact in [false, true] {
                 for hide_on_blur in [false, true] {
@@ -39,6 +40,7 @@ fn u2_ac2_all_appearance_combinations_survive_database_reopen() {
                         let expected = Settings {
                             skin: clipraft_windows::settings::Skin::Fluent,
                             theme,
+                            auto_check_updates: compact,
                             layout,
                             compact,
                             hide_on_blur,
@@ -66,6 +68,7 @@ fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
     for (key, invalid) in [
         ("skin", "\"SECRET_INVALID\""),
         ("theme", "\"SECRET_INVALID\""),
+        ("auto_check_updates", "\"true\""),
         ("layout", "null"),
         ("compact", "1"),
         ("hide_on_blur", "\"true\""),
@@ -74,6 +77,7 @@ fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
     ] {
         let mut rows: BTreeMap<String, String> = serde_json::to_value(Settings {
             theme: Theme::Dark,
+            auto_check_updates: true,
             layout: Layout::Cards,
             compact: true,
             hide_on_blur: true,
@@ -96,6 +100,7 @@ fn u2_ac3_corrupt_fields_fall_back_independently_and_do_not_log_values() {
         for other in [
             "skin",
             "theme",
+            "auto_check_updates",
             "layout",
             "compact",
             "hide_on_blur",

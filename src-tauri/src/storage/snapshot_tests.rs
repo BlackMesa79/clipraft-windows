@@ -224,8 +224,9 @@ fn portable_snapshot_filters_settings_without_changing_source_or_raw_backup() {
     let mut source = fixture.source();
     let settings = crate::settings::Settings {
         autostart: true,
+        auto_check_updates: true,
         pause_on_start: true,
-        theme: crate::settings::Theme::Dark,
+        theme: crate::settings::Theme::System,
         backdrop_strength: 37,
         max_items: 2345,
         main_hotkey: crate::settings::Hotkey::CtrlBacktick,

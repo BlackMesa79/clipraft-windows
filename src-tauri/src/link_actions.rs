@@ -1,5 +1,6 @@
-//! 链接操作只接受记录 ID；使用完整存储内容校验，不信任前端摘要或 URL。
+//! 链接记录以完整存储内容校验，版本下载入口固定为项目的 GitHub Releases。
 use crate::{runtime::State, storage::Storage};
+use serde::Deserialize;
 use std::sync::Arc;
 use tauri::WebviewWindow;
 use windows::{
@@ -75,16 +76,42 @@ pub async fn open_link(
         return Err("仅主窗口可打开链接记录".into());
     }
     let shared = state.inner().clone();
+    launch_in_browser(move || {
+        let storage = shared.storage.lock().map_err(|_| "存储不可用")?;
+        target(&storage, &id)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReleaseDestination {
+    Latest,
+    History,
+}
+
+#[tauri::command]
+pub async fn open_release_page(
+    window: WebviewWindow,
+    destination: ReleaseDestination,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("仅主窗口可打开发布页面".into());
+    }
+    let page = match destination {
+        ReleaseDestination::Latest => crate::latest_release::PAGE,
+        ReleaseDestination::History => crate::latest_release::HISTORY_PAGE,
+    };
+    launch_in_browser(move || tauri::Url::parse(page).map_err(|error| error.to_string())).await
+}
+
+async fn launch_in_browser(
+    resolve_url: impl FnOnce() -> Result<tauri::Url, String> + Send + 'static,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         std::thread::Builder::new()
             .name("clipraft-open-link".into())
-            .spawn(move || {
-                let url = {
-                    let storage = shared.storage.lock().map_err(|_| "存储不可用")?;
-                    target(&storage, &id)?
-                };
-                launch(&url)
-            })
+            .spawn(move || launch(&resolve_url()?))
             .map_err(|_| "浏览器操作线程启动失败")?
             .join()
             .map_err(|_| "浏览器操作失败".to_string())?

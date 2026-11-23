@@ -150,6 +150,24 @@ pub enum Theme {
     #[default]
     Light,
     Dark,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ColorScheme {
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub(crate) fn resolve(self, system_scheme: ColorScheme) -> ColorScheme {
+        match self {
+            Self::Light => ColorScheme::Light,
+            Self::Dark => ColorScheme::Dark,
+            Self::System => system_scheme,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +197,8 @@ pub struct Settings {
     pub skin: Skin,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default)]
+    pub auto_check_updates: bool,
     #[serde(default = "default_backdrop_strength")]
     pub backdrop_strength: u32,
     #[serde(default)]
@@ -211,6 +231,7 @@ impl Default for Settings {
         Self {
             skin: Skin::Clipraft,
             theme: Theme::Light,
+            auto_check_updates: false,
             backdrop_strength: default_backdrop_strength(),
             layout: Layout::List,
             compact: false,

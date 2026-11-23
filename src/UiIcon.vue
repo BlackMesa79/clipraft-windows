@@ -23,7 +23,7 @@ const paths: Record<string, string> = {
 <template>
   <svg
     class="ui-icon"
-    viewBox="0 0 24 24"
+    :viewBox="name === 'update' ? '0 0 16 16' : '0 0 24 24'"
     fill="none"
     stroke="currentColor"
     stroke-width="1.6"
@@ -31,7 +31,20 @@ const paths: Record<string, string> = {
     stroke-linejoin="round"
     aria-hidden="true"
   >
-    <path :d="paths[name] ?? paths.text" />
+    <template v-if="name === 'update'">
+      <g class="ui-update-line">
+        <path d="M8 11.25V3.1m-3.2 3.2L8 3.1l3.2 3.2M5 13.15h6" stroke-width="1.4" />
+      </g>
+      <g class="ui-update-fluent">
+        <rect x="1" y="1" width="14" height="14" rx="4" fill="currentColor" stroke="none" />
+        <path
+          d="M8 11.7V4.65M5.35 7.3 8 4.65l2.65 2.65"
+          stroke="var(--primary-text)"
+          stroke-width="1.65"
+        />
+      </g>
+    </template>
+    <path v-else :d="paths[name] ?? paths.text" />
   </svg>
 </template>
 
@@ -41,5 +54,12 @@ const paths: Record<string, string> = {
   height: 18px;
   flex-shrink: 0;
   vertical-align: middle;
+}
+.ui-update-fluent,
+:root[data-skin='fluent'] .ui-update-line {
+  display: none;
+}
+:root[data-skin='fluent'] .ui-update-fluent {
+  display: inline;
 }
 </style>

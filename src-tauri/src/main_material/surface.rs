@@ -1,4 +1,4 @@
-use crate::{diag, platform, settings::Theme};
+use crate::{diag, platform, settings::ColorScheme};
 use anyhow::{anyhow, Result};
 use std::{cell::RefCell, mem::size_of};
 use windows::{
@@ -87,7 +87,7 @@ struct Surface {
 }
 
 impl Surface {
-    fn new(raw: isize, theme: Theme, strength: u32) -> Result<Self> {
+    fn new(raw: isize, color_scheme: ColorScheme, strength: u32) -> Result<Self> {
         let compositor = OwnedCompositor(Compositor::new()?);
         let interop: ICompositorDesktopInterop = compositor.0.cast()?;
         let target = unsafe { interop.CreateDesktopWindowTarget(platform::hwnd(raw), false)? };
@@ -98,7 +98,7 @@ impl Surface {
         tint.SetBrush(
             &compositor
                 .0
-                .CreateColorBrushWithColor(tint_color(theme, strength))?,
+                .CreateColorBrushWithColor(tint_color(color_scheme, strength))?,
         )?;
         root.Children()?.InsertAtTop(&blur)?;
         root.Children()?.InsertAtTop(&tint)?;
@@ -115,12 +115,12 @@ impl Surface {
         Ok(surface)
     }
 
-    fn set_appearance(&self, theme: Theme, strength: u32) -> Result<()> {
+    fn set_appearance(&self, color_scheme: ColorScheme, strength: u32) -> Result<()> {
         self.tint.SetBrush(
             &self
                 .compositor
                 .0
-                .CreateColorBrushWithColor(tint_color(theme, strength))?,
+                .CreateColorBrushWithColor(tint_color(color_scheme, strength))?,
         )?;
         Ok(())
     }
@@ -152,24 +152,24 @@ impl Drop for Surface {
     }
 }
 
-fn tint_color(theme: Theme, strength: u32) -> Color {
-    let base_alpha = match theme {
-        Theme::Light => 34,
-        Theme::Dark => 54,
+fn tint_color(color_scheme: ColorScheme, strength: u32) -> Color {
+    let base_alpha = match color_scheme {
+        ColorScheme::Light => 34,
+        ColorScheme::Dark => 54,
     };
     let remaining_tint =
         MAX_BACKDROP_STRENGTH * MAX_BACKDROP_STRENGTH - strength * MAX_BACKDROP_TRANSPARENCY;
     let reference_tint =
         MAX_BACKDROP_STRENGTH * (MAX_BACKDROP_STRENGTH - DEFAULT_BACKDROP_STRENGTH);
     let alpha = base_alpha * remaining_tint / reference_tint;
-    match theme {
-        Theme::Light => Color {
+    match color_scheme {
+        ColorScheme::Light => Color {
             A: alpha as u8,
             R: 248,
             G: 251,
             B: 249,
         },
-        Theme::Dark => Color {
+        ColorScheme::Dark => Color {
             A: alpha as u8,
             R: 21,
             G: 34,
@@ -178,7 +178,7 @@ fn tint_color(theme: Theme, strength: u32) -> Color {
     }
 }
 
-pub(super) fn create(raw: isize, theme: Theme, strength: u32) -> Result<()> {
+pub(super) fn create(raw: isize, color_scheme: ColorScheme, strength: u32) -> Result<()> {
     CONTEXT.with(|context| -> Result<()> {
         let mut context = context.borrow_mut();
         if context.is_none() {
@@ -186,7 +186,7 @@ pub(super) fn create(raw: isize, theme: Theme, strength: u32) -> Result<()> {
         }
         Ok(())
     })?;
-    let surface = Surface::new(raw, theme, strength)?;
+    let surface = Surface::new(raw, color_scheme, strength)?;
     SURFACE.with(|active| *active.borrow_mut() = Some(surface));
     Ok(())
 }
@@ -200,13 +200,13 @@ pub(super) fn active(raw: isize) -> bool {
     })
 }
 
-pub(super) fn set_appearance(theme: Theme, strength: u32) -> Result<()> {
+pub(super) fn set_appearance(color_scheme: ColorScheme, strength: u32) -> Result<()> {
     SURFACE.with(|active| {
         let active = active.borrow();
         active
             .as_ref()
             .ok_or_else(|| anyhow!("主窗口 HostBackdrop 不可用"))?
-            .set_appearance(theme, strength)
+            .set_appearance(color_scheme, strength)
     })
 }
 
@@ -265,10 +265,10 @@ mod tests {
 
     #[test]
     fn maximum_backdrop_strength_matches_previous_sixty_percent_tint() {
-        assert_eq!(tint_color(Theme::Light, MAX_BACKDROP_STRENGTH).A, 27);
-        assert_eq!(tint_color(Theme::Dark, MAX_BACKDROP_STRENGTH).A, 44);
-        assert_eq!(tint_color(Theme::Light, 50).A, 35);
-        assert_eq!(tint_color(Theme::Dark, 50).A, 56);
+        assert_eq!(tint_color(ColorScheme::Light, MAX_BACKDROP_STRENGTH).A, 27);
+        assert_eq!(tint_color(ColorScheme::Dark, MAX_BACKDROP_STRENGTH).A, 44);
+        assert_eq!(tint_color(ColorScheme::Light, 50).A, 35);
+        assert_eq!(tint_color(ColorScheme::Dark, 50).A, 56);
     }
 
     fn client_insets(window: HWND) -> [i32; 4] {
@@ -330,15 +330,22 @@ mod tests {
         assert_eq!(client_insets(handle), frame_insets);
         assert_eq!(corner_preference(handle), DWMWCP_ROUND.0);
 
-        let mut settings = crate::settings::Settings::default();
+        let mut settings = crate::settings::Settings {
+            theme: crate::settings::Theme::System,
+            ..Default::default()
+        };
         let mut width = 640;
         for skin in [
             crate::settings::Skin::Clipraft,
             crate::settings::Skin::Fluent,
         ] {
             settings.skin = skin;
-            for has_wallpaper in [false, true, false] {
-                super::super::sync_main(&window, &settings, has_wallpaper);
+            for (has_wallpaper, color_scheme) in [
+                (false, ColorScheme::Light),
+                (true, ColorScheme::Dark),
+                (false, ColorScheme::Dark),
+            ] {
+                super::super::sync_main(&window, &settings, has_wallpaper, color_scheme);
                 window
                     .set_size(tauri::PhysicalSize::new(width, 460))
                     .unwrap();
@@ -389,13 +396,13 @@ mod tests {
             .expect("host backdrop brush should be enabled");
         }
         let raw = window.0 .0 as isize;
-        create(raw, Theme::Light, DEFAULT_BACKDROP_STRENGTH)
+        create(raw, ColorScheme::Light, DEFAULT_BACKDROP_STRENGTH)
             .expect("host backdrop surface should be created");
         super::super::set(window.0, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE as i32)
             .expect("native window border should be disabled");
         assert!(active(raw));
         resize(raw).expect("hidden surface should resize");
-        set_appearance(Theme::Dark, 40).expect("hidden surface tint should update");
+        set_appearance(ColorScheme::Dark, 40).expect("hidden surface tint should update");
         clear(raw);
         assert!(!active(raw));
         let mut backdrop = -1_i32;

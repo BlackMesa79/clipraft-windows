@@ -4,8 +4,8 @@
   <p><strong>ClipRaft · 你的内容，随时可用。</strong></p>
   <p>Windows 剪贴板管理器 · 快速粘贴 · 多格式历史 · 本地加密</p>
   <p>
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.0/ClipRaft-0.8.0-windows-x64.zip"><strong>下载 0.8.0 · Windows x64</strong></a> ·
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.0">发布说明</a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.1/ClipRaft-0.8.1-windows-x64.zip"><strong>下载 0.8.1 · Windows x64</strong></a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.1">发布说明</a> ·
     <a href="https://github.com/BlackMesa79/clipraft-windows/issues">问题反馈</a>
   </p>
   <p>
@@ -66,6 +66,8 @@ Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持�
 
 两套主题都支持在「设置 → 外观 → 自定义背景」中导入本地图片。普通布局和紧凑布局可分别保存背景，普通布局的单列和双列共用同一张图。
 
+在「设置 → 外观 → 明暗」选择「跟随系统」，主窗口、快速面板与浮动预览即可随 Windows 切换浅色和深色。
+
 ## 核心功能
 
 ### ⚡ 按住选择，松手粘贴
@@ -113,7 +115,7 @@ Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持�
 
 ## 快速上手
 
-> **0.8.0** 已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.0/ClipRaft-0.8.0-windows-x64.zip) · [发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.0)。
+> **0.8.1** 已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.1/ClipRaft-0.8.1-windows-x64.zip) · [发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.1)。
 
 **运行环境：** Windows x64，需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。当前以 Windows 11 为主要验证环境，Windows 10 兼容性仍待进一步验证。
 
@@ -124,6 +126,8 @@ Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持�
 3. **查看完整历史**：按 **Alt + V** 或点击托盘图标打开主窗口，搜索、预览并整理记录。
 
 关闭主窗口后程序继续在托盘运行；完整退出请使用托盘菜单中的“退出”。
+
+「设置 → 关于」可以查看版本、检查正式更新，并按版本阅读更新内容。发现新版后可在默认浏览器打开 GitHub 下载页。
 
 <details>
 <summary>使用前了解</summary>

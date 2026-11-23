@@ -173,7 +173,7 @@ try {
     await evaluate(
       `Array.from(document.querySelectorAll('.settings-view fieldset'), fieldset => fieldset.dataset.category).sort()`,
     ),
-    ['appearance', 'general', 'history', 'hotkeys', 'privacy', 'storage'],
+    ['about', 'appearance', 'general', 'history', 'hotkeys', 'privacy', 'storage'],
   );
   assert.equal(
     await evaluate(

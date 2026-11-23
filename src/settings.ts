@@ -1,6 +1,9 @@
+export type ColorScheme = 'light' | 'dark';
+
 export interface Settings {
   skin: 'clipraft' | 'fluent';
-  theme: 'light' | 'dark';
+  theme: ColorScheme | 'system';
+  auto_check_updates: boolean;
   backdrop_strength: number;
   layout: 'list' | 'cards';
   compact: boolean;
@@ -51,9 +54,9 @@ export function tightened(next: Settings, old: Settings): boolean {
 
 const MAX_BACKDROP_TRANSPARENCY = 36;
 
-export function applyTheme(settings?: Settings) {
+export function applyTheme(settings: Settings | undefined, colorScheme: ColorScheme) {
   document.documentElement.dataset.skin = settings?.skin ?? 'clipraft';
-  document.documentElement.dataset.theme = settings?.theme ?? 'light';
+  document.documentElement.dataset.theme = colorScheme;
   const backdropOpacity = ((settings?.backdrop_strength ?? 22) * MAX_BACKDROP_TRANSPARENCY) / 100;
   document.documentElement.style.setProperty('--fluent-backdrop-opacity', `${backdropOpacity}%`);
 }
