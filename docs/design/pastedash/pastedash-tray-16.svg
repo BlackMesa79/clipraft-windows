@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" role="img" aria-labelledby="title">
-  <title id="title">PasteDash / 快贴 · 16像素托盘</title>
-  <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M6 4.5H5A1.5 1.5 0 0 0 3.5 6v6A1.5 1.5 0 0 0 5 13.5h5a1.5 1.5 0 0 0 1.5-1.5"/>
-    <rect x="6" y="2.5" width="3.5" height="3" rx="1"/>
-    <path d="M7 8.5h6.5M11 6l2.5 2.5L11 11"/>
-  </g>
-</svg>
