@@ -25,6 +25,7 @@ impl Storage {
         for (key, value) in json.as_object().context("序列化设置不是 JSON 对象")? {
             tx.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, &value.to_string()])?;
         }
+        tx.execute("DELETE FROM settings WHERE key='quick_plain_text'", [])?;
         if settings.sensitive_ttl_minutes == 0 {
             tx.execute("UPDATE items SET expires_at=NULL WHERE sensitive=1", [])?;
         }
@@ -67,6 +68,46 @@ mod tests {
             storage.save_settings(&loaded).unwrap();
             assert_eq!(raw_rows(&storage), before);
         }
+    }
+
+    #[test]
+    fn removed_quick_plain_text_setting_is_ignored_and_cleaned_on_save() {
+        let fixture = Fixture::new();
+        let mut storage = fixture.open();
+        storage
+            .conn
+            .execute(
+                "INSERT INTO settings(key,value) VALUES('quick_plain_text','true')",
+                [],
+            )
+            .unwrap();
+        let loaded = storage.load_settings().unwrap();
+        assert_eq!(loaded, Settings::default());
+        storage.save_settings(&loaded).unwrap();
+        assert!(!storage
+            .test_settings_rows()
+            .contains_key("quick_plain_text"));
+    }
+
+    #[test]
+    fn content_ignore_rules_roundtrip_and_invalid_regex_is_rejected() {
+        let fixture = Fixture::new();
+        let mut storage = fixture.open();
+        let mut settings = Settings::default();
+        settings.content_ignore_rules = vec![crate::settings::ContentIgnoreRule {
+            mode: crate::settings::ContentIgnoreMode::Regex,
+            value: r"private-[0-9]+".into(),
+        }];
+        storage.save_settings(&settings).unwrap();
+        assert_eq!(storage.load_settings().unwrap(), settings);
+        let invalid = Settings {
+            content_ignore_rules: vec![crate::settings::ContentIgnoreRule {
+                mode: crate::settings::ContentIgnoreMode::Regex,
+                value: "(".into(),
+            }],
+            ..Settings::default()
+        };
+        assert!(storage.save_settings(&invalid).is_err());
     }
 
     fn raw_rows(storage: &Storage) -> BTreeMap<String, String> {

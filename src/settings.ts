@@ -9,6 +9,7 @@ export interface Settings {
   compact: boolean;
   hide_on_blur: boolean;
   select_first_on_show: boolean;
+  content_ignore_rules: ContentIgnoreRule[];
   main_position: 'remember' | 'mouse';
   autostart: boolean;
   pause_on_start: boolean;
@@ -22,6 +23,10 @@ export interface Settings {
   main_hotkey: string;
   quick_hotkey: string;
   quick_visible_count: number;
+}
+export interface ContentIgnoreRule {
+  mode: 'keyword' | 'regex';
+  value: string;
 }
 export interface HotkeyOption {
   id: string;
@@ -43,6 +48,8 @@ export interface SettingOptions {
   quick_hotkeys: HotkeyOption[];
   bytes_per_mb: number;
   ignored_apps_max: number;
+  content_ignore_rules_max: number;
+  content_ignore_rule_length_max: number;
 }
 export function tightened(next: Settings, old: Settings): boolean {
   return (

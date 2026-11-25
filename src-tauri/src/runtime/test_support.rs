@@ -67,6 +67,7 @@ pub(super) fn state(root: &std::path::Path) -> State {
         retention_policy: Mutex::new(old.retention_policy()),
         hide_on_blur: AtomicBool::new(old.hide_on_blur),
         settings: Mutex::new(old),
+        content_rules: std::sync::RwLock::new(crate::settings::CompiledContentRules::default()),
         startup_error: Mutex::new(None),
         jobs: mpsc::sync_channel(1).0,
         control: mpsc::channel().0,

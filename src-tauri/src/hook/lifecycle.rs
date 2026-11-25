@@ -3,6 +3,10 @@ use super::*;
 use anyhow::Context;
 use std::sync::mpsc::{self, SyncSender};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+mod health;
+#[cfg(test)]
+use health::replace_registration;
+use health::{dispatch_health, last_input_tick, HealthTimer, HookHealth};
 
 struct Registration {
     keyboard: HHOOK,
@@ -93,6 +97,19 @@ fn run(reply: SyncSender<Result<()>>) {
         }
     };
     registration.publish_thread();
+    let timer = match HealthTimer::install() {
+        Ok(timer) => timer,
+        Err(error) => {
+            crate::app_events::record(
+                "hook health timer startup reply failed",
+                reply.send(Err(error)),
+            );
+            return;
+        }
+    };
+    if let Ok(last_input) = last_input_tick() {
+        LAST_HOOK_EVENT_TICK.store(last_input, Ordering::Release);
+    }
     if crate::diag::enabled() {
         crate::diag::write(format!(
             "hook_started thread={} receiver={}",
@@ -102,7 +119,13 @@ fn run(reply: SyncSender<Result<()>>) {
     }
     crate::app_events::record(
         "hook thread failed",
-        serve(reply, registration, || message_loop(read_message, dispatch)),
+        serve(reply, timer, move || {
+            let mut registration = Some(registration);
+            let mut health = HookHealth::default();
+            message_loop(read_message, |message| {
+                dispatch_health(message, &mut registration, &mut health)
+            })
+        }),
     );
 }
 

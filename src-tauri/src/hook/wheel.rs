@@ -10,11 +10,15 @@ pub(super) fn reset() {
 }
 
 pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if code < 0 || !matches!(w.0 as u32, WM_MOUSEWHEEL | WM_RBUTTONDOWN | WM_RBUTTONUP) {
+    if code < 0 {
         return CallNextHookEx(None, code, w, l);
     }
     let mouse = &*(l.0 as *const MSLLHOOKSTRUCT);
     if mouse.flags & LLMHF_INJECTED != 0 {
+        return CallNextHookEx(None, code, w, l);
+    }
+    LAST_HOOK_EVENT_TICK.store(mouse.time, Ordering::Relaxed);
+    if !matches!(w.0 as u32, WM_MOUSEWHEEL | WM_RBUTTONDOWN | WM_RBUTTONUP) {
         return CallNextHookEx(None, code, w, l);
     }
     let swallow = match w.0 as u32 {

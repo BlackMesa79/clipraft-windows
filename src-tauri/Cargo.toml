@@ -1,6 +1,6 @@
 [package]
 name = "clipraft-windows"
-version = "0.8.1"
+version = "0.8.2"
 license = "MIT"
 edition = "2021"
 
@@ -35,6 +35,7 @@ pinyin = "0.10"
 # 复用锁文件中已有的 HTML5 解析器与编码库，预览只输出安全块。
 dom_query = "=0.28.0"
 base64 = "=0.23.1"
+regex = "=1.13.1"
 window-vibrancy = "=0.8.1"
 
 [features]

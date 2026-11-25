@@ -1,6 +1,10 @@
 export type PanelNavigation =
   | 'previous-record'
   | 'next-record'
+  | 'first-record'
+  | 'last-record'
+  | 'previous-page'
+  | 'next-page'
   | 'previous-kind'
   | 'next-kind'
   | 'previous-group'
@@ -8,6 +12,10 @@ export type PanelNavigation =
 const plainNavigation: Readonly<Record<string, PanelNavigation>> = {
   ArrowUp: 'previous-record',
   ArrowDown: 'next-record',
+  Home: 'first-record',
+  End: 'last-record',
+  PageUp: 'previous-page',
+  PageDown: 'next-page',
   ArrowLeft: 'previous-kind',
   ArrowRight: 'next-kind',
 };

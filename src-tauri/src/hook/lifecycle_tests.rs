@@ -98,6 +98,46 @@ fn thread_publication_clears_before_even_failed_removal() {
 }
 
 #[test]
+fn hook_health_requires_two_sustained_gaps_and_uses_mouse_hook_events() {
+    let mut health = HookHealth::default();
+    assert!(!health.should_recover(20_000, 19_000, 20_000));
+    assert!(!health.should_recover(20_000, 0, 20_000));
+    assert!(health.should_recover(25_000, 0, 25_000));
+    assert!(!health.should_recover(40_000, 39_500, 40_000));
+}
+
+#[test]
+fn failed_hook_recovery_is_rate_limited_until_backoff_expires() {
+    let mut health = HookHealth::default();
+    assert!(!health.should_recover(20_000, 0, 20_000));
+    assert!(health.should_recover(25_000, 0, 25_000));
+    health.recovery_result(25_000, false);
+    assert!(!health.should_recover(90_000, 0, 30_000));
+    assert!(!health.should_recover(90_000, 0, 85_000));
+    assert!(health.should_recover(95_000, 0, 95_000));
+}
+
+#[test]
+fn recovery_releases_the_previous_registration_before_reinstalling() {
+    struct Registration(Events);
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("release");
+        }
+    }
+    let events = Events::default();
+    let mut registration = Some(Registration(events.clone()));
+    replace_registration(&mut registration, || {
+        assert_eq!(*events.borrow(), ["release"]);
+        events.borrow_mut().push("install");
+        Ok(Registration(events.clone()))
+    })
+    .unwrap();
+    assert_eq!(*events.borrow(), ["release", "install"]);
+    assert!(registration.is_some());
+}
+
+#[test]
 fn unstarted_thread_never_posts_to_caller_and_live_post_errors_propagate() {
     post_if_running(0, WM_QUIT, |_, _| panic!("must not target calling thread")).unwrap();
     post_if_running(0, CANCEL_PANEL_MESSAGE, |_, _| {

@@ -21,6 +21,14 @@ fn ignored_apps(state: &State) -> Result<Vec<String>, CaptureError> {
         .map_err(|_| CaptureError::SettingsUnavailable)
 }
 
+fn ignored_content(state: &State, text: Option<&str>) -> Result<bool, CaptureError> {
+    state
+        .content_rules
+        .read()
+        .map(|rules| rules.matches(text))
+        .map_err(|_| CaptureError::SettingsUnavailable)
+}
+
 fn store_capture(
     app: &AppHandle,
     state: &State,
@@ -72,9 +80,14 @@ fn capture_job(app: &AppHandle, state: &State, maintenance: &mut CaptureMaintena
         platform::hwnd(LISTENER.load(Ordering::Acquire)),
         || ignored_apps(state),
     ) {
-        Ok(Some(captured)) => {
-            store_capture(app, state, maintenance, captured);
-        }
+        Ok(Some(captured)) => match ignored_content(state, captured.clip.text().as_deref()) {
+            Ok(true) => diag::write(format!(
+                "capture sequence={} result=skipped reason=ignored_content",
+                captured.sequence
+            )),
+            Ok(false) => store_capture(app, state, maintenance, captured),
+            Err(error) => report(app, state, &error.to_string()),
+        },
         Ok(None) => {}
         Err(error) => report(app, state, &error.to_string()),
     }
@@ -134,6 +147,32 @@ mod tests {
         assert_eq!(ignored_apps(&state).unwrap(), ["updated.exe"]);
         poison(&state.settings);
         assert_eq!(ignored_apps(&state), Err(CaptureError::SettingsUnavailable));
+    }
+
+    #[test]
+    fn content_rules_apply_to_text_only_and_reload_after_settings_change() {
+        let fixture = Fixture::new("capture-content-rules");
+        let state = fixture.state();
+        let rules = vec![
+            crate::settings::ContentIgnoreRule {
+                mode: crate::settings::ContentIgnoreMode::Keyword,
+                value: "私密词".into(),
+            },
+            crate::settings::ContentIgnoreRule {
+                mode: crate::settings::ContentIgnoreMode::Regex,
+                value: r"token-[0-9]{3}".into(),
+            },
+        ];
+        state.settings.lock().unwrap().content_ignore_rules = rules.clone();
+        *state.content_rules.write().unwrap() =
+            crate::settings::compile_content_rules(&rules).unwrap();
+        assert!(ignored_content(&state, Some("私密词")).unwrap());
+        assert!(ignored_content(&state, Some("TOKEN-123")).unwrap());
+        assert!(!ignored_content(&state, Some("普通文本")).unwrap());
+        assert!(!ignored_content(&state, None).unwrap());
+        state.settings.lock().unwrap().content_ignore_rules.clear();
+        *state.content_rules.write().unwrap() = crate::settings::CompiledContentRules::default();
+        assert!(!ignored_content(&state, Some("私密词")).unwrap());
     }
 
     #[test]

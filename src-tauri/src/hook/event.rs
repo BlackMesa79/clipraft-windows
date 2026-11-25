@@ -23,6 +23,9 @@ pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -
         logical: crate::paster::logical(),
         trigger_sample: trigger_sample(keyboard.vkCode, keyboard.flags.contains(LLKHF_INJECTED)),
     };
+    if !event.injected {
+        LAST_HOOK_EVENT_TICK.store(keyboard.time, Ordering::Relaxed);
+    }
     PHYSICAL.store(
         corrected_modifiers(
             PHYSICAL.load(Ordering::SeqCst),

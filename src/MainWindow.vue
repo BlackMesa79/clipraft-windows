@@ -361,6 +361,7 @@ const pageLoading = ref(false),
 let listGeneration = 0,
   nextOffset = 0,
   retryRefresh = false;
+let navigationGeneration = 0;
 const selectedIds = ref(new Set<string>()),
   pendingDelete = ref<string[] | null>(null),
   deleting = ref(false);
@@ -375,6 +376,7 @@ function selectOnly(index: number) {
   selectedIds.value = new Set(anchorId ? [anchorId] : []);
 }
 function choose(index: number, event: MouseEvent) {
+  ++navigationGeneration;
   resetOnShow = false;
   if (deleting.value || organizing.value || pendingDelete.value) return;
   contextMenu.value = null;
@@ -859,30 +861,69 @@ async function recordKeydown(event: KeyboardEvent): Promise<void> {
   }
   await dispatchRecordKeydown(event);
 }
-async function prepareNavigation(event: KeyboardEvent): Promise<boolean> {
-  if (event.key === 'ArrowDown' && selected.value === items.value.length - 1 && hasMore.value) {
-    if (pageLoading.value || pageError.value) return false;
-    const generation = listGeneration;
-    await loadMore();
-    if (generation !== listGeneration) return false;
-    if (selected.value === items.value.length - 1 && hasMore.value) return false;
+function visiblePageStep(): number {
+  const list = listRoot.value;
+  if (!list) return 1;
+  const bounds = list.getBoundingClientRect();
+  const rows = new Set<number>();
+  for (const item of Array.from(list.querySelectorAll<HTMLElement>('.item'))) {
+    const rect = item.getBoundingClientRect();
+    if (rect.bottom > bounds.top && rect.top < bounds.bottom) rows.add(Math.round(rect.top));
   }
-  return true;
+  const columns = getComputedStyle(list).gridTemplateColumns.split(' ').length;
+  return Math.max(1, rows.size * columns);
 }
-async function navigateRecords(event: KeyboardEvent): Promise<void> {
+async function moveToIndex(index: number, sequence: number, generation: number): Promise<void> {
+  while (index >= items.value.length && hasMore.value) {
+    if (pageLoading.value) return;
+    if (pageError.value) return;
+    const previousLength = items.value.length;
+    await loadMore();
+    if (!navigationIsCurrent(sequence, generation)) return;
+    if (pageError.value || previousLength === items.value.length) return;
+  }
+  if (!navigationIsCurrent(sequence, generation) || !items.value.length) return;
+  selectOnly(Math.max(0, Math.min(index, items.value.length - 1)));
+}
+function navigationIsCurrent(sequence: number, generation: number): boolean {
+  return generation === listGeneration && sequence === navigationGeneration;
+}
+async function loadLastRecord(sequence: number, generation: number): Promise<void> {
+  if (pageLoading.value) return;
+  while (hasMore.value) {
+    const previousLength = items.value.length;
+    await loadMore();
+    if (!navigationIsCurrent(sequence, generation)) return;
+    if (pageError.value || previousLength === items.value.length) break;
+  }
+  if (navigationIsCurrent(sequence, generation) && items.value.length)
+    selectOnly(items.value.length - 1);
+}
+async function navigateRecords(event: KeyboardEvent, action: PanelNavigation): Promise<void> {
   event.preventDefault();
   resetOnShow = false;
-  const generation = listGeneration;
-  if (!(await prepareNavigation(event)) || generation !== listGeneration) return;
-  if (items.value.length)
-    selectOnly(
-      (selected.value + (event.key === 'ArrowDown' ? 1 : -1) + items.value.length) %
-        items.value.length,
-    );
   contextMenu.value = null;
-  void nextTick(() => {
-    if (generation === listGeneration) focusSelectedRecord();
-  });
+  const sequence = ++navigationGeneration;
+  const generation = listGeneration;
+  const current = selected.value;
+  const targetByAction: Readonly<Record<PanelNavigation, number | undefined>> = {
+    'previous-record': Math.max(0, current - 1),
+    'next-record': current + 1,
+    'first-record': 0,
+    'last-record': undefined,
+    'previous-page': Math.max(0, current - visiblePageStep()),
+    'next-page': current + visiblePageStep(),
+    'previous-kind': undefined,
+    'next-kind': undefined,
+    'previous-group': undefined,
+    'next-group': undefined,
+  };
+  if (action === 'last-record') await loadLastRecord(sequence, generation);
+  else await moveToIndex(targetByAction[action] ?? current, sequence, generation);
+  if (navigationIsCurrent(sequence, generation))
+    void nextTick(() => {
+      if (navigationIsCurrent(sequence, generation)) focusSelectedRecord();
+    });
 }
 function canRestoreFilterFocus(): boolean {
   if (settingsOpen.value || organizing.value || menuInteracting.value) return false;
@@ -896,13 +937,19 @@ function focusSelectedRecord(): void {
 }
 function navigationTarget(event: KeyboardEvent, action: PanelNavigation): boolean {
   const target = event.target instanceof Element ? event.target : document.activeElement;
-  if (target === searchInput.value) {
-    return !action.endsWith('kind') || !query.value.length;
-  }
+  if (target === searchInput.value) return searchNavigation(action, query.value.length > 0);
   if (!target || target === document.body || target === document.documentElement) return true;
   if (target.closest('.list, .empty')) return true;
   if (target.closest('.kind-filters button, .group-sidebar button[aria-pressed]')) return true;
   return false;
+}
+function searchNavigation(action: PanelNavigation, hasQuery: boolean): boolean {
+  return (
+    action === 'previous-record' ||
+    action === 'next-record' ||
+    action.endsWith('group') ||
+    (action.endsWith('kind') && !hasQuery)
+  );
 }
 function changeKeyboardFilter(event: KeyboardEvent, action: PanelNavigation): void {
   const target = event.target instanceof Element ? event.target : document.activeElement;
@@ -925,12 +972,24 @@ function changeKeyboardFilter(event: KeyboardEvent, action: PanelNavigation): vo
     );
 }
 function navigatePanel(event: KeyboardEvent): boolean {
-  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return false;
+  if (
+    ![
+      'ArrowUp',
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+      'Home',
+      'End',
+      'PageUp',
+      'PageDown',
+    ].includes(event.key)
+  )
+    return false;
   const action = panelNavigation(event);
   if (!action || busy.value || !navigationTarget(event, action)) return true;
   event.preventDefault();
-  if (action.endsWith('record')) {
-    void navigateRecords(event);
+  if (action.endsWith('record') || action.endsWith('page')) {
+    void navigateRecords(event, action);
     return true;
   }
   changeKeyboardFilter(event, action);

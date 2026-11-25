@@ -2262,6 +2262,86 @@ try {
       await evaluate("document.querySelector('header .brand p').textContent.includes('Alt + C')"),
     );
   });
+  await test('K2.4 忽略内容规则限制、正则校验与保存', async () => {
+    await metrics();
+    await nav();
+    await click('.settings-toggle');
+    await pause(50);
+    await click('.settings-nav button:nth-child(4)');
+    await click('button.add-content-ignore-rule');
+    assert(await evaluate("!!document.querySelector('.settings-feedback .error')"));
+    const input =
+      "[...document.querySelectorAll('[data-category=privacy] input')].find(node=>node.getAttribute('aria-label')==='第 1 条规则内容')";
+    await evaluate(
+      `(()=>{const control=${input};control.value='secret';control.dispatchEvent(new Event('input',{bubbles:true}))})()`,
+    );
+    await click('.settings-view button[type=submit]');
+    await pause(50);
+    assert.deepEqual(await evaluate('window.settings.content_ignore_rules'), [
+      { mode: 'keyword', value: 'secret' },
+    ]);
+    await click('.settings-back');
+    await click('.settings-toggle');
+    await pause(50);
+    await click('.settings-nav button:nth-child(4)');
+    await evaluate(
+      "(()=>{const mode=document.querySelector('[aria-label=\"第 1 条规则类型\"]');mode.value='regex';mode.dispatchEvent(new Event('change',{bubbles:true}));const input=document.querySelector('[aria-label=\"第 1 条规则内容\"]');input.value='(';input.dispatchEvent(new Event('input',{bubbles:true}))})()",
+    );
+    assert(
+      await evaluate(
+        "document.querySelector('.settings-feedback .error')?.textContent.includes('正则表达式无效')",
+      ),
+    );
+  });
+  await test('Fluent 错误、确认与状态提示使用主题化信息条样式', async () => {
+    await metrics();
+    await nav();
+    await appearance({ skin: 'fluent', theme: 'light' });
+    await click('.settings-toggle');
+    await until(
+      () => evaluate("!!document.querySelector('.settings-feedback')"),
+      'Fluent 设置未打开',
+    );
+    for (const theme of ['light', 'dark']) {
+      await appearance({ skin: 'fluent', theme });
+      await evaluate(`(()=>{
+        document.querySelector('#fluent-message-fixtures')?.remove();
+        const main=document.querySelector('.main-window');
+        main.insertAdjacentHTML('beforeend', '<div id="fluent-message-fixtures" style="position:fixed;z-index:10000;inset:132px 16px auto 172px;display:grid;gap:8px"><div id="fluent-alert" class="error" role="alert">示例错误提示</div><div id="fluent-confirm" class="delete-confirm" role="alertdialog"><span>确认删除示例记录？</span><button class="confirm-delete">确认</button><button class="cancel-delete">取消</button></div></div>');
+        document.querySelector('.settings-feedback').insertAdjacentHTML('beforeend','<p id="fluent-status" role="status">设置已保存</p>');
+      })()`);
+      const styles = await evaluate(`(()=>{
+        const get=(selector,pseudo)=>getComputedStyle(document.querySelector(selector),pseudo);
+        const alert=get('#fluent-alert');
+        const confirm=get('#fluent-confirm');
+        const status=get('#fluent-status');
+        return {
+          alertBackground:alert.backgroundColor,
+          alertBorder:alert.borderInlineStartColor,
+          alertIcon:get('#fluent-alert','::before').content,
+          confirmBackground:confirm.backgroundColor,
+          confirmAction:get('#fluent-confirm .confirm-delete').backgroundColor,
+          cancelAction:get('#fluent-confirm .cancel-delete').backgroundColor,
+          statusBackground:status.backgroundColor,
+          statusIcon:get('#fluent-status','::before').content,
+          radius:confirm.borderRadius
+        };
+      })()`);
+      assert.notEqual(
+        styles.alertBackground,
+        await evaluate(
+          "getComputedStyle(document.documentElement).getPropertyValue('--error-bg').trim()",
+        ),
+      );
+      assert.equal(styles.alertIcon, '"!"');
+      assert.equal(styles.statusIcon, '"i"');
+      assert.notEqual(styles.confirmAction, styles.cancelAction);
+      assert.equal(styles.radius, '4px');
+      if (theme === 'dark') await capture('fluent-message-dark');
+      await evaluate("document.querySelector('#fluent-status')?.remove()");
+    }
+    await evaluate("document.querySelector('#fluent-message-fixtures')?.remove()");
+  });
   await test('R19 启动录制的迟到响应在退出设置后再次清理，不遗留录制', async () => {
     await metrics();
     await nav();
@@ -2877,6 +2957,10 @@ try {
       ArrowDown: 40,
       ArrowLeft: 37,
       ArrowRight: 39,
+      Home: 36,
+      End: 35,
+      PageUp: 33,
+      PageDown: 34,
       Enter: 13,
       Escape: 27,
       f: 70,
@@ -2910,7 +2994,7 @@ try {
       {id:'k1-link',kind:'text',is_link:true,summary:'https://example.invalid/',formats:['CF_UNICODETEXT'],files:[],group_id:null},
       {id:'k1-image',kind:'image',summary:'合成图片',formats:['PNG'],files:[],group_id:8},
       {id:'k1-file',kind:'files',summary:'合成文件',formats:['CF_HDROP'],files:['C:/synthetic.txt'],group_id:null}
-    ];const base=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
+    ];window.k1BaseInvoke=window.__TAURI_INTERNALS__.invoke;const base=window.k1BaseInvoke;window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{
       if(cmd!=='list_items')return base(cmd,args);
       window.calls.push({cmd,args});const f=args.filter??{};
       const rows=window.rows.filter(r=>(!f.kind||(f.kind==='link'?r.is_link:r.kind===f.kind))&&(!f.query||r.summary.includes(f.query))&&(f.group_id==null||(f.group_id===-1?r.group_id==null:r.group_id===f.group_id))).slice(args.offset,args.offset+args.limit);
@@ -2921,6 +3005,38 @@ try {
     await evaluate("document.querySelector('.item').focus()");
   };
   for (const mode of ['list', 'cards', 'compact']) {
+    await test('K2.1 三布局首尾停止、翻页与跨页 Home/End ' + mode, async () => {
+      await k1Setup(mode);
+      await evaluate(
+        `window.rows=Array.from({length:205},(_,index)=>({id:'record-'+index,kind:'text',summary:'记录 '+index,formats:['CF_UNICODETEXT'],files:[],group_id:7}));window.emitEvent('history-changed')`,
+      );
+      await until(async () => (await selected()) === 'record-0', 'K2.1 首页面未就绪');
+      const firstPageCalls = await evaluate("window.calls.filter(c=>c.cmd==='list_items').length");
+      await k1Key('ArrowUp');
+      assert.equal(await selected(), 'record-0');
+      assert.equal(
+        await evaluate("window.calls.filter(c=>c.cmd==='list_items').length"),
+        firstPageCalls,
+      );
+      const pageStep = await evaluate(
+        `(()=>{const list=document.querySelector('.list'),bounds=list.getBoundingClientRect(),tops=new Set([...list.querySelectorAll('.item')].filter(row=>{const rect=row.getBoundingClientRect();return rect.bottom>bounds.top&&rect.top<bounds.bottom}).map(row=>Math.round(row.getBoundingClientRect().top)));return tops.size*(getComputedStyle(list).gridTemplateColumns.split(' ').length)})()`,
+      );
+      await k1Key('PageDown');
+      await until(
+        async () => (await selected()) === 'record-' + pageStep,
+        'K2.1 PageDown 步长错误',
+      );
+      await k1Key('PageUp');
+      await until(async () => (await selected()) === 'record-0', 'K2.1 PageUp 步长错误');
+      await k1Key('End');
+      await until(async () => (await selected()) === 'record-204', 'K2.1 End 未加载全部分页');
+      assert(await evaluate("document.activeElement.dataset.id==='record-204'"));
+      await k1Key('ArrowDown');
+      assert.equal(await selected(), 'record-204');
+      await k1Key('Home');
+      await until(async () => (await selected()) === 'record-0', 'K2.1 Home 未回到首条');
+      assert(await evaluate("document.activeElement.dataset.id==='record-0'"));
+    });
     await test('K1 三布局左右类型循环及空态继续切换 ' + mode, async () => {
       await k1Setup(mode);
       const labels = ['文本', '图片', '文件', '链接', mode === 'compact' ? '全部类型' : '全部'];
@@ -2961,6 +3077,14 @@ try {
       await k1Key('f', 2);
       await send('Input.insertText', { text: '测试文本' });
       await pause(190);
+      await evaluate("document.querySelector('.searchbox input').setSelectionRange(3,3)");
+      await k1Key('Home');
+      assert.equal(await evaluate("document.querySelector('.searchbox input').selectionStart"), 0);
+      await k1Key('End');
+      assert.equal(
+        await evaluate("document.querySelector('.searchbox input').selectionStart"),
+        '测试文本'.length,
+      );
       await evaluate("document.querySelector('.searchbox input').setSelectionRange(1,1)");
       await k1Key('ArrowRight');
       assert.equal(await evaluate("document.querySelector('.searchbox input').selectionStart"), 2);
@@ -2985,6 +3109,54 @@ try {
       assert.equal(await evaluate("document.querySelector('.searchbox input').value"), '测试文本');
     });
   }
+  await test('K2.1 End加载期间筛选变更取消旧跳转且分页失败停在已加载末尾', async () => {
+    await k1Setup('list');
+    await appearance({ select_first_on_show: true });
+    await evaluate(
+      `window.rows=Array.from({length:205},(_,index)=>({id:'record-'+index,kind:'text',summary:'记录 '+index,formats:['CF_UNICODETEXT'],files:[],group_id:7}));window.emitEvent('main-shown')`,
+    );
+    await until(
+      async () =>
+        (await selected()) === 'record-0' &&
+        (await evaluate("document.querySelectorAll('.item').length")) === 100,
+      'K2.1 取消用列表未就绪',
+    );
+    await until(
+      () => evaluate("document.querySelector('.list').getAttribute('aria-busy')==='false'"),
+      'K2.1 取消用列表仍在加载',
+    );
+    await evaluate("document.querySelector('.item').focus()");
+    await evaluate('window.k1Requests=[];window.k1HoldLists=true');
+    await k1Key('End');
+    await until(() => evaluate('window.k1Requests.length>0'), 'K2.1 End 分页请求未挂起');
+    await evaluate(
+      "(()=>{const input=document.querySelector('.searchbox input');input.focus();input.value='记录 1';input.dispatchEvent(new Event('input',{bubbles:true}))})()",
+    );
+    await pause(30);
+    await evaluate('window.k1HoldLists=false;window.k1Requests[0].release()');
+    await until(async () => (await selected()) === 'record-1', '筛选后的新列表未加载');
+    assert(await evaluate("document.activeElement.matches('.searchbox input')"));
+    await evaluate(
+      "(()=>{const input=document.querySelector('.searchbox input');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}))})()",
+    );
+    await pause(190);
+    await evaluate(
+      `window.rows=Array.from({length:205},(_,index)=>({id:'record-'+index,kind:'text',summary:'记录 '+index,formats:['CF_UNICODETEXT'],files:[],group_id:7}));window.emitEvent('history-changed')`,
+    );
+    await until(async () => (await selected()) === 'record-0', '分页失败用列表未就绪');
+    await evaluate(
+      "(()=>{window.k1FailureBase=window.__TAURI_INTERNALS__.invoke;window.__TAURI_INTERNALS__.invoke=async(cmd,args={})=>{if(cmd==='list_items'&&args.offset>=100)throw Error('合成分页失败');return window.k1FailureBase(cmd,args)}})()",
+    );
+    await evaluate("document.querySelector('.item').focus()");
+    await k1Key('End');
+    await until(async () => (await selected()) === 'record-99', 'End 分页失败后未停在已加载末尾');
+    assert(
+      await evaluate(
+        "document.querySelector('.error[role=alert]')?.textContent.includes('加载下一页失败')",
+      ),
+    );
+    await appearance({ select_first_on_show: false });
+  });
   await test('K1 空搜索左右切换，焦点控件保留与类型按钮跟随', async () => {
     await k1Setup('list');
     await k1Key('f', 2);

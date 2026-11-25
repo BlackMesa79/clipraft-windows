@@ -225,6 +225,10 @@ fn portable_snapshot_filters_settings_without_changing_source_or_raw_backup() {
     let settings = crate::settings::Settings {
         autostart: true,
         auto_check_updates: true,
+        content_ignore_rules: vec![crate::settings::ContentIgnoreRule {
+            mode: crate::settings::ContentIgnoreMode::Keyword,
+            value: "private marker".into(),
+        }],
         pause_on_start: true,
         theme: crate::settings::Theme::System,
         backdrop_strength: 37,

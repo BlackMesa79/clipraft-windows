@@ -200,6 +200,36 @@ const hotkeyWarnings = computed(() => {
   }
   return warnings;
 });
+function validateContentRules(
+  rules: Settings['content_ignore_rules'],
+  maximumCount: number,
+  maximumLength: number,
+): string {
+  if (rules.length > maximumCount) return `忽略内容规则最多 ${maximumCount} 条`;
+  for (const [index, rule] of rules.entries()) {
+    const error = contentIgnoreRuleError(rule, index, maximumLength);
+    if (error) return error;
+  }
+  return '';
+}
+function contentIgnoreRuleError(
+  rule: Settings['content_ignore_rules'][number],
+  index: number,
+  maximumLength = options.value?.content_ignore_rule_length_max ?? 200,
+): string {
+  if (!rule.value.trim()) return `第 ${index + 1} 条忽略内容规则不能为空`;
+  if ([...rule.value].length > maximumLength)
+    return `第 ${index + 1} 条忽略内容规则不能超过 ${maximumLength} 个字符`;
+  if (rule.mode !== 'regex') return '';
+  if (/\\[1-9]|\\k<|\(\?(?:[=!]|<[=!])/.test(rule.value))
+    return `第 ${index + 1} 条正则表达式包含不支持的语法`;
+  try {
+    new RegExp(rule.value);
+  } catch {
+    return `第 ${index + 1} 条正则表达式无效`;
+  }
+  return '';
+}
 const validation = computed(() => {
   if (!draft.value || !options.value) return '';
   if (hotkeyValidation.value) return hotkeyValidation.value;
@@ -210,8 +240,21 @@ const validation = computed(() => {
       return `${field.label}必须在 ${range(field.key).min} 到 ${range(field.key).max} 之间，且字节数或条数为整数`;
   }
   if (appName.value.trim()) return '请先添加忽略程序，或清空输入框';
-  return '';
+  return validateContentRules(
+    draft.value.content_ignore_rules,
+    options.value.content_ignore_rules_max,
+    options.value.content_ignore_rule_length_max,
+  );
 });
+function addContentIgnoreRule(): void {
+  if (!draft.value || !options.value) return;
+  if (draft.value.content_ignore_rules.length >= options.value.content_ignore_rules_max) {
+    error.value = `忽略内容规则最多 ${options.value.content_ignore_rules_max} 条`;
+    return;
+  }
+  draft.value.content_ignore_rules.push({ mode: 'keyword', value: '' });
+  error.value = '';
+}
 watch(
   draft,
   () => {
@@ -277,6 +320,34 @@ watch(
     scheduleHotkeyCheck();
   },
 );
+function compatibleAppearanceSettings(settings: Settings): Partial<Settings> {
+  return {
+    theme: settings.theme ?? 'light',
+    auto_check_updates: settings.auto_check_updates === true,
+    skin: settings.skin ?? 'clipraft',
+    layout: settings.layout ?? 'list',
+    compact: settings.compact ?? false,
+    hide_on_blur: settings.hide_on_blur ?? false,
+    select_first_on_show: settings.select_first_on_show ?? false,
+  };
+}
+function compatibleContentSettings(settings: Settings): Partial<Settings> {
+  return {
+    content_ignore_rules: settings.content_ignore_rules ?? [],
+  };
+}
+function compatibleMainPosition(settings: Settings): Settings['main_position'] {
+  if ((settings as { main_position?: string }).main_position === 'input') return 'mouse';
+  return settings.main_position ?? 'remember';
+}
+function compatibleSettings(settings: Settings): Settings {
+  return {
+    ...settings,
+    ...compatibleAppearanceSettings(settings),
+    ...compatibleContentSettings(settings),
+    main_position: compatibleMainPosition(settings),
+  };
+}
 async function load() {
   error.value = '';
   saving.value = true;
@@ -285,20 +356,7 @@ async function load() {
       invoke<Settings>('get_settings'),
       invoke<SettingOptions>('get_setting_options'),
     ]);
-    const compatible = {
-      ...settings,
-      theme: settings.theme ?? 'light',
-      auto_check_updates: settings.auto_check_updates === true,
-      skin: settings.skin ?? 'clipraft',
-      layout: settings.layout ?? 'list',
-      compact: settings.compact ?? false,
-      hide_on_blur: settings.hide_on_blur ?? false,
-      select_first_on_show: settings.select_first_on_show ?? false,
-      main_position:
-        (settings as { main_position?: string }).main_position === 'input'
-          ? 'mouse'
-          : (settings.main_position ?? 'remember'),
-    } as Settings;
+    const compatible = compatibleSettings(settings);
     original.value = clone(compatible);
     draft.value = clone(compatible);
     options.value = opts;
@@ -642,6 +700,36 @@ onUnmounted(() => {
                 @keydown.enter.prevent="addApp"
               /><button type="button" @click="addApp">添加</button></div
             >
+            <p id="content-ignore-heading">忽略内容规则</p>
+            <ul class="ignored-apps" aria-labelledby="content-ignore-heading">
+              <li v-for="(rule, index) in draft.content_ignore_rules" :key="index">
+                <select v-model="rule.mode" :aria-label="`第 ${index + 1} 条规则类型`">
+                  <option value="keyword">包含关键词</option>
+                  <option value="regex">正则表达式</option>
+                </select>
+                <input
+                  v-model="rule.value"
+                  :maxlength="options.content_ignore_rule_length_max"
+                  :aria-label="`第 ${index + 1} 条规则内容`"
+                  :placeholder="rule.mode === 'regex' ? '输入正则表达式' : '输入关键词'"
+                />
+                <small v-if="contentIgnoreRuleError(rule, index)" class="error">{{
+                  contentIgnoreRuleError(rule, index)
+                }}</small>
+                <button
+                  type="button"
+                  :aria-label="`删除第 ${index + 1} 条忽略规则`"
+                  @click="draft.content_ignore_rules.splice(index, 1)"
+                  >删除</button
+                >
+              </li>
+            </ul>
+            <button type="button" class="add-content-ignore-rule" @click="addContentIgnoreRule"
+              >添加忽略内容规则</button
+            >
+            <p class="detail-note"
+              >命中后整条文本不记录，关键词忽略大小写；规则只影响之后的复制。</p
+            >
           </fieldset>
           <fieldset :disabled="busy" v-show="category === 'hotkeys'" data-category="hotkeys">
             <legend>快捷键</legend>
@@ -775,7 +863,11 @@ onUnmounted(() => {
                 >将立即删除
                 {{ pending.count }} 条记录。预估后新增或到期的记录可能使实际数量变化。</span
               >
-              <button type="button" :disabled="busy || archiveBusy" @click="confirm"
+              <button
+                type="button"
+                class="confirm-delete"
+                :disabled="busy || archiveBusy"
+                @click="confirm"
                 >确认保存并清理</button
               ><button type="button" :disabled="busy" @click="pending = undefined">取消</button>
             </div>

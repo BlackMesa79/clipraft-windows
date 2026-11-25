@@ -4,6 +4,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+mod content_rules;
+pub use content_rules::{
+    compile_content_rules, content_matches, validate_content_rules, CompiledContentRules,
+    ContentIgnoreMode, ContentIgnoreRule, MAX_CONTENT_IGNORE_RULES, MAX_CONTENT_IGNORE_RULE_LENGTH,
+};
 
 pub const MB: u64 = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +215,8 @@ pub struct Settings {
     #[serde(default)]
     pub select_first_on_show: bool,
     #[serde(default)]
+    pub content_ignore_rules: Vec<ContentIgnoreRule>,
+    #[serde(default)]
     pub main_position: MainPosition,
     pub autostart: bool,
     pub pause_on_start: bool,
@@ -237,6 +244,7 @@ impl Default for Settings {
             compact: false,
             hide_on_blur: false,
             select_first_on_show: false,
+            content_ignore_rules: Vec::new(),
             main_position: MainPosition::Remember,
             autostart: false,
             pause_on_start: false,
@@ -355,6 +363,7 @@ impl Settings {
             }
         }
         normalize_ignored_apps(&self.ignored_apps)?;
+        validate_content_rules(&self.content_ignore_rules)?;
         validate_shortcut(self.main_hotkey.shortcut())?;
         validate_shortcut(self.quick_hotkey.shortcut())
     }
@@ -393,6 +402,8 @@ pub struct SettingOptions {
     quick_hotkeys: Vec<HotkeyOption>,
     pub bytes_per_mb: u64,
     ignored_apps_max: usize,
+    content_ignore_rules_max: usize,
+    content_ignore_rule_length_max: usize,
 }
 pub fn options() -> SettingOptions {
     let option = |id: Hotkey| HotkeyOption {
@@ -407,6 +418,8 @@ pub fn options() -> SettingOptions {
         quick_hotkeys: QUICK_HOTKEYS.into_iter().map(option).collect(),
         bytes_per_mb: MB,
         ignored_apps_max: 256,
+        content_ignore_rules_max: MAX_CONTENT_IGNORE_RULES,
+        content_ignore_rule_length_max: MAX_CONTENT_IGNORE_RULE_LENGTH,
     }
 }
 

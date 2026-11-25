@@ -123,12 +123,14 @@ fn claim_event(gate: &AtomicU32) -> bool {
     result.is_ok() || result == Err(1)
 }
 pub const ACTION_MESSAGE: u32 = WM_APP + 80;
+pub const HEALTH_MESSAGE: u32 = WM_APP + 83;
 const CANCEL_PANEL_MESSAGE: u32 = WM_APP + 82;
 pub const MODIFIER_KEYS: [u16; 8] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C];
 pub static PHYSICAL: AtomicU16 = AtomicU16::new(0);
 pub static READY: AtomicBool = AtomicBool::new(false);
 static RECEIVER: AtomicU32 = AtomicU32::new(0);
 static THREAD: AtomicU32 = AtomicU32::new(0);
+pub static LAST_HOOK_EVENT_TICK: AtomicU32 = AtomicU32::new(0);
 static CANCEL_PANEL: AtomicBool = AtomicBool::new(false);
 
 // 消息循环即使掉钩也能取消；投递失败时保留标志，供后续回调兜底。

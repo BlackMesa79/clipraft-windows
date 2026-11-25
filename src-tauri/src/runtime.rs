@@ -184,6 +184,7 @@ pub struct State {
     pub retention_policy: Mutex<RetentionPolicy>,
     pub hide_on_blur: AtomicBool,
     pub settings: Mutex<Settings>,
+    pub content_rules: std::sync::RwLock<crate::settings::CompiledContentRules>,
     pub startup_error: Mutex<Option<String>>,
     pub jobs: SyncSender<Job>,
     pub control: Sender<Control>,
@@ -492,6 +493,9 @@ pub fn start(app: AppHandle, mut storage: Storage, smoke: bool) -> Result<Arc<St
         retention_policy: Mutex::new(policy),
         hide_on_blur: AtomicBool::new(settings.hide_on_blur),
         settings: Mutex::new(settings.clone()),
+        content_rules: std::sync::RwLock::new(crate::settings::compile_content_rules(
+            &settings.content_ignore_rules,
+        )?),
         startup_error: Mutex::new(None),
         jobs: jobs.clone(),
         control: control.clone(),
@@ -1165,6 +1169,10 @@ mod settings_tests {
             main_hotkey: Hotkey::CtrlAltV,
             max_items: 50,
             hide_on_blur: true,
+            content_ignore_rules: vec![crate::settings::ContentIgnoreRule {
+                mode: crate::settings::ContentIgnoreMode::Keyword,
+                value: "private marker".into(),
+            }],
             ..Settings::default()
         };
         assert_eq!(
@@ -1183,10 +1191,20 @@ mod settings_tests {
         assert!(state.hide_on_blur.load(Ordering::Acquire));
         assert!(state.startup_error.try_lock().unwrap().is_none());
         assert!(state.capture_context.try_lock().is_ok());
+        assert!(state
+            .content_rules
+            .read()
+            .unwrap()
+            .matches(Some("PRIVATE MARKER")));
         assert!(hook::reserve_configuration().is_ok());
         assert_eq!(fixture.fake.lock().unwrap().current, Some(Hotkey::CtrlAltV));
         apply_settings(app, &state, Settings::default(), false).unwrap();
         assert_eq!(fixture.fake.lock().unwrap().current, Some(Hotkey::AltV));
+        assert!(!state
+            .content_rules
+            .read()
+            .unwrap()
+            .matches(Some("PRIVATE MARKER")));
     }
 
     // T3-2/3：调用真实 apply_settings 与 change_main_hotkey；仅替换系统注册结果。

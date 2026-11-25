@@ -58,6 +58,15 @@ pub(super) fn action(msg: &MSG) {
     current_action(msg, paste_generation, paster::mask_shortcut, send);
 }
 
+pub(super) fn health(msg: &MSG) {
+    let message = if msg.wParam.0 == 1 {
+        "键盘钩子已自动恢复"
+    } else {
+        "键盘钩子恢复失败，请重启应用后重试"
+    };
+    send(Control::Report(message.into()));
+}
+
 fn current_action(
     msg: &MSG,
     current: impl FnOnce() -> u64,

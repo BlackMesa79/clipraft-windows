@@ -208,6 +208,7 @@ impl Listener {
             }
             hook::RECORD_MESSAGE => broker_messages::recording(msg),
             hook::ACTION_MESSAGE => broker_messages::action(msg),
+            hook::HEALTH_MESSAGE => broker_messages::health(msg),
             _ => unsafe {
                 // TranslateMessage 的 false 表示没有字符消息，并非失败。
                 let _ = TranslateMessage(msg);

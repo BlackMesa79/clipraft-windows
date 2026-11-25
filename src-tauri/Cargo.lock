@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "clipraft-windows"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -416,6 +416,7 @@ dependencies = [
  "hkdf",
  "image",
  "pinyin",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

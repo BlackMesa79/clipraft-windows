@@ -14,6 +14,12 @@
   --select: #e3f0ec;
   --warning: #795118;
   --danger: #942f2f;
+  --fluent-alert-surface: color-mix(in srgb, var(--danger) 8%, var(--fluent-card));
+  --fluent-alert-border: color-mix(in srgb, var(--danger) 28%, var(--line));
+  --fluent-status-surface: color-mix(in srgb, var(--accent) 8%, var(--fluent-card));
+  --fluent-status-border: color-mix(in srgb, var(--accent) 28%, var(--line));
+  --fluent-danger-action-bg: #942f2f;
+  --fluent-danger-action-text: #fff;
   --primary-text: #fff;
   --fluent-primary-hover: #125b55;
   --control-bg: var(--surface);
@@ -69,6 +75,8 @@
   --select: #304843;
   --warning: #f1c480;
   --danger: #ffa89f;
+  --fluent-danger-action-bg: #ffa89f;
+  --fluent-danger-action-text: #202927;
   --control-border: #738580;
   --primary-text: #122a24;
   --fluent-primary-hover: #96dfcf;
@@ -191,6 +199,138 @@
     background: Canvas;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+}
+
+[data-skin='fluent']
+  :is(.main-window, .archive-dialog, .staging-cleanup-dialog, .floating-preview)
+  .error[role='alert'],
+[data-skin='fluent'] .main-window .delete-confirm[role='alertdialog'] {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--fluent-alert-border);
+  border-inline-start: 3px solid var(--danger);
+  border-radius: var(--radius-control);
+  background: var(--fluent-alert-surface);
+  color: var(--text);
+  box-shadow: none;
+}
+[data-skin='fluent']
+  :is(.main-window, .archive-dialog, .staging-cleanup-dialog, .floating-preview)
+  .error[role='alert']::before,
+[data-skin='fluent'] .main-window .delete-confirm[role='alertdialog']::before {
+  content: '!';
+  display: grid;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--danger) 14%, var(--fluent-card));
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 700;
+}
+[data-skin='fluent'] .main-window .delete-confirm[role='alertdialog'] {
+  flex-wrap: wrap;
+}
+[data-skin='fluent'] .main-window .delete-confirm .confirm-delete {
+  border-color: transparent;
+  border-radius: var(--radius-control);
+  background: var(--fluent-danger-action-bg);
+  color: var(--fluent-danger-action-text);
+  font-weight: 600;
+}
+[data-skin='fluent'] .main-window .delete-confirm .cancel-delete,
+[data-skin='fluent'] .main-window .delete-confirm button:not(.confirm-delete, .cancel-delete) {
+  border-color: var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+}
+[data-skin='fluent']
+  .main-window
+  .delete-confirm
+  :is(.confirm-delete, .cancel-delete):enabled:hover {
+  filter: brightness(var(--primary-hover-brightness));
+}
+[data-skin='fluent']
+  .main-window
+  .delete-confirm
+  :is(.confirm-delete, .cancel-delete):focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: 2px;
+}
+[data-skin='fluent'] .main-window .delete-confirm :is(.confirm-delete, .cancel-delete):disabled {
+  opacity: var(--opacity-control-disabled);
+  cursor: default;
+}
+[data-skin='fluent'] .main-window .settings-view [role='status'] {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--fluent-status-border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--fluent-status-surface);
+  color: var(--text);
+}
+[data-skin='fluent'] .main-window .settings-view [role='status']::before {
+  content: 'i';
+  display: grid;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 50%;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+[data-skin='fluent'] .main-window .settings-view .settings-feedback > [role='status'] {
+  width: 100%;
+}
+[data-skin='fluent'] :is(.archive-dialog, .staging-cleanup-dialog) [role='status'] {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--fluent-status-border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--fluent-status-surface);
+  color: var(--text);
+}
+[data-skin='fluent'] .main-window .group-sidebar > .error[role='alert'] {
+  margin: 8px 10px;
+}
+@media (forced-colors: active) {
+  [data-skin='fluent']
+    :is(.main-window, .archive-dialog, .staging-cleanup-dialog, .floating-preview)
+    .error[role='alert'],
+  [data-skin='fluent'] .main-window .delete-confirm[role='alertdialog'],
+  [data-skin='fluent'] :is(.archive-dialog, .staging-cleanup-dialog) [role='status'],
+  [data-skin='fluent'] .main-window .settings-view [role='status'] {
+    border-color: Highlight;
+    background: Canvas;
+    color: CanvasText;
+    forced-color-adjust: auto;
+  }
+  [data-skin='fluent']
+    :is(.main-window, .archive-dialog, .staging-cleanup-dialog, .floating-preview)
+    .error[role='alert']::before,
+  [data-skin='fluent'] .main-window .delete-confirm[role='alertdialog']::before {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  [data-skin='fluent'] .main-window .delete-confirm .confirm-delete {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
   }
 }
 @media (prefers-reduced-transparency: reduce) {

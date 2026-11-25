@@ -2,11 +2,11 @@ use super::{change_main_hotkey, check_hotkeys, refresh, State};
 use crate::{
     diag, hook,
     owner_flush::CaptureContext,
-    settings::Settings,
+    settings::{compile_content_rules, CompiledContentRules, Settings},
     storage::{RetentionPolicy, Storage},
 };
 use anyhow::{anyhow, Result};
-use std::sync::{atomic::Ordering, MutexGuard};
+use std::sync::{atomic::Ordering, MutexGuard, RwLockWriteGuard};
 use tauri::{AppHandle, Emitter};
 
 struct SystemChange<'a> {
@@ -19,6 +19,7 @@ struct SystemChange<'a> {
 
 struct StoredUpdate<'a> {
     // 策略锁须覆盖存储清理及上下文更新；字段按此顺序释放 guard。
+    _content_rules: RwLockWriteGuard<'a, CompiledContentRules>,
     storage: MutexGuard<'a, Storage>,
     context: MutexGuard<'a, Option<CaptureContext>>,
     policy: MutexGuard<'a, RetentionPolicy>,
@@ -34,6 +35,7 @@ pub(super) fn apply_settings(
         return Err(anyhow!("请先结束快捷键录制"));
     }
     let next = next.normalized()?;
+    let compiled_rules = compile_content_rules(&next.content_ignore_rules)?;
     let _change = super::history_gate::begin(state)?;
     let mut current = state
         .settings
@@ -46,7 +48,7 @@ pub(super) fn apply_settings(
     let change = SystemChange::new(state, &current, &next, &startup);
     let reservation = change.reserve(panel_visible)?;
     change.apply(app, &mut startup)?;
-    let mut stored = match StoredUpdate::save(state, &next) {
+    let mut stored = match StoredUpdate::save(state, &next, compiled_rules) {
         Ok(stored) => stored,
         Err(error) => return Err(change.rollback(app, &mut startup, error)),
     };
@@ -149,7 +151,11 @@ impl<'a> SystemChange<'a> {
 }
 
 impl StoredUpdate<'_> {
-    fn save<'a>(state: &'a State, next: &Settings) -> Result<StoredUpdate<'a>> {
+    fn save<'a>(
+        state: &'a State,
+        next: &Settings,
+        compiled_rules: CompiledContentRules,
+    ) -> Result<StoredUpdate<'a>> {
         // 与 worker 清理保持同序；任何获取/保存错误均交给外层回滚系统设置。
         let policy = state
             .retention_policy
@@ -160,8 +166,14 @@ impl StoredUpdate<'_> {
             .lock()
             .map_err(|_| anyhow!("采集上下文不可用"))?;
         let mut storage = state.storage.lock().map_err(|_| anyhow!("存储不可用"))?;
+        let mut content_rules = state
+            .content_rules
+            .write()
+            .map_err(|_| anyhow!("忽略内容规则不可用"))?;
         storage.save_settings(next)?;
+        *content_rules = compiled_rules;
         Ok(StoredUpdate {
+            _content_rules: content_rules,
             policy,
             context,
             storage,

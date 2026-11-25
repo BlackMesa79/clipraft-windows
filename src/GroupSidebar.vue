@@ -187,7 +187,8 @@ async function remove() {
           >删除“{{ pending?.name }}”？组内
           {{ pending?.count ?? 0 }} 条记录会回到未分组，不会删除记录。</span
         >
-        <button type="button" :disabled="saving || disabled" @click="remove">确认删除分组</button
+        <button type="button" class="confirm-delete" :disabled="saving || disabled" @click="remove"
+          >确认删除分组</button
         ><button type="button" :disabled="saving" @click="cancel">取消</button>
       </div>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
