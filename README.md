@@ -4,8 +4,8 @@
   <p><strong>ClipRaft · 你的内容，随时可用。</strong></p>
   <p>Windows 剪贴板管理器 · 快速粘贴 · 多格式历史 · 本地加密</p>
   <p>
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.2/ClipRaft-0.8.2-windows-x64.zip"><strong>下载 0.8.2 · Windows x64</strong></a> ·
-    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.2">发布说明</a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.9.0/ClipRaft-0.9.0-windows-x64.zip"><strong>下载 0.9.0 · Windows x64</strong></a> ·
+    <a href="https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.9.0">发布说明</a> ·
     <a href="https://github.com/BlackMesa79/clipraft-windows/issues">问题反馈</a>
   </p>
   <p>
@@ -87,6 +87,8 @@ Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持�
 
 文件记录依赖原文件仍在对应路径；富文本、图片和文件的粘贴效果取决于目标应用支持的格式。
 
+在主面板按住 **Ctrl** 点选多条记录。右键可把多条文本合并为一段，或按 **Ctrl+Enter** 将图片、文本和文件按选择顺序依次粘贴。切换分组、类型或搜索时仍保留已选记录。
+
 ### 🔎 找得快，也整理得好
 
 - **关键词与拼音搜索**：用文本、文件名、全拼或拼音首字母查找历史。
@@ -115,7 +117,7 @@ Fluent 主题采用 Windows 11 风格的表面、控件和转场效果，支持�
 
 ## 快速上手
 
-> **0.8.2** 已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.8.2/ClipRaft-0.8.2-windows-x64.zip) · [发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.2)。
+> **0.9.0** 已开放下载：[Windows x64 ZIP](https://github.com/BlackMesa79/clipraft-windows/releases/download/v0.9.0/ClipRaft-0.9.0-windows-x64.zip) · [发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.9.0)。
 
 **运行环境：** Windows x64，需要 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。当前以 Windows 11 为主要验证环境，Windows 10 兼容性仍待进一步验证。
 

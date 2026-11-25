@@ -20,6 +20,56 @@ fn paste_load_rejects_expired_or_deleted_id_before_reading_formats() {
 }
 
 #[test]
+fn selected_items_keep_request_order_across_filters_and_skip_expired_rows() {
+    let store = storage(20);
+    store
+        .conn
+        .execute("UPDATE items SET expires_at=0 WHERE id='id-0010'", [])
+        .unwrap();
+    let ids: Vec<String> = (0..20)
+        .rev()
+        .map(|index| format!("id-{index:04}"))
+        .collect();
+    let actual = store.items_by_id(ids.iter().map(String::as_str)).unwrap();
+    let expected: Vec<&str> = ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| *id != "id-0010")
+        .collect();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn merged_paste_touches_all_selected_records_or_rolls_back() {
+    let mut store = storage(3);
+    let ids: [String; 2] = ["id-0000".into(), "id-0001".into()];
+    assert!(store
+        .touch_many(&[ids[0].clone(), "missing".into()])
+        .is_err());
+    assert_eq!(
+        store.panel_id_order().unwrap(),
+        ["id-0002", "id-0001", "id-0000"]
+    );
+    store.touch_many(&ids).unwrap();
+    assert_eq!(
+        store.panel_id_order().unwrap(),
+        ["id-0001", "id-0000", "id-0002"]
+    );
+    let views = store
+        .panel_items(&["id-0000", "id-0001", "id-0002"])
+        .unwrap();
+    assert!(views[0].used_at > 0);
+    assert_eq!(views[0].used_at, views[1].used_at);
+    assert_eq!(views[2].used_at, 0);
+}
+
+#[test]
 fn expired_rows_are_excluded_without_waiting_for_physical_cleanup() {
     let store = storage(3);
     store

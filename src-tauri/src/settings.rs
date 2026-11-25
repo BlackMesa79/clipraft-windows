@@ -196,6 +196,16 @@ pub enum MainPosition {
     #[serde(alias = "input")]
     Mouse,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePasteSeparator {
+    #[default]
+    Newline,
+    BlankLine,
+    Space,
+    Tab,
+    Comma,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -216,6 +226,8 @@ pub struct Settings {
     pub select_first_on_show: bool,
     #[serde(default)]
     pub content_ignore_rules: Vec<ContentIgnoreRule>,
+    #[serde(default)]
+    pub merge_paste_separator: MergePasteSeparator,
     #[serde(default)]
     pub main_position: MainPosition,
     pub autostart: bool,
@@ -245,6 +257,7 @@ impl Default for Settings {
             hide_on_blur: false,
             select_first_on_show: false,
             content_ignore_rules: Vec::new(),
+            merge_paste_separator: MergePasteSeparator::Newline,
             main_position: MainPosition::Remember,
             autostart: false,
             pause_on_start: false,

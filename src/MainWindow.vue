@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
@@ -26,7 +26,12 @@ import ContextMenu from './ContextMenu.vue';
 import GroupSidebar from './GroupSidebar.vue';
 import UiIcon from './UiIcon.vue';
 import { groupColorStyle } from './groupColors';
-import { cycleFilter, panelNavigation, type PanelNavigation } from './mainKeyboard';
+import {
+  cycleFilter,
+  isSequencePasteShortcut,
+  panelNavigation,
+  type PanelNavigation,
+} from './mainKeyboard';
 import { brandName } from './brand';
 import brandIcon from './assets/brand.svg?inline';
 import {
@@ -226,7 +231,22 @@ const mutationBusy = ref(false),
   groupInteracting = ref(false),
   groupMenuOpen = ref(false);
 const organizing = computed(() => mutationBusy.value || groupInteracting.value);
-const selectedItems = computed(() => items.value.filter((item) => selectedIds.value.has(item.id)));
+const selectedItems = computed(() => {
+  const selection = explicitSelection.value;
+  if (selection) return [...selection.values()];
+  return active.value ? [active.value] : [];
+});
+const selectedIds = computed(() => new Set(selectedItems.value.map((item) => item.id)));
+const hiddenSelectionCount = computed(
+  () =>
+    selectedIds.value.size - items.value.filter((item) => selectedIds.value.has(item.id)).length,
+);
+const mergeBlockedCount = computed(
+  () =>
+    selectedItems.value.filter(
+      (item) => item.kind !== 'text' || !item.formats.includes('CF_UNICODETEXT'),
+    ).length,
+);
 const allPinned = computed(
   () => selectedItems.value.length > 0 && selectedItems.value.every((item) => item.pinned),
 );
@@ -235,7 +255,7 @@ const allSensitive = computed(
 );
 const protectedDeleteCount = computed(
   () =>
-    items.value.filter(
+    selectedItems.value.filter(
       (item) =>
         pendingDelete.value?.includes(item.id) &&
         (item.pinned || item.favorite || item.group_id != null),
@@ -328,7 +348,7 @@ function filtersChanged(delay = 150) {
   contextMenu.value = null;
   pendingDelete.value = null;
   items.value = [];
-  selectOnly(0);
+  setActiveIndex(0);
   nextOffset = 0;
   hasMore.value = true;
   pageError.value = '';
@@ -362,7 +382,7 @@ let listGeneration = 0,
   nextOffset = 0,
   retryRefresh = false;
 let navigationGeneration = 0;
-const selectedIds = ref(new Set<string>()),
+const explicitSelection = shallowRef<Map<string, Item> | null>(null),
   pendingDelete = ref<string[] | null>(null),
   deleting = ref(false);
 const contextMenu = ref<{ x: number; y: number; id: string } | null>(null);
@@ -370,35 +390,38 @@ const menuInteracting = computed(() => groupMenuOpen.value || contextMenu.value 
 let anchorId: string | undefined,
   deferredHistory = false;
 let afterDelete: { index: number; id?: string; count: number } | undefined;
-function selectOnly(index: number) {
+function setActiveIndex(index: number) {
   selected.value = index;
   anchorId = items.value[index]?.id;
-  selectedIds.value = new Set(anchorId ? [anchorId] : []);
+}
+function selectOnly(index: number) {
+  setActiveIndex(index);
+  explicitSelection.value = null;
+}
+function recordsById(records: readonly Item[]): Map<string, Item> {
+  return new Map(records.map((item) => [item.id, item]));
+}
+function chooseRange(index: number, append: boolean): void {
+  const anchorIndex = items.value.findIndex((item) => item.id === anchorId);
+  const anchor = anchorIndex >= 0 ? anchorIndex : selected.value;
+  const range = items.value.slice(Math.min(anchor, index), Math.max(anchor, index) + 1);
+  explicitSelection.value = recordsById(append ? [...selectedItems.value, ...range] : range);
+  selected.value = index;
 }
 function choose(index: number, event: MouseEvent) {
   ++navigationGeneration;
   resetOnShow = false;
   if (deleting.value || organizing.value || pendingDelete.value) return;
   contextMenu.value = null;
-  const id = items.value[index]?.id;
-  if (!id) return;
+  const item = items.value[index];
+  if (!item) return;
   if (event.shiftKey) {
-    const anchor = Math.max(
-      0,
-      items.value.findIndex((item) => item.id === anchorId),
-    );
-    const range = items.value
-      .slice(Math.min(anchor, index), Math.max(anchor, index) + 1)
-      .map((item) => item.id);
-    selectedIds.value = new Set(event.ctrlKey ? [...selectedIds.value, ...range] : range);
-    selected.value = index;
+    chooseRange(index, event.ctrlKey);
   } else if (event.ctrlKey) {
-    const ids = new Set(selectedIds.value);
-    if (ids.has(id)) ids.delete(id);
-    else ids.add(id);
-    selectedIds.value = ids;
-    selected.value = index;
-    anchorId = id;
+    const selection = recordsById(selectedItems.value);
+    if (!selection.delete(item.id)) selection.set(item.id, item);
+    explicitSelection.value = selection;
+    setActiveIndex(index);
   } else selectOnly(index);
 }
 function openContext(index: number, event: MouseEvent) {
@@ -413,7 +436,7 @@ function openContext(index: number, event: MouseEvent) {
 function requestDelete() {
   if (deleting.value || organizing.value || busy.value || pendingDelete.value) return;
   contextMenu.value = null;
-  const ids = items.value.filter((item) => selectedIds.value.has(item.id)).map((item) => item.id);
+  const ids = [...selectedIds.value];
   if (ids.length > 1) pendingDelete.value = ids;
   else if (ids.length === 1) void performDelete(ids);
 }
@@ -437,6 +460,7 @@ async function performDelete(ids: string[]) {
   invalidateDetail();
   try {
     const report = await invoke<DeleteReport>('delete_items', { ids });
+    explicitSelection.value = null;
     afterDelete = position;
     if (report.failed_blobs.length || report.maintenance_errors.length)
       error.value =
@@ -476,6 +500,19 @@ function historyChanged() {
 function contextPaste() {
   contextMenu.value = null;
   void paste(false);
+}
+
+async function contextMergePaste(separator: Settings['merge_paste_separator']) {
+  contextMenu.value = null;
+  if (selectedIds.value.size < 2 || mergeBlockedCount.value || pasteBlocked.value) return;
+  const ids = [...selectedIds.value];
+  await runPaste('paste_merged', { ids, separator });
+}
+
+async function pasteSequence(): Promise<void> {
+  contextMenu.value = null;
+  if (selectedIds.value.size < 2 || pasteBlocked.value) return;
+  await runPaste('paste_sequence', { ids: [...selectedIds.value] });
 }
 
 function checkLoadMore() {
@@ -625,23 +662,23 @@ async function refreshPages(
   }
   return { refreshed, more };
 }
-interface SelectionRestore {
-  id?: string;
-  oldIndex: number;
-  deletion?: DeletionPosition;
-}
-function restoreRefreshedSelection(refreshed: Item[], position: SelectionRestore): void {
-  const { id, oldIndex, deletion } = position;
-  const previousSelection = selectedIds.value;
-  const unique = new Map(refreshed.map((item) => [item.id, item]));
-  items.value = [...unique.values()];
+function restoreActiveRecord(refreshed: Item[], id: string | undefined, oldIndex: number): void {
+  items.value = [...recordsById(refreshed).values()];
   const found = items.value.findIndex((item) => item.id === id);
   selected.value = found >= 0 ? found : Math.max(0, Math.min(oldIndex, items.value.length - 1));
-  if (deletion || !id || found < 0) selectOnly(selected.value);
-  else
-    selectedIds.value = new Set(
-      items.value.filter((item) => previousSelection.has(item.id)).map((item) => item.id),
-    );
+  if (!items.value.some((item) => item.id === anchorId)) anchorId = active.value?.id;
+}
+async function refreshExplicitSelection(generation: number): Promise<void> {
+  const selection = explicitSelection.value;
+  if (!selection?.size) return;
+  try {
+    const records = await invoke<Item[]>('selected_items', { ids: [...selection.keys()] });
+    if (generation !== listGeneration || explicitSelection.value !== selection) return;
+    explicitSelection.value = records.length ? recordsById(records) : null;
+  } catch (failure) {
+    if (generation === listGeneration && explicitSelection.value === selection)
+      error.value = '多选记录刷新失败：' + String(failure);
+  }
 }
 function refreshSelectionPosition(deletion: DeletionPosition | undefined): {
   resetSelection: boolean;
@@ -661,9 +698,8 @@ function applyRefreshedPage(
   const { refreshed, more } = result;
   const { resetSelection, id, oldIndex } = refreshSelectionPosition(deletion);
   resetOnShow = false;
-  restoreRefreshedSelection(refreshed, { id, oldIndex, deletion });
+  restoreActiveRecord(refreshed, id, oldIndex);
   if (afterDelete === deletion) afterDelete = undefined;
-  if (!items.value.some((item) => item.id === anchorId)) anchorId = active.value?.id;
   nextOffset = refreshed.length;
   hasMore.value = more;
   if (id === active.value?.id) void loadDetail();
@@ -685,7 +721,10 @@ async function load() {
   pageLoading.value = true;
   pageError.value = '';
   try {
-    const result = await refreshPages(generation, targetCount, deletion);
+    const [result] = await Promise.all([
+      refreshPages(generation, targetCount, deletion),
+      refreshExplicitSelection(generation),
+    ]);
     if (!result || generation !== listGeneration) return;
     const resetSelection = applyRefreshedPage(result, deletion);
     await restoreRefreshScroll(generation, resetSelection ? 0 : scrollTop);
@@ -746,18 +785,26 @@ async function openLink(): Promise<void> {
     fileActionBusy.value = false;
   }
 }
-async function paste(plain = false) {
-  if (!active.value || busy.value || deleting.value || organizing.value || pendingDelete.value)
-    return;
+const pasteBlocked = computed(
+  () => busy.value || deleting.value || organizing.value || pendingDelete.value !== null,
+);
+async function runPaste(
+  command: 'paste_item' | 'paste_merged' | 'paste_sequence',
+  args: Record<string, unknown>,
+) {
   busy.value = true;
   error.value = '';
   try {
-    await invoke('paste_item', { id: active.value.id, plain });
+    await invoke(command, args);
   } catch (e) {
     error.value = String(e);
   } finally {
     busy.value = false;
   }
+}
+async function paste(plain = false) {
+  if (!active.value || pasteBlocked.value) return;
+  await runPaste('paste_item', { id: active.value.id, plain });
 }
 function selectFocusedRecord(target: Element | null): void {
   const row = target?.closest<HTMLElement>('.list .item[data-id]');
@@ -765,11 +812,11 @@ function selectFocusedRecord(target: Element | null): void {
     const index = items.value.findIndex((item) => item.id === row.dataset.id);
     if (index >= 0 && index !== selected.value) {
       resetOnShow = false;
-      selectOnly(index);
+      setActiveIndex(index);
     }
   }
 }
-function prepareEnterTarget(event: KeyboardEvent): boolean {
+function isRecordEnterTarget(event: KeyboardEvent): boolean {
   const target = event.target instanceof Element ? event.target : document.activeElement;
   if (
     target?.closest(
@@ -779,7 +826,6 @@ function prepareEnterTarget(event: KeyboardEvent): boolean {
     return false;
   const inSearch = target === searchInput.value;
   const inList = !!target?.closest('.list');
-  selectFocusedRecord(target);
   const noFocus = !target || target === document.body || target === document.documentElement;
   if (!inSearch && !inList && !noFocus) return false;
   return true;
@@ -846,7 +892,8 @@ async function recordKeydown(event: KeyboardEvent): Promise<void> {
   if (organizing.value) return;
   // 保留工具按钮的原生激活；记录按钮的 Enter 属于记录粘贴协议。
   if (event.key === ' ') return;
-  if (event.key === 'Enter' && !prepareEnterTarget(event)) return;
+  if (event.key === 'Enter' && !isSequencePasteShortcut(event) && !isRecordEnterTarget(event))
+    return;
   if (pendingDelete.value) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -883,7 +930,7 @@ async function moveToIndex(index: number, sequence: number, generation: number):
     if (pageError.value || previousLength === items.value.length) return;
   }
   if (!navigationIsCurrent(sequence, generation) || !items.value.length) return;
-  selectOnly(Math.max(0, Math.min(index, items.value.length - 1)));
+  setActiveIndex(Math.max(0, Math.min(index, items.value.length - 1)));
 }
 function navigationIsCurrent(sequence: number, generation: number): boolean {
   return generation === listGeneration && sequence === navigationGeneration;
@@ -897,7 +944,7 @@ async function loadLastRecord(sequence: number, generation: number): Promise<voi
     if (pageError.value || previousLength === items.value.length) break;
   }
   if (navigationIsCurrent(sequence, generation) && items.value.length)
-    selectOnly(items.value.length - 1);
+    setActiveIndex(items.value.length - 1);
 }
 async function navigateRecords(event: KeyboardEvent, action: PanelNavigation): Promise<void> {
   event.preventDefault();
@@ -998,6 +1045,11 @@ function navigatePanel(event: KeyboardEvent): boolean {
 function pasteFromKeyboard(event: KeyboardEvent): void {
   if (contextMenu.value) return;
   event.preventDefault();
+  if (isSequencePasteShortcut(event)) {
+    if (!event.repeat) void pasteSequence();
+    return;
+  }
+  selectFocusedRecord(event.target instanceof Element ? event.target : document.activeElement);
   void paste(event.shiftKey);
 }
 function escapeRecords(event: KeyboardEvent): void {
@@ -1035,7 +1087,7 @@ async function dispatchRecordAction(event: KeyboardEvent): Promise<void> {
   if (event.ctrlKey && event.key.toLowerCase() === 'a') {
     if (inSearch) return;
     event.preventDefault();
-    selectedIds.value = new Set(items.value.map((item) => item.id));
+    explicitSelection.value = recordsById(items.value);
     contextMenu.value = null;
     return;
   }
@@ -1292,6 +1344,9 @@ onUnmounted(() => {
               > </div
             ><span class="count">已加载 {{ items.length }} 条</span></div
           >
+          <p v-if="hiddenSelectionCount" class="selection-count" role="status"
+            >已选 {{ selectedIds.size }} 条，其中 {{ hiddenSelectionCount }} 条未显示</p
+          >
         </div>
 
         <div v-if="!settingsOpen && groupError" class="error" role="alert"
@@ -1355,6 +1410,9 @@ onUnmounted(() => {
           :files="active?.kind === 'files' && !active.sensitive ? active.files : undefined"
           :can-open-link="canOpenLink && selectedIds.size === 1"
           :link-busy="!!fileActionBlocked"
+          :selected-count="selectedIds.size"
+          :merge-blocked-count="mergeBlockedCount"
+          :merge-separator="settings?.merge_paste_separator"
           @open-link="openLink"
           @open-file="runFileAction('open', $event)"
           @reveal-file="runFileAction('reveal', $event)"
@@ -1364,6 +1422,8 @@ onUnmounted(() => {
           @move="changeItems('move_to_group', $event)"
           @delete="requestDelete"
           @paste="contextPaste"
+          @merge-paste="contextMergePaste"
+          @paste-sequence="pasteSequence"
           @close="contextMenu = null"
         />
         <section v-if="!settingsOpen && !items.length" ref="emptyState" tabindex="-1" class="empty"
@@ -1580,8 +1640,15 @@ onUnmounted(() => {
         /></span>
       </button>
       <span v-else>本地加密保存</span>
-      <span class="keyboard-hint" title="↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴"
-        >↑↓ 选择 · ←→ 类型 · Ctrl+↑↓ 分组 · Enter 粘贴</span
+      <span
+        class="keyboard-hint"
+        :title="
+          '↑↓ 选择记录；←→ 切换类型；Ctrl+↑↓ 切换分组；Enter 粘贴' +
+          (compact ? '' : '；Shift+Enter 粘贴纯文本；Ctrl+Enter 依次粘贴')
+        "
+        >↑↓ 选择 · ←→ 类型 · Ctrl+↑↓ 分组 · Enter 粘贴<span v-if="!compact">
+          <span> · Shift+Enter 粘贴纯文本</span><span> · Ctrl+Enter 依次粘贴</span></span
+        ></span
       >
       <button
         v-if="compact"

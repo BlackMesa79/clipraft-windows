@@ -1,8 +1,16 @@
 use super::Storage;
-use crate::settings::Settings;
+use crate::settings::{MergePasteSeparator, Settings};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 impl Storage {
+    pub(crate) fn save_merge_paste_separator(&self, separator: MergePasteSeparator) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO settings(key,value) VALUES('merge_paste_separator',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [serde_json::to_string(&separator)?],
+        )?;
+        Ok(())
+    }
+
     pub fn load_settings(&self) -> Result<Settings> {
         let mut query = self
             .conn

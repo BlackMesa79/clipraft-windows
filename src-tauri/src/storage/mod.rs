@@ -455,14 +455,7 @@ impl Storage {
     }
     /// 只更新已有记录的顺序；不加载格式、不哈希内容、不重写加密对象。
     pub fn touch(&self, id: &str) -> Result<()> {
-        let changed = self.conn.execute(
-            "UPDATE items SET touched=(SELECT COALESCE(MAX(touched),0)+1 FROM items),used_at=?2 WHERE id=?1",
-            params![id, unix_millis()],
-        )?;
-        if changed == 0 {
-            bail!("记录不存在");
-        }
-        Ok(())
+        touch_item(&self.conn, id, unix_millis())
     }
     pub fn load(&self, id: &str) -> Result<Clip> {
         let mut stmt = self
@@ -491,6 +484,17 @@ impl Storage {
         Ok(clip)
     }
 }
+fn touch_item(conn: &Connection, id: &str, used_at: i64) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE items SET touched=(SELECT COALESCE(MAX(touched),0)+1 FROM items),used_at=?2 WHERE id=?1",
+        params![id, used_at],
+    )?;
+    if changed == 0 {
+        bail!("记录不存在");
+    }
+    Ok(())
+}
+
 pub(super) fn unix_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

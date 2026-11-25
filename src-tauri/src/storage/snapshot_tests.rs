@@ -225,6 +225,7 @@ fn portable_snapshot_filters_settings_without_changing_source_or_raw_backup() {
     let settings = crate::settings::Settings {
         autostart: true,
         auto_check_updates: true,
+        merge_paste_separator: crate::settings::MergePasteSeparator::Tab,
         content_ignore_rules: vec![crate::settings::ContentIgnoreRule {
             mode: crate::settings::ContentIgnoreMode::Keyword,
             value: "private marker".into(),

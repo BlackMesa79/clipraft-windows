@@ -8,6 +8,7 @@ pub(crate) mod history_gate;
 mod history_index;
 mod main_window;
 mod maintenance;
+mod merge_paste;
 mod panel_controller;
 mod paste_job;
 mod settings_update;
@@ -125,6 +126,13 @@ static CAPTURE_PENDING: AtomicBool = AtomicBool::new(false);
 use clipboard::LAST_SEQUENCE;
 static LAST_EXTERNAL: AtomicIsize = AtomicIsize::new(0);
 static PASTE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PASTE_ESCAPE_REVISION: AtomicU64 = AtomicU64::new(0);
+pub(crate) fn record_paste_escape() {
+    PASTE_ESCAPE_REVISION.fetch_add(1, Ordering::Release);
+}
+pub(crate) fn paste_escape_revision() -> u64 {
+    PASTE_ESCAPE_REVISION.load(Ordering::Acquire)
+}
 pub fn paste_generation() -> u64 {
     PASTE_GENERATION.load(Ordering::Acquire)
 }
@@ -133,14 +141,28 @@ pub fn new_paste_intent() -> u64 {
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1)
 }
-pub enum Job {
+pub(crate) enum Job {
     Capture,
+    PasteSequence {
+        ids: Vec<String>,
+        target: isize,
+        generation: u64,
+        escape_revision: u64,
+    },
     Paste {
-        id: String,
+        content: PasteContent,
         target: isize,
         restore: bool,
         plain: bool,
         generation: u64,
+    },
+}
+pub(crate) const MAX_PASTE_SEQUENCE_ITEMS: usize = 50;
+pub(crate) enum PasteContent {
+    Item(String),
+    Merged {
+        ids: Vec<String>,
+        separator: crate::settings::MergePasteSeparator,
     },
 }
 pub enum Control {

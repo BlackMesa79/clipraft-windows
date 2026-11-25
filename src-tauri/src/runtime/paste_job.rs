@@ -1,11 +1,13 @@
-use super::{refresh, Control, State, LISTENER, PASTE_GENERATION};
+use super::{refresh, Control, PasteContent, State, LISTENER, PASTE_GENERATION};
 use crate::{clipboard, diag, model::Clip, paster, platform};
 use anyhow::{anyhow, Result};
 use std::sync::atomic::Ordering;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
+
+pub(super) mod sequence;
 
 pub(super) struct PasteRequest {
-    pub id: String,
+    pub content: PasteContent,
     pub target: isize,
     pub restore: bool,
     pub plain: bool,
@@ -34,12 +36,17 @@ impl PasteTask<'_> {
     }
 
     fn load(&mut self) -> Result<()> {
-        let loaded = self
+        let storage = self
             .state
             .storage
             .lock()
-            .map_err(|_| anyhow!("存储不可用"))?
-            .load_for_paste(&self.request.id)?;
+            .map_err(|_| anyhow!("存储不可用"))?;
+        let loaded = match &self.request.content {
+            PasteContent::Item(id) => storage.load_for_paste(id)?,
+            PasteContent::Merged { ids, separator } => {
+                super::merge_paste::load(ids, *separator, |id| storage.load_for_paste(id))?
+            }
+        };
         for format in &loaded.formats {
             // 仅输出固定支持格式的名称和大小，不记录内容或记录标识。
             if clipboard::SUPPORTED
@@ -112,15 +119,40 @@ impl PasteTask<'_> {
             paster::PasteStage::Inject => {
                 return paster::inject(self.request.target, &self.intent, self.expected_focus)
             }
-            paster::PasteStage::Touch => self
-                .state
-                .storage
-                .lock()
-                .map_err(|_| anyhow!("存储不可用"))?
-                .touch(&self.request.id)?,
+            paster::PasteStage::Touch => {
+                let mut storage = self
+                    .state
+                    .storage
+                    .lock()
+                    .map_err(|_| anyhow!("存储不可用"))?;
+                match &self.request.content {
+                    PasteContent::Item(id) => storage.touch(id)?,
+                    PasteContent::Merged { ids, .. } => storage.touch_many(ids)?,
+                }
+            }
         }
         Ok(paster::PasteStatus::Complete)
     }
+}
+
+fn remember_separator(app: &AppHandle, state: &State, content: &PasteContent) -> Result<()> {
+    let PasteContent::Merged { separator, .. } = content else {
+        return Ok(());
+    };
+    let mut settings = state.settings.lock().map_err(|_| anyhow!("设置不可用"))?;
+    if settings.merge_paste_separator == *separator {
+        return Ok(());
+    }
+    state
+        .storage
+        .lock()
+        .map_err(|_| anyhow!("存储不可用"))?
+        .save_merge_paste_separator(*separator)?;
+    settings.merge_paste_separator = *separator;
+    let saved = settings.clone();
+    drop(settings);
+    app.emit("settings-changed", &saved)?;
+    Ok(())
 }
 
 pub(super) fn run(app: &AppHandle, state: &State, request: PasteRequest) {
@@ -164,6 +196,7 @@ pub(super) fn run(app: &AppHandle, state: &State, request: PasteRequest) {
     let result = result.and_then(|status| {
         if status == paster::PasteStatus::Complete {
             refresh(app, state)?;
+            remember_separator(app, state, &task.request.content)?;
         }
         Ok(())
     });
@@ -180,7 +213,7 @@ mod tests {
 
     fn request() -> PasteRequest {
         PasteRequest {
-            id: "synthetic".into(),
+            content: PasteContent::Item("synthetic".into()),
             target: 0,
             restore: false,
             plain: false,

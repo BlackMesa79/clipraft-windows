@@ -2,7 +2,8 @@ mod session;
 
 use super::{
     apply_settings, hide_panel, main_window, on_main, paste_generation, paused, platform, publish,
-    update_error, Control, Job, NoticeDeadline, Panel, State, CAPTURE_GATE, LAST_SEQUENCE, PAUSED,
+    update_error, Control, Job, NoticeDeadline, Panel, PasteContent, State, CAPTURE_GATE,
+    LAST_SEQUENCE, PAUSED,
 };
 use crate::{
     diag,
@@ -170,7 +171,7 @@ impl Controller {
             .state
             .jobs
             .try_send(Job::Paste {
-                id,
+                content: PasteContent::Item(id),
                 target: self.target,
                 restore: false,
                 plain: false,

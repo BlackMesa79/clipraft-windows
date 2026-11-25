@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
 const now = ref(Date.now());
 const MAX_DATE_MS = 8_640_000_000_000_000;
 const recordTime = new Intl.DateTimeFormat('zh-CN', {
@@ -53,6 +53,10 @@ const emit = defineEmits<{
   thumbnailLoaded: [];
 }>();
 const element = ref<HTMLElement | null>(null);
+const selectionOrder = computed(() => {
+  if (props.quick || props.selectedIds.size < 2) return new Map<string, number>();
+  return new Map([...props.selectedIds].map((id, index) => [id, index + 1]));
+});
 defineExpose({ element });
 </script>
 
@@ -164,7 +168,15 @@ defineExpose({ element });
         class="record-time"
         >{{ recordTime.format(item.created) }}</time
       >
-      <span v-if="index === selected && (!fluent || selectedIds.size > 1)" class="selected-mark"
+      <span
+        v-if="selectionOrder.has(item.id)"
+        class="selected-mark selection-order"
+        :aria-label="`粘贴顺序 ${selectionOrder.get(item.id)}`"
+        >{{ selectionOrder.get(item.id) }}</span
+      >
+      <span
+        v-else-if="index === selected && (!fluent || selectedIds.size > 1)"
+        class="selected-mark"
         >↵</span
       >
     </button>

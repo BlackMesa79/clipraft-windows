@@ -130,6 +130,7 @@ try {
           }
           window.changed();return result;
         }
+        if(cmd==='selected_items')return args.ids.flatMap(id=>window.rows.filter(row=>row.id===id));
         if(cmd==='list_items'){
           window.calls.push(args);
           if(window.failNext){window.failNext=false;throw Error('合成分页失败');}

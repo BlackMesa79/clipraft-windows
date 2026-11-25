@@ -27,6 +27,11 @@ export function panelNavigation(event: KeyboardEvent): PanelNavigation | undefin
   if (event.shiftKey || event.altKey || event.metaKey) return undefined;
   return (event.ctrlKey ? groupNavigation : plainNavigation)[event.key];
 }
+export function isSequencePasteShortcut(event: KeyboardEvent): boolean {
+  return (
+    event.key === 'Enter' && event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
+  );
+}
 export function cycleFilter<T>(values: readonly T[], current: T, direction: number): T {
   return values[(values.indexOf(current) + direction + values.length) % values.length];
 }

@@ -95,7 +95,7 @@ fn selection_and_commit(harness: &mut Harness) {
     assert!(harness.controller.panel.loading);
     harness.controller.commit(77).unwrap();
     assert!(
-        matches!(harness.jobs.try_recv().unwrap(), Job::Paste { id, generation: 77, .. } if id == harness.ids[240])
+        matches!(harness.jobs.try_recv().unwrap(), Job::Paste { content: PasteContent::Item(id), generation: 77, .. } if id == harness.ids[240])
     );
     harness.controller.commit(77).unwrap();
     assert!(harness.jobs.try_recv().is_err());
@@ -261,7 +261,9 @@ fn failed_views_still_commit(harness: &mut Harness) {
     assert!(harness.controller.panel.items.is_empty());
     let selected = harness.selected_id().to_owned();
     harness.controller.commit(78).unwrap();
-    assert!(matches!(harness.jobs.try_recv().unwrap(), Job::Paste { id, .. } if id == selected));
+    assert!(
+        matches!(harness.jobs.try_recv().unwrap(), Job::Paste { content: PasteContent::Item(id), .. } if id == selected)
+    );
 }
 
 fn index_and_mutation_reject_open(harness: &mut Harness) {

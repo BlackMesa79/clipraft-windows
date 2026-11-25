@@ -18,6 +18,7 @@ const PORTABLE_SETTINGS: &[&str] = &[
     "hide_on_blur",
     "select_first_on_show",
     "content_ignore_rules",
+    "merge_paste_separator",
     "main_position",
     "pause_on_start",
     "max_items",

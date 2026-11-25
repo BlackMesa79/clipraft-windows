@@ -1,5 +1,5 @@
 //! 快速面板的全量 ID 索引与有界安全视图；不读取 formats 或 blob。
-use super::{item_view, unix_millis, Storage};
+use super::{item_view, touch_item, unix_millis, Storage};
 use crate::{model::ItemView, panel_session::MAX_NEIGHBORHOOD_ITEMS};
 use anyhow::{bail, Result};
 use rusqlite::OptionalExtension;
@@ -41,6 +41,14 @@ impl Storage {
         if ids.len() > MAX_NEIGHBORHOOD_ITEMS {
             bail!("快速面板邻域不能超过 {MAX_NEIGHBORHOOD_ITEMS} 条");
         }
+        self.items_by_id(ids.iter().copied())
+    }
+
+    /// 主面板多选跨筛选保留，按 ID 刷新安全视图并剔除已删除或到期的记录。
+    pub(crate) fn items_by_id<'a>(
+        &self,
+        ids: impl ExactSizeIterator<Item = &'a str>,
+    ) -> Result<Vec<ItemView>> {
         let mut items = Vec::with_capacity(ids.len());
         let now = unix_millis();
         let mut statement = self.conn.prepare_cached("SELECT view,id,kind,created,used_at,size,pinned,favorite,group_id,source_exe,source_title,sensitive,expires_at,thumbnail,preview,is_link FROM items WHERE id=?1 AND (expires_at IS NULL OR expires_at>?2)")?;
@@ -64,5 +72,15 @@ impl Storage {
             bail!("记录已删除或到期，请重新选择");
         }
         self.load(id)
+    }
+
+    pub(crate) fn touch_many(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let now = unix_millis();
+        for id in ids {
+            touch_item(&tx, id, now)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }

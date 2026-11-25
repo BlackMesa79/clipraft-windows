@@ -95,6 +95,27 @@ async fn list_items(
     .map_err(|_| "历史列表任务失败")?
 }
 #[tauri::command]
+async fn selected_items(
+    ids: Vec<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<Vec<model::ItemView>, String> {
+    if window.label() != "main" {
+        return Err("仅主窗口可以读取多选记录".into());
+    }
+    let shared = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        shared
+            .storage
+            .lock()
+            .map_err(|_| "存储不可用")?
+            .items_by_id(ids.iter().map(String::as_str))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "多选记录读取任务失败")?
+}
+#[tauri::command]
 async fn delete_items(
     ids: Vec<String>,
     window: tauri::WebviewWindow,
@@ -560,10 +581,65 @@ fn paste_item(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<State>>,
 ) -> Result<(), String> {
+    start_main_paste(window, state, |target, generation| Job::Paste {
+        content: runtime::PasteContent::Item(id),
+        target,
+        restore: true,
+        plain,
+        generation,
+    })
+}
+#[tauri::command]
+fn paste_merged(
+    ids: Vec<String>,
+    separator: settings::MergePasteSeparator,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), String> {
+    validate_paste_ids(&ids)?;
+    start_main_paste(window, state, |target, generation| Job::Paste {
+        content: runtime::PasteContent::Merged { ids, separator },
+        target,
+        restore: true,
+        plain: false,
+        generation,
+    })
+}
+#[tauri::command]
+fn paste_sequence(
+    ids: Vec<String>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+) -> Result<(), String> {
+    if ids.len() > runtime::MAX_PASTE_SEQUENCE_ITEMS {
+        return Err(format!(
+            "依次粘贴最多选择 {} 条记录",
+            runtime::MAX_PASTE_SEQUENCE_ITEMS
+        ));
+    }
+    validate_paste_ids(&ids)?;
+    let escape_revision = runtime::paste_escape_revision();
+    start_main_paste(window, state, |target, generation| Job::PasteSequence {
+        ids,
+        target,
+        generation,
+        escape_revision,
+    })
+}
+fn validate_paste_ids(ids: &[String]) -> Result<(), String> {
+    if ids.len() < 2 || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+        return Err("请选择至少两条不同的记录".into());
+    }
+    Ok(())
+}
+fn start_main_paste(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<State>>,
+    job: impl FnOnce(isize, u64) -> Job,
+) -> Result<(), String> {
     if window.label() != "main" || state.smoke {
         return Err("此窗口不能执行粘贴".into());
     }
-    let generation = runtime::paste_generation();
     let target = state.target.load(Ordering::Acquire);
     if !platform::valid_external(target) {
         return Err(format!(
@@ -576,22 +652,14 @@ fn paste_item(
                 .label()
         ));
     }
+    let generation = runtime::new_paste_intent();
     window.hide().map_err(|_| "主窗口隐藏失败")?;
     app_events::record("main hidden event failed", window.emit("main-hidden", ()));
     diag::panel(false, false);
-    state
-        .jobs
-        .try_send(Job::Paste {
-            id,
-            target,
-            restore: true,
-            plain,
-            generation,
-        })
-        .map_err(|_| {
-            runtime::report(window.app_handle(), &state, "任务队列繁忙，请重试");
-            "任务队列繁忙，请重试".into()
-        })
+    state.jobs.try_send(job(target, generation)).map_err(|_| {
+        runtime::report(window.app_handle(), &state, "任务队列繁忙，请重试");
+        "任务队列繁忙，请重试".into()
+    })
 }
 #[tauri::command]
 fn hide_main(window: tauri::WebviewWindow, state: tauri::State<'_, Arc<State>>) {
@@ -677,6 +745,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             preview_cleanup,
             startup_error,
             list_items,
+            selected_items,
             delete_items,
             set_pinned,
             list_groups,
@@ -703,6 +772,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             thumbnail_loaded,
             preview_loaded,
             paste_item,
+            paste_merged,
+            paste_sequence,
             hide_main,
             sync_main_layout,
             compact_preview::sync_compact_preview,

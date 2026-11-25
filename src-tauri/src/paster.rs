@@ -156,6 +156,7 @@ pub fn intent_release_decision(current: bool, logical: u16, elapsed: Duration) -
 }
 fn wait_with(
     intent: &PasteIntent<'_>,
+    mut check: impl FnMut() -> Result<()>,
     mut sample: impl FnMut() -> (u16, Duration),
     mut pause: impl FnMut(),
 ) -> Result<PasteStatus> {
@@ -163,6 +164,7 @@ fn wait_with(
         if !intent.is_current() {
             return Ok(PasteStatus::Superseded);
         }
+        check()?;
         let (logical, elapsed) = sample();
         match intent_release_decision(intent.is_current(), logical, elapsed) {
             ReleaseDecision::Ready => return Ok(PasteStatus::Complete),
@@ -173,9 +175,16 @@ fn wait_with(
     }
 }
 pub fn wait_for_release(intent: &PasteIntent<'_>) -> Result<PasteStatus> {
+    wait_for_release_checked(intent, || Ok(()))
+}
+pub(crate) fn wait_for_release_checked(
+    intent: &PasteIntent<'_>,
+    check: impl FnMut() -> Result<()>,
+) -> Result<PasteStatus> {
     let start = Instant::now();
     wait_with(
         intent,
+        check,
         || (logical(), start.elapsed()),
         || thread::sleep(Duration::from_millis(5)),
     )
@@ -204,16 +213,27 @@ impl PasteStage {
 // 两个入口共用这条顺序；闭包隔离系统副作用，测试无需操作键鼠或剪贴板。
 pub fn run_paste(
     intent: &PasteIntent<'_>,
+    step: impl FnMut(PasteStage) -> Result<PasteStatus>,
+) -> Result<PasteStatus> {
+    run_paste_stages(
+        intent,
+        [
+            PasteStage::Load,
+            PasteStage::Write,
+            PasteStage::Wait,
+            PasteStage::Prepare,
+            PasteStage::Inject,
+            PasteStage::Touch,
+        ],
+        step,
+    )
+}
+pub(crate) fn run_paste_stages(
+    intent: &PasteIntent<'_>,
+    stages: impl IntoIterator<Item = PasteStage>,
     mut step: impl FnMut(PasteStage) -> Result<PasteStatus>,
 ) -> Result<PasteStatus> {
-    for stage in [
-        PasteStage::Load,
-        PasteStage::Write,
-        PasteStage::Wait,
-        PasteStage::Prepare,
-        PasteStage::Inject,
-        PasteStage::Touch,
-    ] {
+    for stage in stages {
         // 已发送成功的任务仍应置顶；此前任一阶段过期都立即停止。
         if stage != PasteStage::Touch && !intent.is_current() {
             return Ok(PasteStatus::Superseded);
@@ -266,8 +286,16 @@ pub(crate) fn inject(
     intent: &PasteIntent<'_>,
     restored: Option<focus_restore::Target>,
 ) -> Result<PasteStatus> {
+    inject_checked(target, intent, restored, || Ok(()))
+}
+pub(crate) fn inject_checked(
+    target: isize,
+    intent: &PasteIntent<'_>,
+    restored: Option<focus_restore::Target>,
+    mut check: impl FnMut() -> Result<()>,
+) -> Result<PasteStatus> {
     // 准备焦点期间若又按下修饰键，仍按代号等待；只有真实超时才报错。
-    if wait_for_release(intent)? == PasteStatus::Superseded {
+    if wait_for_release_checked(intent, &mut check)? == PasteStatus::Superseded {
         return Ok(PasteStatus::Superseded);
     }
     if platform::foreground() != target {
@@ -278,6 +306,7 @@ pub(crate) fn inject(
     if let Some(restored) = restored {
         focus_restore::verify(restored)?;
     }
+    check()?;
     // 紧邻系统调用再次检查，避免诊断和焦点采样期间的新 Open 被旧任务越过。
     if !intent.is_current() {
         return Ok(PasteStatus::Superseded);
@@ -391,6 +420,7 @@ mod intent_tests {
         let samples = Cell::new(0);
         let result = wait_with(
             &intent,
+            || Ok(()),
             || {
                 samples.set(samples.get() + 1);
                 (1, Duration::ZERO)
@@ -410,6 +440,7 @@ mod intent_tests {
         let pauses = Cell::new(0);
         let error = wait_with(
             &PasteIntent::new(&generation, 7),
+            || Ok(()),
             || (1, Duration::from_millis(elapsed.get())),
             || {
                 pauses.set(pauses.get() + 1);
@@ -425,6 +456,7 @@ mod intent_tests {
         let generation = AtomicU64::new(7);
         let result = wait_with(
             &PasteIntent::new(&generation, 7),
+            || Ok(()),
             || {
                 generation.store(8, Ordering::Release);
                 (1, Duration::from_secs(1))
@@ -441,6 +473,7 @@ mod intent_tests {
         assert_eq!(
             wait_with(
                 &PasteIntent::new(&generation, 7),
+                || Ok(()),
                 || (u16::from(held.get()), Duration::from_millis(20)),
                 || held.set(false)
             )

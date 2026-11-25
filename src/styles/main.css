@@ -531,6 +531,15 @@
   font-size: var(--font-subtitle-size);
   color: var(--accent);
 }
+.main-window .selection-order {
+  min-width: 1.5em;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  font-size: var(--font-caption-size);
+  text-align: center;
+}
 .type-icon {
   display: grid;
   place-items: center;
@@ -621,6 +630,11 @@
 .main-window .context-menu button:hover:not(:disabled),
 .main-window .context-menu button:focus-visible {
   background: var(--control-hover-bg);
+}
+.main-window .context-menu .merge-paste:disabled {
+  color: var(--muted);
+  background: transparent;
+  cursor: default;
 }
 .main-window .group-badge {
   background: var(--surface);
@@ -1292,6 +1306,12 @@
 .compact .selected-mark {
   display: none;
 }
+.main-window.compact .item > .selection-order {
+  display: block;
+  grid-column: 1;
+  grid-row: 1;
+  place-self: start end;
+}
 .compact .main-statusbar {
   padding: 7px 10px;
   gap: 7px;
@@ -1725,4 +1745,15 @@
   min-width: 0;
   white-space: normal;
   line-height: 1.6;
+}
+.main-window:not(.compact) .keyboard-hint {
+  text-align: right;
+}
+.keyboard-hint > span > span {
+  white-space: nowrap;
+}
+.selection-count {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-caption-size);
 }

@@ -25,6 +25,9 @@ pub(super) unsafe extern "system" fn callback(code: i32, w: WPARAM, l: LPARAM) -
     };
     if !event.injected {
         LAST_HOOK_EVENT_TICK.store(keyboard.time, Ordering::Relaxed);
+        if event.down && event.key == u32::from(VK_ESCAPE.0) {
+            crate::runtime::record_paste_escape();
+        }
     }
     PHYSICAL.store(
         corrected_modifiers(

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import type { Group } from './history';
+import type { Settings } from './settings';
 import { groupColorStyle } from './groupColors';
+import { isSequencePasteShortcut } from './mainKeyboard';
 const props = defineProps<{
   x: number;
   y: number;
@@ -14,10 +16,15 @@ const props = defineProps<{
   canOpenLink?: boolean;
   linkBusy?: boolean;
   fluent?: boolean;
+  selectedCount?: number;
+  mergeBlockedCount?: number;
+  mergeSeparator?: Settings['merge_paste_separator'];
 }>();
-const expanded = ref(false);
+const expanded = ref(false),
+  mergeExpanded = ref(false);
 const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 const moveButton = ref<HTMLButtonElement | null>(null);
+const mergeButton = ref<HTMLButtonElement | null>(null);
 let restoreOnClose = false;
 const emit = defineEmits<{
   delete: [];
@@ -30,10 +37,19 @@ const emit = defineEmits<{
   openFile: [index: number];
   openLink: [];
   revealFile: [index: number];
+  mergePaste: [separator: Settings['merge_paste_separator']];
+  pasteSequence: [];
 }>();
 const root = ref<HTMLElement | null>(null),
   left = ref(props.x),
   top = ref(props.y);
+const mergeSeparators = [
+  { value: 'newline', label: '换行' },
+  { value: 'blank_line', label: '空行' },
+  { value: 'space', label: '空格' },
+  { value: 'tab', label: 'Tab' },
+  { value: 'comma', label: '逗号' },
+] satisfies { value: Settings['merge_paste_separator']; label: string }[];
 function outside(event: PointerEvent) {
   if (!root.value?.contains(event.target as Node)) emit('close');
 }
@@ -46,13 +62,26 @@ function menuItems(menu: Element | null | undefined) {
   ).filter((item) => item.closest('[role="menu"]') === menu);
 }
 async function openSubmenu() {
+  mergeExpanded.value = false;
   expanded.value = true;
   await nextTick();
   menuItems(root.value?.querySelector('.group-submenu'))[0]?.focus();
 }
 function closeSubmenu() {
+  const button = mergeExpanded.value ? mergeButton.value : moveButton.value;
   expanded.value = false;
-  moveButton.value?.focus();
+  mergeExpanded.value = false;
+  button?.focus();
+}
+async function openMergeSubmenu() {
+  expanded.value = false;
+  mergeExpanded.value = true;
+  await nextTick();
+  const options = menuItems(root.value?.querySelector('.merge-submenu'));
+  const current = options.find(
+    (option) => option.dataset.separator === (props.mergeSeparator ?? 'newline'),
+  );
+  (current ?? options[0])?.focus();
 }
 function focusedMenuItem(): HTMLButtonElement | null {
   const focused = document.activeElement;
@@ -79,7 +108,10 @@ const menuKeyActions: Readonly<Record<string, (event: KeyboardEvent) => void>> =
   ArrowDown: () => moveMenuFocus(focusedMenuItem(), 1),
   ArrowUp: () => moveMenuFocus(focusedMenuItem(), -1),
   ArrowRight: () => {
-    if (focusedMenuItem() === moveButton.value) void openSubmenu();
+    const focused = focusedMenuItem();
+    if (!focused || focused.disabled) return;
+    if (focused === moveButton.value) void openSubmenu();
+    if (focused === mergeButton.value) void openMergeSubmenu();
   },
   ArrowLeft: () => {
     const menu = focusedMenuItem()?.closest('[role="menu"]') ?? root.value;
@@ -96,6 +128,10 @@ function keydown(event: KeyboardEvent): void {
   event.stopImmediatePropagation();
   if (event.isComposing || event.keyCode === 229) return;
   event.preventDefault();
+  if (isSequencePasteShortcut(event)) {
+    if (!event.repeat && (props.selectedCount ?? 0) > 1) emit('pasteSequence');
+    return;
+  }
   menuKeyActions[event.key]?.(event);
 }
 async function position() {
@@ -106,7 +142,7 @@ async function position() {
     top.value = Math.max(4, Math.min(props.y, window.innerHeight - box.height - 4));
   }
 }
-watch(expanded, position);
+watch([expanded, mergeExpanded], position);
 onMounted(() => {
   menuItems(root.value)[0]?.focus({ preventScroll: true });
   void position();
@@ -185,6 +221,45 @@ onUnmounted(() => {
           移出分组</button
         >
       </div>
+      <button
+        v-if="selectedCount && selectedCount > 1"
+        ref="mergeButton"
+        class="merge-paste"
+        type="button"
+        role="menuitem"
+        aria-haspopup="menu"
+        :aria-expanded="mergeExpanded"
+        :disabled="!!mergeBlockedCount"
+        @click="mergeExpanded ? closeSubmenu() : openMergeSubmenu()"
+        >{{
+          mergeBlockedCount ? `合并粘贴（含 ${mergeBlockedCount} 条非文本记录）` : '合并粘贴 ▸'
+        }}</button
+      >
+      <div
+        v-if="mergeExpanded"
+        role="menu"
+        aria-label="合并粘贴分隔符"
+        class="group-submenu merge-submenu"
+      >
+        <button
+          v-for="separator in mergeSeparators"
+          :key="separator.value"
+          :data-separator="separator.value"
+          type="button"
+          role="menuitem"
+          @click="emit('mergePaste', separator.value)"
+          >{{ separator.label
+          }}{{ separator.value === (mergeSeparator ?? 'newline') ? '（当前）' : '' }}</button
+        >
+      </div>
+      <button
+        v-if="selectedCount && selectedCount > 1"
+        type="button"
+        role="menuitem"
+        aria-keyshortcuts="Control+Enter"
+        @click="emit('pasteSequence')"
+        >依次粘贴</button
+      >
       <button type="button" role="menuitem" @click="emit('sensitive')">{{
         allSensitive ? '取消敏感标记' : '标记为敏感'
       }}</button>

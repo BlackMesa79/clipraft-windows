@@ -126,6 +126,7 @@ try {
           }
           window.changed();return result;
         }
+        if(cmd==='selected_items')return args.ids.flatMap(id=>window.rows.filter(row=>row.id===id));
         if(cmd==='list_items'){
           window.calls.push(args);
           if(window.failNext){window.failNext=false;throw Error('合成分页失败');}
@@ -446,15 +447,18 @@ try {
   await groupButton('私人 2');
   await count(2);
   await settled();
-  await click(1, { ctrlKey: true });
+  assert.equal((await chosen()).length, 2);
   await context(0);
   await button('移到分组 ▸', '.context-menu button');
   await button('移出分组', '.group-submenu button');
   await mutated(4);
   await count(0);
   assert.equal(await evaluate('window.rows.length'), 250);
-  assert.equal(await evaluate('window.mutations.at(-1).args.groupId'), null);
-  checks.push('分组子菜单不溢出；批量移入/移出后计数、标签与当前视图同步');
+  assert.deepEqual(await evaluate('window.mutations.at(-1).args'), {
+    ids: ['item-2', 'item-4'],
+    groupId: null,
+  });
+  checks.push('分组子菜单不溢出；跨视图保留多选，批量移入/移出后同步计数和标签');
   await fresh();
   assert.equal(await press('p', { ctrlKey: true }), false);
   await mutated(1);

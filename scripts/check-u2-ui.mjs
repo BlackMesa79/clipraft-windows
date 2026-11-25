@@ -135,6 +135,7 @@ try {
         if(cmd==='panel_state'){if(location.search.includes('fail=panel'))throw Error('合成 panel_state 失败');return {items:window.rows,selected:1,visible:true,error:null,serial:0,session:1,position:1,total:window.rows.length,loading:false};}
         if(cmd==='frontend_ready'){window.ready=true;return;}
         if(cmd==='set_hotkey_recording'){if(args.active&&window.holdRecording)await new Promise(resolve=>window.releaseRecording=resolve);return 1;}
+        if(cmd==='selected_items')return args.ids.flatMap(id=>window.rows.filter(row=>row.id===id));
         if(cmd==='list_items'){
           if(window.failList)throw Error('合成列表失败');
           const f=args.filter??{};
@@ -3005,6 +3006,187 @@ try {
     await evaluate("document.querySelector('.item').focus()");
   };
   for (const mode of ['list', 'cards', 'compact']) {
+    await test('BP1 依次粘贴图片、混合记录和 Ctrl+Enter ' + mode, async () => {
+      await k1Setup(mode);
+      await evaluate(
+        `window.rows.push({id:'k1-image-second',kind:'image',summary:'第二张合成图片',formats:['PNG'],files:[]});window.emitEvent('history-changed')`,
+      );
+      await until(
+        () => evaluate("!!document.querySelector('[data-id=k1-image-second]')"),
+        '第二张图片未出现',
+      );
+      const choose = (id, ctrlKey = false) =>
+        evaluate(
+          `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:${ctrlKey}}))`,
+        );
+      const batches = () =>
+        evaluate("window.calls.filter(c=>c.cmd==='paste_sequence').map(c=>c.args.ids)");
+      await choose('k1-image-second');
+      await evaluate("document.querySelector('[data-id=k1-image-second]').focus()");
+      await k1Key('Enter', 2);
+      assert.deepEqual(await batches(), []);
+      await choose('k1-image', true);
+      await k1Key('Enter', 2);
+      assert.deepEqual(await batches(), [['k1-image-second', 'k1-image']]);
+      await choose('k1-link', true);
+      await choose('k1-file', true);
+      await pause(100);
+      await evaluate(
+        "document.querySelector('[data-id=k1-image]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:180,clientY:190}))",
+      );
+      await until(
+        () => evaluate('!!document.querySelector(\'[aria-keyshortcuts="Control+Enter"]\')'),
+        '依次粘贴菜单未打开',
+      );
+      await click('[aria-keyshortcuts="Control+Enter"]');
+      assert.deepEqual(await batches(), [
+        ['k1-image-second', 'k1-image'],
+        ['k1-image-second', 'k1-image', 'k1-link', 'k1-file'],
+      ]);
+      assert.equal(await evaluate("window.calls.filter(c=>c.cmd==='paste_item').length"), 0);
+    });
+    await test('BP1 多选跨分组、类型及搜索并保留原顺序 ' + mode, async () => {
+      await k1Setup(mode);
+      const choose = (id, ctrlKey = false) =>
+        evaluate(
+          `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:${ctrlKey}}))`,
+        );
+      const selectedWithOrder = () =>
+        evaluate(
+          "Object.fromEntries([...document.querySelectorAll('.selection-order')].map(b=>[b.closest('.item').dataset.id,b.textContent]))",
+        );
+      const setSearch = (value) =>
+        evaluate(
+          `(()=>{const input=document.querySelector('.searchbox input');input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('input',{bubbles:true}));input.focus()})()`,
+        );
+      await choose('k1-text-b');
+      await choose('k1-text-a', true);
+      if (mode === 'compact') await change('.compact-groups select', '8');
+      else await click('[data-group-view="8"]');
+      await until(
+        () =>
+          evaluate(
+            "!!document.querySelector('[data-id=k1-image]')&&!document.querySelector('[data-id=k1-text-a]')",
+          ),
+        '分组未切换',
+      );
+      await click('.kind-filters button:nth-child(3)');
+      await until(
+        () => evaluate("!!document.querySelector('[data-id=k1-image]')"),
+        '图片筛选未加载',
+      );
+      await choose('k1-image', true);
+      assert.deepEqual(await selectedWithOrder(), { 'k1-image': '3' });
+      await evaluate(
+        "document.querySelector('[data-id=k1-image]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:180,clientY:190}))",
+      );
+      assert.equal(
+        await evaluate("document.querySelector('[aria-keyshortcuts]').textContent.trim()"),
+        '依次粘贴',
+      );
+      assert(await evaluate("document.querySelector('.merge-paste').disabled"));
+      await k1Key('Escape');
+      await setSearch('不存在的记录');
+      await until(
+        () => evaluate("document.querySelector('.empty h2')?.textContent==='没有匹配的记录'"),
+        '空搜索未完成',
+      );
+      assert(
+        await evaluate(
+          "document.querySelector('.selection-count').textContent.includes('3 条未显示')",
+        ),
+      );
+      await k1Key('Enter', 2);
+      assert.deepEqual(
+        await evaluate("window.calls.filter(c=>c.cmd==='paste_sequence').at(-1).args.ids"),
+        ['k1-text-b', 'k1-text-a', 'k1-image'],
+      );
+      await evaluate(
+        "window.rows=window.rows.filter(i=>i.id!=='k1-text-a');window.emitEvent('history-changed')",
+      );
+      await until(
+        () =>
+          evaluate(
+            "document.querySelector('.selection-count')?.textContent.includes('2 条未显示')",
+          ),
+        '已删除记录仍在选中',
+      );
+      await setSearch('');
+      await click('.kind-filters button:first-child');
+      if (mode === 'compact') await change('.compact-groups select', 'all');
+      else await click('[data-group-view="all"]');
+      await until(
+        () => evaluate("!!document.querySelector('[data-id=k1-text-b]')"),
+        '原列表未恢复',
+      );
+      assert.deepEqual(await selectedWithOrder(), { 'k1-text-b': '1', 'k1-image': '2' });
+      await choose('k1-text-b');
+      assert.deepEqual(await selectedWithOrder(), {});
+    });
+    await test('BP1 合并粘贴顺序、菜单及单条 Enter ' + mode, async () => {
+      await k1Setup(mode);
+      await appearance({ merge_paste_separator: 'tab' });
+      const choose = (id, ctrlKey = false) =>
+        evaluate(
+          `document.querySelector('[data-id="${id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:${ctrlKey}}))`,
+        );
+      const openMenu = () =>
+        evaluate(
+          `document.querySelector('[data-id="k1-link"]').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:180,clientY:190}))`,
+        );
+      const badges = () =>
+        evaluate(
+          `Object.fromEntries([...document.querySelectorAll('.selection-order')].map(b=>[b.closest('.item').dataset.id,b.textContent]))`,
+        );
+      await choose('k1-link');
+      await openMenu();
+      assert.equal(
+        await evaluate("document.querySelector('.context-menu').textContent.includes('合并粘贴')"),
+        false,
+      );
+      await k1Key('Escape');
+      await choose('k1-text-a', true);
+      await choose('k1-image', true);
+      await openMenu();
+      assert(
+        await evaluate(
+          "[...document.querySelectorAll('.context-menu button')].some(b=>b.disabled&&b.textContent.includes('含 1 条非文本记录'))",
+        ),
+      );
+      await k1Key('Escape');
+      await choose('k1-image', true);
+      await choose('k1-text-a', true);
+      await choose('k1-text-a', true);
+      await evaluate("window.rows.reverse();window.emitEvent('history-changed')");
+      await until(
+        () => evaluate("document.querySelector('.item')?.dataset.id==='k1-file'"),
+        '列表未刷新',
+      );
+      assert.deepEqual(await badges(), { 'k1-text-a': '2', 'k1-link': '1' });
+      assert.equal(
+        await evaluate(
+          "[...document.querySelectorAll('.selection-order')].filter(b=>b.getBoundingClientRect().width>0).length",
+        ),
+        2,
+      );
+      await openMenu();
+      await evaluate(
+        "[...document.querySelectorAll('.context-menu button')].find(b=>b.textContent.includes('合并粘贴')).click()",
+      );
+      assert.equal(await evaluate('document.activeElement.dataset.separator'), 'tab');
+      assert.equal(await evaluate("document.querySelectorAll('.merge-submenu button').length"), 5);
+      await click('[data-separator="comma"]');
+      assert.deepEqual(
+        await evaluate("window.calls.filter(c=>c.cmd==='paste_merged').map(c=>c.args)"),
+        [{ ids: ['k1-link', 'k1-text-a'], separator: 'comma' }],
+      );
+      await evaluate('document.querySelector(\'[data-id="k1-link"]\').focus()');
+      await k1Key('Enter');
+      assert.deepEqual(
+        await evaluate("window.calls.filter(c=>c.cmd==='paste_item').map(c=>c.args)"),
+        [{ id: 'k1-link', plain: false }],
+      );
+    });
     await test('K2.1 三布局首尾停止、翻页与跨页 Home/End ' + mode, async () => {
       await k1Setup(mode);
       await evaluate(
@@ -3280,7 +3462,7 @@ try {
       'k1-image',
     );
   });
-  await test('K1 切换清除多选与敏感明文预览', async () => {
+  await test('K1 切换保留多选并清除敏感明文预览', async () => {
     await k1Setup('list');
     await evaluate("window.rows[0].sensitive=true;window.emitEvent('history-changed')");
     await pause(70);
@@ -3308,9 +3490,10 @@ try {
     );
     await k1Key('ArrowDown', 2);
     await pause(45);
-    assert.equal(
-      await evaluate("document.querySelectorAll('.item[aria-selected=true]').length"),
-      1,
+    assert(
+      await evaluate(
+        "document.querySelector('.selection-count')?.textContent.includes('已选 2 条')",
+      ),
     );
     assert.equal(
       await evaluate("document.querySelector('main').textContent.includes('SYNTHETIC_SECRET_RAW')"),
@@ -3405,8 +3588,9 @@ try {
       assert.equal(geometry.divider, '1px');
       assert.notEqual(geometry.background, 'rgba(0, 0, 0, 0)');
       assert.equal(geometry.overflow, false);
-      assert(geometry.hint.trim().endsWith('Enter 粘贴'));
-      assert(!geometry.hint.includes('Shift') && !geometry.hint.includes('Esc'));
+      assert.equal(geometry.hint.includes('Shift+Enter 粘贴纯文本'), mode !== 'compact');
+      assert.equal(geometry.hint.includes('Ctrl+Enter 依次粘贴'), mode !== 'compact');
+      assert(geometry.hint.includes('Enter 粘贴') && !geometry.hint.includes('Esc'));
       assert(
         geometry.hint.includes('Ctrl+↑↓') &&
           geometry.hint.includes('←→') &&

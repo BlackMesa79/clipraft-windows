@@ -109,8 +109,23 @@ pub(super) fn start(app: AppHandle, state: Arc<State>, receiver: Receiver<Job>) 
             while let Ok(job) = receiver.recv() {
                 match job {
                     Job::Capture => capture_job(&app, &state, &mut maintenance),
+                    Job::PasteSequence {
+                        ids,
+                        target,
+                        generation,
+                        escape_revision,
+                    } => paste_job::sequence::run(
+                        &app,
+                        &state,
+                        ids,
+                        paste_job::sequence::Request {
+                            target,
+                            generation,
+                            escape_revision,
+                        },
+                    ),
                     Job::Paste {
-                        id,
+                        content,
                         target,
                         restore,
                         plain,
@@ -119,7 +134,7 @@ pub(super) fn start(app: AppHandle, state: Arc<State>, receiver: Receiver<Job>) 
                         &app,
                         &state,
                         PasteRequest {
-                            id,
+                            content,
                             target,
                             restore,
                             plain,

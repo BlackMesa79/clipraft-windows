@@ -10,6 +10,7 @@ export interface Settings {
   hide_on_blur: boolean;
   select_first_on_show: boolean;
   content_ignore_rules: ContentIgnoreRule[];
+  merge_paste_separator: 'newline' | 'blank_line' | 'space' | 'tab' | 'comma';
   main_position: 'remember' | 'mouse';
   autostart: boolean;
   pause_on_start: boolean;
