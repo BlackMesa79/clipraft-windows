@@ -5,7 +5,7 @@
 ## 当前基线
 
 - ClipRaft 是 Windows 剪贴板管理器，使用 Tauri 2、Rust、Vue 3、TypeScript 和 Vite。
-- 当前源码为 `0.8.2`，Release 发布后见 [v0.8.2 发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.2)。
+- 当前源码与正式发布版本均为 `0.8.2`。见 [v0.8.2 发布说明](https://github.com/BlackMesa79/clipraft-windows/releases/tag/v0.8.2)。
 - U8 自定义背景已验收，功能提交 `92a919c` 已随 `v0.8.0` 推送至 `main`。下载入口和更新日志已同步。
 - U7 Fluent 主题已通过用户测试并发布。默认主题显示名为「素笺」，持久化值仍为 `clipraft`，旧设置保持兼容。
 - Fluent 覆盖主面板、紧凑布局、设置页和相关窗口，支持浅深色、背景透出强度与主题化控件。共享开关组件 `src/SettingToggle.vue` 保留默认主题复选框和 Fluent 开关两种呈现。
@@ -92,13 +92,14 @@
 - 根据实机反馈，将普通布局的更新箭头对齐到设置按钮的右内边缘。两套皮肤的浅深配色均通过离屏位置检查，933 项 Rust 测试和 16 组状态及离屏回归通过。右对齐版复测程序位于 `.tools/update-test-v0.6.9-svg-right/`，通过构建和隔离启动。
 - 2026-11-23，用户确认右对齐效果，`0.8.1` 全部通过实机验收并进入正式发布。
 
-## 0.8.2 验收与发布计划
+## 0.8.2 验收与发布记录
 
 - 2026-11-25，用户确认 K2 全部项目实机验收通过。
 - 按验收后反馈移除快速面板纯文本粘贴选项。`0.8.2` 不包含该功能，快速面板继续沿用原始格式提交。
 - Fluent 的错误、确认和状态提示统一为随浅深主题切换的信息条样式，包含删除确认的危险操作按钮及辅助对话框。
-- 发布构建、SHA256 校验、隔离启动和 Release 回执完成后归档于 `.tools/github-v0.8.2/`。
+- Windows x64 ZIP 为 `ClipRaft-0.8.2-windows-x64.zip`，SHA256 为 `129414fd99cd64655b5f8a50aa00e3e7c92637e70941a516fc174f368b11f76f`。隔离启动通过，Release 已设为最新正式版。
+- 发布构建、SHA256 校验、隔离启动和 GitHub Release 回执归档于 `.tools/github-v0.8.2/`。
 
 ## 最近发布基线
 
-0.8.1 沿用 Windows x64 ZIP 解压运行方式。发布构建、回归日志、附件校验和 GitHub 发布回执位于 `.tools/github-v0.8.1/`。0.8.0 的发布记录保留在 `.tools/github-v0.8.0/`。
+0.8.2 沿用 Windows x64 ZIP 解压运行方式。发布构建、回归日志、附件校验和 GitHub 发布回执位于 `.tools/github-v0.8.2/`。0.8.1 与 0.8.0 的发布记录分别保留在 `.tools/github-v0.8.1/` 和 `.tools/github-v0.8.0/`。
