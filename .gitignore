@@ -9,6 +9,7 @@ src-tauri/gen/schemas/
 # Project notes stay local except for handoff documents.
 /docs/*
 !/docs/handoff.md
+!/docs/images/
 !/docs/archive/
 /docs/archive/*
 !/docs/archive/handoff-history-through-2026-11-20.md
